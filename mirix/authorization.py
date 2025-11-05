@@ -16,34 +16,6 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# Permission Mapping - Maps API operations to required permissions
-# ============================================================================
-
-API_PERMISSION_MAP = {
-    # Memory operations
-    "/send_message": ["write"],
-    "/memory/wrap_system_prompt": ["read"],
-    "/memory/retrieve": ["read"],
-    "/memory/episodic": ["read"],
-    "/memory/semantic": ["read"],
-    
-    # User operations
-    "/users/create": ["create"],
-    "/users/list": ["list"],
-    
-    # Search operations
-    "/search": ["search"],
-    
-    # Update operations
-    "/update_memory": ["update"],
-    "/core_memory/update": ["update"],
-    
-    # Delete operations
-    "/memory/delete": ["delete"],
-}
-
-
-# ============================================================================
 # Authorization Context - Stores agent info for request lifecycle
 # ============================================================================
 
@@ -287,62 +259,11 @@ def check_scope_access(agent_scope: str, memory_scope: Optional[str]) -> bool:
 
 
 # ============================================================================
-# Middleware (Alternative to decorator)
-# ============================================================================
-
-class AuthorizationMiddleware:
-    """
-    FastAPI middleware for automatic authorization
-    
-    Usage in main app:
-        app.add_middleware(AuthorizationMiddleware)
-    """
-    
-    def __init__(self, app):
-        self.app = app
-    
-    async def __call__(self, scope, receive, send):
-        if scope["type"] == "http":
-            # Extract path and check if it needs authorization
-            path = scope["path"]
-            
-            if path in API_PERMISSION_MAP:
-                # Get required permissions
-                required_perms = API_PERMISSION_MAP[path]
-                
-                # Extract agent_id from headers
-                headers = dict(scope["headers"])
-                agent_id = headers.get(b"x-agent-id")
-                
-                if not agent_id:
-                    # Return 401 if no agent_id
-                    await send({
-                        "type": "http.response.start",
-                        "status": 401,
-                        "headers": [[b"content-type", b"application/json"]],
-                    })
-                    await send({
-                        "type": "http.response.body",
-                        "body": b'{"error": "X-Agent-ID header required"}',
-                    })
-                    return
-                
-                # Validate agent (simplified - in real implementation, use db)
-                # Store auth context in scope for access in endpoints
-                scope["auth_context"] = {
-                    "agent_id": agent_id.decode(),
-                    "validated": True
-                }
-        
-        await self.app(scope, receive, send)
-
-
-# ============================================================================
 # Example Usage
 # ============================================================================
 
 """
-Example 1: Using decorator in FastAPI endpoint
+Example: Using decorator in FastAPI endpoint
 
 @app.post("/api/chat")
 @require_permissions(["read", "write"])
@@ -368,45 +289,6 @@ async def chat_endpoint(
     )
     
     return {"response": response}
-
-
-Example 2: Manual validation without decorator
-
-@app.post("/api/custom-endpoint")
-async def custom_endpoint(
-    request: Request,
-    agent_id: str = Header(..., alias="X-Agent-ID")
-):
-    from mirix.server.server import db_context
-    
-    with db_context() as db:
-        # Manual validation
-        auth = AgentValidator.validate_agent(
-            db, agent_id, ["read", "write"]
-        )
-        
-        # Use scope
-        print(f"Agent scope: {auth.scope}")
-        
-        # ... your logic ...
-
-
-Example 3: Checking specific permission
-
-@app.post("/api/delete-memory")
-@require_permissions(["delete"])
-async def delete_memory(
-    request: Request,
-    memory_id: str,
-    agent_id: str = Header(..., alias="X-Agent-ID")
-):
-    auth = await get_auth_context(request)
-    
-    # Double-check permission (optional)
-    if not auth.has_permission("delete"):
-        raise HTTPException(403, "Delete permission required")
-    
-    # ... delete logic ...
 """
 
 
