@@ -117,7 +117,7 @@ class Mirix:
             self._agent.set_memory_model(model)
         elif not config_path_provided:
             # No model or config provided - use default model
-            default_model = "gemini-2.0-flash"
+            default_model = "gemini-1.5-pro"  # Changed to use fresh quota
             self._agent.set_model(default_model)
             self._agent.set_memory_model(default_model)
         # If model is None and config_path was provided, use the model specified in the config file (no override needed)
