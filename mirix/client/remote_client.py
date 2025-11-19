@@ -117,6 +117,7 @@ class MirixClient(AbstractClient):
         debug: bool = False,
         timeout: int = 60,
         max_retries: int = 3,
+        headers: Optional[Dict[str, str]] = None,
     ):
         """
         Initialize MirixClient.
@@ -135,6 +136,7 @@ class MirixClient(AbstractClient):
             debug: Whether to enable debug logging
             timeout: Request timeout in seconds
             max_retries: Number of retries for failed requests
+            headers: Optional headers to include in the initialization requests
         """
         super().__init__(debug=debug)
 
@@ -197,7 +199,7 @@ class MirixClient(AbstractClient):
         self.session.headers.update({"Content-Type": "application/json"})
 
         # Create organization and client if they don't exist
-        self._ensure_org_and_client_exist()
+        self._ensure_org_and_client_exist(headers=headers)
 
     def _ensure_org_and_client_exist(self, headers: Optional[Dict[str, str]] = None):
         """
