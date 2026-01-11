@@ -172,7 +172,7 @@ class BaseMCPClient(ABC):
             try:
                 with langfuse.start_as_current_observation(
                     name=f"mcp_tool: {tool_name}",
-                    as_type="span",
+                    as_type="tool",
                     trace_context=cast(TraceContext, trace_context_dict),
                     input={
                         "tool_name": tool_name,
@@ -323,7 +323,7 @@ class BaseAsyncMCPClient(ABC):
             try:
                 with langfuse.start_as_current_observation(
                     name=f"mcp_tool: {tool_name}",
-                    as_type="span",
+                    as_type="tool",
                     trace_context=cast(TraceContext, trace_context_dict),
                     input={
                         "tool_name": tool_name,
