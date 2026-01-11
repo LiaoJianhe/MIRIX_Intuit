@@ -137,7 +137,7 @@ class ToolExecutionSandbox:
             try:
                 with langfuse.start_as_current_observation(
                     name=f"tool_execution: {self.tool_name}",
-                    as_type="span",
+                    as_type="tool",
                     trace_context=cast(TraceContext, trace_context_dict),
                     input={"tool_name": self.tool_name, "args": args_for_trace},
                     metadata={
