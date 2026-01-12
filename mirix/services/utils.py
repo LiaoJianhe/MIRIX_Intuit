@@ -5,9 +5,7 @@ import numpy as np
 import pytz
 from sqlalchemy import func
 
-from mirix.constants import (
-    MAX_EMBEDDING_DIM,
-)
+from mirix.constants import MAX_EMBEDDING_DIM
 from mirix.embeddings import embedding_model
 from mirix.orm.sqlite_functions import adapt_array
 from mirix.schemas.embedding_config import EmbeddingConfig
@@ -27,20 +25,21 @@ def build_query(
 ):
     """
     Build a query based on the query text
-    
+
     Args:
-        similarity_threshold: Maximum cosine distance (0.0=identical, 2.0=opposite).
-                             Results with distance >= threshold are excluded.
+        similarity_threshold: Minimum similarity required (0.0 to 1.0 scale).
+                             Higher values are stricter (e.g., 0.8 = at least 80% similar).
+                             Results below this similarity are excluded.
     """
 
     if embed_query:
         if embedded_text is None:
-            assert embedding_config is not None, (
-                "embedding_config must be specified for vector search"
-            )
-            assert query_text is not None, (
-                "query_text must be specified for vector search"
-            )
+            assert (
+                embedding_config is not None
+            ), "embedding_config must be specified for vector search"
+            assert (
+                query_text is not None
+            ), "query_text must be specified for vector search"
             embedded_text = embedding_model(embedding_config).get_text_embedding(
                 query_text
             )
@@ -58,11 +57,13 @@ def build_query(
         if settings.mirix_pg_uri_no_default:
             # PostgreSQL with pgvector - use direct cosine_distance method
             distance_field = search_field.cosine_distance(embedded_text)
-            
+
             # Apply similarity threshold filter if provided
+            # Convert from similarity (0-1, higher=stricter) to distance (0-2, lower=stricter)
             if similarity_threshold is not None:
-                main_query = main_query.where(distance_field < similarity_threshold)
-            
+                max_distance = 1.0 - similarity_threshold
+                main_query = main_query.where(distance_field < max_distance)
+
             if ascending:
                 main_query = main_query.order_by(
                     distance_field.asc(),
@@ -79,10 +80,12 @@ def build_query(
             # SQLite with custom vector type
             query_embedding_binary = adapt_array(embedded_text)
             distance_field = func.cosine_distance(search_field, query_embedding_binary)
-            
+
             # Apply similarity threshold filter if provided
+            # Convert from similarity (0-1, higher=stricter) to distance (0-2, lower=stricter)
             if similarity_threshold is not None:
-                main_query = main_query.where(distance_field < similarity_threshold)
+                max_distance = 1.0 - similarity_threshold
+                main_query = main_query.where(distance_field < max_distance)
 
             if ascending:
                 main_query = main_query.order_by(
@@ -114,7 +117,7 @@ def update_timezone(func):
             # try finding the actor:
             actor = kwargs.get("actor", None)
             # Client model doesn't have timezone, User model does - use default UTC
-            timezone_str = getattr(actor, 'timezone', 'UTC') if actor else None
+            timezone_str = getattr(actor, "timezone", "UTC") if actor else None
 
         # Call the original function to get its result
         results = func(*args, **kwargs)

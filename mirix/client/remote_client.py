@@ -1590,12 +1590,12 @@ class MirixClient(AbstractClient):
             search_method: Search method. Options: "bm25" (default), "embedding"
             limit: Maximum number of results per memory type (default: 10)
             filter_tags: Optional filter tags for additional filtering (scope added automatically)
-            similarity_threshold: Optional similarity threshold for embedding search (0.0-2.0).
-                                 Only results with cosine distance < threshold are returned.
+            similarity_threshold: Minimum similarity required (0.0 to 1.0 scale).
+                                 Higher values are stricter (e.g., 0.8 = at least 80% similar).
                                  Recommended values:
-                                 - 0.5 (strict: only highly relevant results)
-                                 - 0.7 (moderate: reasonably relevant results)
-                                 - 0.9 (loose: loosely related results)
+                                 - 0.8 (strict: only highly relevant results)
+                                 - 0.6 (moderate: reasonably relevant results)
+                                 - 0.4 (loose: loosely related results)
                                  - None (no filtering, returns all top N results)
                                  Only applies when search_method="embedding". Default: None
             start_date: Optional start date/time for filtering episodic memories (ISO 8601 format).
@@ -1728,9 +1728,9 @@ class MirixClient(AbstractClient):
             limit: Maximum results per memory type (total across all users)
             client_id: Optional client ID (uses its org_id and scope for filtering)
             filter_tags: Optional additional filter tags (scope added automatically)
-            similarity_threshold: Optional similarity threshold for embedding search (0.0-2.0).
-                                 Only results with cosine distance < threshold are returned.
-                                 Recommended: 0.5 (strict), 0.7 (moderate), 0.9 (loose), None (no filter).
+            similarity_threshold: Minimum similarity required (0.0 to 1.0 scale).
+                                 Higher values are stricter (e.g., 0.8 = at least 80% similar).
+                                 Recommended: 0.8 (strict), 0.6 (moderate), 0.4 (loose), None (no filter).
                                  Only applies when search_method="embedding". Default: None
             start_date: Optional start date/time for filtering episodic memories (ISO 8601 format).
                        Only episodic memories with occurred_at >= start_date will be returned.

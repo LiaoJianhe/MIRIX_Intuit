@@ -1720,10 +1720,10 @@ class EpisodicMemoryManager:
                 base_query = base_query.add_columns(embedding_query_field)
 
                 # Apply similarity threshold if provided
+                # Convert from similarity (0-1, higher=stricter) to distance (0-2, lower=stricter)
                 if similarity_threshold is not None:
-                    base_query = base_query.where(
-                        embedding_query_field < similarity_threshold
-                    )
+                    max_distance = 1.0 - similarity_threshold
+                    base_query = base_query.where(embedding_query_field < max_distance)
 
                 base_query = base_query.order_by(embedding_query_field)
             elif search_method == "bm25":

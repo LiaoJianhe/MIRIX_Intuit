@@ -2513,8 +2513,8 @@ async def search_memory(
         search_method: Search method. Options: "bm25" (default), "embedding"
         limit: Maximum number of results per memory type (default: 10)
         filter_tags: Optional JSON string of filter tags (scope added automatically)
-        similarity_threshold: Optional similarity threshold for embedding search (0.0-2.0).
-                             Only results with cosine distance < threshold are returned.
+        similarity_threshold: Minimum similarity required (0.0 to 1.0 scale).
+                             Higher values are stricter (e.g., 0.8 = at least 80% similar).
                              Only applies when search_method="embedding"
         start_date: Optional start date/time for episodic memory filtering (ISO 8601 format)
         end_date: Optional end date/time for episodic memory filtering (ISO 8601 format)
@@ -2829,7 +2829,8 @@ async def search_memory_all_users(
         client_id: Optional client ID (uses its org_id and scope)
         org_id: Optional organization ID (used if client_id not provided)
         filter_tags: Optional JSON string of additional filter tags
-        similarity_threshold: Optional similarity threshold for embedding search (0.0-2.0)
+        similarity_threshold: Minimum similarity required (0.0 to 1.0 scale).
+                             Higher values are stricter (e.g., 0.8 = at least 80% similar).
         start_date: Optional start date/time for episodic memory filtering (ISO 8601 format)
         end_date: Optional end date/time for episodic memory filtering (ISO 8601 format)
     """
