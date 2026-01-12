@@ -1365,6 +1365,7 @@ class EpisodicMemoryManager:
         new_details: str = None,
         actor: PydanticClient = None,
         agent_state: AgentState = None,
+        update_mode: str = "append",
     ):
         """
         Update the selected events
@@ -1372,9 +1373,11 @@ class EpisodicMemoryManager:
         Args:
             event_id: ID of the episodic event to update
             new_summary: New summary text (will overwrite existing summary)
-            new_details: New details text (will be appended to existing details)
+            new_details: New details text
             actor: Client performing the update (for access control and audit trail)
             agent_state: Agent state containing embedding configuration (needed for embedding regeneration)
+            update_mode: How to handle new_details - "append" (default) appends to existing,
+                        "replace" overwrites existing details entirely
         """
 
         with self.session_maker() as session:
@@ -1394,7 +1397,10 @@ class EpisodicMemoryManager:
                 selected_event.summary = new_summary
                 operations.append("summary_updated")
             if new_details:
-                selected_event.details += "\n" + new_details
+                if update_mode == "replace":
+                    selected_event.details = new_details
+                else:
+                    selected_event.details += "\n" + new_details
                 operations.append("details_updated")
 
             if (
