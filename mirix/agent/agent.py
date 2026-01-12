@@ -407,15 +407,12 @@ class Agent(BaseAgent):
         trace_id = trace_context.get("trace_id") if trace_context else None
         parent_span_id = trace_context.get("observation_id") if trace_context else None
 
-        # Sanitize args for tracing (truncate long values, exclude 'self')
+        # Sanitize args for tracing (exclude 'self')
         args_for_trace = {}
         for key, value in function_args.items():
             if key == "self":
                 continue  # Don't include 'self' in trace
-            str_value = str(value)
-            args_for_trace[key] = (
-                str_value[:200] + "..." if len(str_value) > 200 else str_value
-            )
+            args_for_trace[key] = str(value)
 
         def _execute_tool_inner() -> Tuple[str, bool]:
             """Inner function to execute tool. Returns (response, is_error)."""
@@ -570,17 +567,9 @@ class Agent(BaseAgent):
                     mark_observation_as_child(span)  # Ensure this is not marked as root
                     function_response, is_error = _execute_tool_inner()
 
-                    # Truncate response for trace output
-                    response_str = str(function_response)
-                    response_preview = (
-                        response_str[:500] + "..."
-                        if len(response_str) > 500
-                        else response_str
-                    )
-
                     # Update span with result info
                     span.update(
-                        output={"response": response_preview, "is_error": is_error},
+                        output={"response": str(function_response), "is_error": is_error},
                         metadata={
                             "tool_type": str(target_mirix_tool.tool_type),
                             "tool_name": function_name,

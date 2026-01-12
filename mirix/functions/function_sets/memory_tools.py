@@ -186,6 +186,7 @@ def episodic_memory_merge(
         new_details=combined_details,
         actor=self.actor,
         agent_state=self.agent_state,
+        update_mode="replace",
     )
     response = (
         "These are the `summary` and the `details` of the updated event:\n",
