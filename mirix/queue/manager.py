@@ -181,9 +181,11 @@ class QueueManager:
                 if config.KAFKA_SSL_KEYFILE:
                     kafka_kwargs['ssl_keyfile'] = config.KAFKA_SSL_KEYFILE
                 
-                # Add consumer timeout configuration
-                kafka_kwargs['max_poll_interval_ms'] = config.KAFKA_MAX_POLL_INTERVAL_MS
-                kafka_kwargs['session_timeout_ms'] = config.KAFKA_SESSION_TIMEOUT_MS
+                # Add consumer timeout configuration if provided (otherwise use kafka-python defaults)
+                if config.KAFKA_MAX_POLL_INTERVAL_MS is not None:
+                    kafka_kwargs['max_poll_interval_ms'] = config.KAFKA_MAX_POLL_INTERVAL_MS
+                if config.KAFKA_SESSION_TIMEOUT_MS is not None:
+                    kafka_kwargs['session_timeout_ms'] = config.KAFKA_SESSION_TIMEOUT_MS
                 
                 return KafkaQueue(**kafka_kwargs)
             except ImportError as e:
