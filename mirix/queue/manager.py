@@ -164,7 +164,7 @@ class QueueManager:
             # Import Kafka queue (lazy import to avoid unnecessary dependency)
             try:
                 from .kafka_queue import KafkaQueue
-# Build kwargs for KafkaQueue
+                # Build kwargs for KafkaQueue
                 kafka_kwargs = {
                     'bootstrap_servers': config.KAFKA_BOOTSTRAP_SERVERS,
                     'topic': config.KAFKA_TOPIC,
@@ -180,6 +180,10 @@ class QueueManager:
                     kafka_kwargs['ssl_certfile'] = config.KAFKA_SSL_CERTFILE
                 if config.KAFKA_SSL_KEYFILE:
                     kafka_kwargs['ssl_keyfile'] = config.KAFKA_SSL_KEYFILE
+                
+                # Add consumer timeout configuration
+                kafka_kwargs['max_poll_interval_ms'] = config.KAFKA_MAX_POLL_INTERVAL_MS
+                kafka_kwargs['session_timeout_ms'] = config.KAFKA_SESSION_TIMEOUT_MS
                 
                 return KafkaQueue(**kafka_kwargs)
             except ImportError as e:

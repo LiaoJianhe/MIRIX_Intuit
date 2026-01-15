@@ -26,7 +26,9 @@ class KafkaQueue(QueueInterface):
         security_protocol: str = 'PLAINTEXT',
         ssl_cafile: Optional[str] = None,
         ssl_certfile: Optional[str] = None,
-        ssl_keyfile: Optional[str] = None
+        ssl_keyfile: Optional[str] = None,
+        max_poll_interval_ms: int = 300000,
+        session_timeout_ms: int = 10000
     ):
         """
         Initialize Kafka producer and consumer with configurable serialization
@@ -40,6 +42,8 @@ class KafkaQueue(QueueInterface):
             ssl_cafile: Path to CA certificate file for SSL/TLS verification
             ssl_certfile: Path to client certificate file for mTLS
             ssl_keyfile: Path to client private key file for mTLS
+            max_poll_interval_ms: Maximum time between polls before consumer is kicked out (default: 300000 = 5 min)
+            session_timeout_ms: Timeout for consumer session heartbeat (default: 10000 = 10 sec)
         """
         logger.info(
             "🔧 Initializing Kafka queue: servers=%s, topic=%s, group=%s, format=%s, security=%s", 
@@ -148,7 +152,7 @@ class KafkaQueue(QueueInterface):
             value_serializer=value_serializer
         )
         
-        # Initialize Kafka consumer with selected deserializer
+        # Initialize Kafka consumer with selected deserializer and configurable timeouts
         self.consumer = KafkaConsumer(
             topic,
             **kafka_config,
@@ -156,7 +160,14 @@ class KafkaQueue(QueueInterface):
             value_deserializer=value_deserializer,
             auto_offset_reset='earliest',  # Start from beginning if no offset exists
             enable_auto_commit=True,
+            max_poll_interval_ms=max_poll_interval_ms,
+            session_timeout_ms=session_timeout_ms,
             consumer_timeout_ms=1000  # Timeout for polling
+        )
+        
+        logger.info(
+            "✅ Kafka consumer configured: max_poll_interval=%dms (%.1f min), session_timeout=%dms",
+            max_poll_interval_ms, max_poll_interval_ms / 60000, session_timeout_ms
         )
     
     def put(self, message: QueueMessage) -> None:
