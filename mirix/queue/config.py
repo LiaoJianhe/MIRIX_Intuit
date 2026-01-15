@@ -22,15 +22,6 @@ KAFKA_SSL_CAFILE = os.environ.get("KAFKA_SSL_CAFILE")
 KAFKA_SSL_CERTFILE = os.environ.get("KAFKA_SSL_CERTFILE")
 KAFKA_SSL_KEYFILE = os.environ.get("KAFKA_SSL_KEYFILE")
 
-# Kafka consumer timeout configuration
-# These control how long a consumer can process messages before being considered dead
-# If not set, kafka-python defaults are used (max_poll_interval_ms=300000, session_timeout_ms=10000)
-_max_poll_interval = os.environ.get("KAFKA_MAX_POLL_INTERVAL_MS")
-KAFKA_MAX_POLL_INTERVAL_MS = int(_max_poll_interval) if _max_poll_interval else None
-
-_session_timeout = os.environ.get("KAFKA_SESSION_TIMEOUT_MS")
-KAFKA_SESSION_TIMEOUT_MS = int(_session_timeout) if _session_timeout else None
-
 NUM_WORKERS = int(os.environ.get("MIRIX_MEMORY_QUEUE_NUM_WORKERS", 1))
 ROUND_ROBIN = os.environ.get("MIRIX_MEMORY_QUEUE_ROUND_ROBIN", "false").lower() in (
     "true",
