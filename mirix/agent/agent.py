@@ -569,7 +569,10 @@ class Agent(BaseAgent):
 
                     # Update span with result info
                     span.update(
-                        output={"response": str(function_response), "is_error": is_error},
+                        output={
+                            "response": str(function_response),
+                            "is_error": is_error,
+                        },
                         metadata={
                             "tool_type": str(target_mirix_tool.tool_type),
                             "tool_name": function_name,
@@ -1288,35 +1291,38 @@ class Agent(BaseAgent):
 
             # Handle context message clearing only if ALL functions succeeded
             if not overall_function_failed:
-                # Check if any executed function should trigger history clearing
                 should_clear_history = False
-                for func_name in executed_function_names:
-                    if CLEAR_HISTORY_AFTER_MEMORY_UPDATE:
-                        if self.agent_state.name == "reflexion_agent":
+
+                # Clear history for all non-chat agents when:
+                # 1. chaining=False (clear regardless of function calls), OR
+                # 2. finish_memory_update was called (clear when chaining completes)
+                if CLEAR_HISTORY_AFTER_MEMORY_UPDATE and not self.agent_state.is_type(
+                    AgentType.chat_agent
+                ):
+                    if not chaining:
+                        should_clear_history = True
+                        self.logger.info(f"should_clear_history=True (chaining=False)")
+                    else:
+                        for func_name in executed_function_names:
                             if func_name == "finish_memory_update":
                                 should_clear_history = True
+                                self.logger.info(
+                                    f"should_clear_history=True (finish_memory_update called)"
+                                )
                                 break
-                        elif self.agent_state.name == "meta_memory_agent" and (
-                            func_name == "finish_memory_update" or not chaining
-                        ):
-                            should_clear_history = True
-                            break
-                        elif self.agent_state.name not in [
-                            "meta_memory_agent",
-                            "chat_agent",
-                        ] and (func_name == "finish_memory_update" or not chaining):
-                            should_clear_history = True
-                            break
+                else:
+                    self.logger.debug(
+                        f"Clearing skipped - CLEAR_HISTORY_AFTER_MEMORY_UPDATE={CLEAR_HISTORY_AFTER_MEMORY_UPDATE}, is_chat_agent={self.agent_state.is_type(AgentType.chat_agent)}"
+                    )
 
                 if should_clear_history:
-                    # It means one of the following conditions is met:
-                    # (1) meta_memory_agent, finish_memory_update -> continue_chaining = False
-                    # (2) non-meta_memory_agent, finish_memory_update -> continue_chaining = False
-                    # (3) non-meta_memory_agent, CHAINING_FOR_MEMORY_UPDATE = False -> continue_chaining = False
                     continue_chaining = False
 
                     in_context_messages = self.agent_manager.get_in_context_messages(
                         agent_state=self.agent_state, actor=self.actor, user=self.user
+                    )
+                    self.logger.info(
+                        f"Clearing history - {len(in_context_messages)} messages -> keeping only system message"
                     )
                     message_ids = [message.id for message in in_context_messages]
                     message_ids = [message_ids[0]]
@@ -1508,7 +1514,7 @@ class Agent(BaseAgent):
                     elif self.agent_state.name.endswith("core_memory_agent"):
                         memory_item_str = self.agent_state.memory.compile()
 
-                    # create a new message for this:
+                    # Optionally create a summary message showing last edited memory item
                     if memory_item_str:
                         if self.agent_state.name.endswith("core_memory_agent"):
                             message_content = (
@@ -1543,36 +1549,17 @@ class Agent(BaseAgent):
 
                         # append the persisted message ID to the message list
                         message_ids.append(persisted_message.id)
-                        self.agent_manager.set_in_context_messages(
-                            agent_id=self.agent_state.id,
-                            message_ids=message_ids,
-                            actor=self.actor,
-                        )
 
-                        # delete the detached messages
-                        self.message_manager.delete_detached_messages_for_agent(
-                            agent_id=self.agent_state.id, actor=self.actor
-                        )
-
-                    if self.agent_state.name == "meta_memory_agent":
-                        self.agent_manager.set_in_context_messages(
-                            agent_id=self.agent_state.id,
-                            message_ids=message_ids,
-                            actor=self.actor,
-                        )
-                        self.message_manager.delete_detached_messages_for_agent(
-                            agent_id=self.agent_state.id, actor=self.actor
-                        )
-
-                    if self.agent_state.name == "reflexion_agent":
-                        self.agent_manager.set_in_context_messages(
-                            agent_id=self.agent_state.id,
-                            message_ids=message_ids,
-                            actor=self.actor,
-                        )
-                        self.message_manager.delete_detached_messages_for_agent(
-                            agent_id=self.agent_state.id, actor=self.actor
-                        )
+                    # Clear history for all non-chat agents when should_clear_history is True
+                    # This applies to meta_memory_agent and all memory sub-agents
+                    self.agent_manager.set_in_context_messages(
+                        agent_id=self.agent_state.id,
+                        message_ids=message_ids,
+                        actor=self.actor,
+                    )
+                    self.message_manager.delete_detached_messages_for_agent(
+                        agent_id=self.agent_state.id, actor=self.actor
+                    )
 
                     # Clear all messages since they were manually added to the conversation history
                     messages = []
@@ -1721,7 +1708,7 @@ class Agent(BaseAgent):
             )
         )
 
-        if self.agent_state.name == "reflexion_agent":
+        if self.agent_state.is_type(AgentType.reflexion_agent):
             # clear previous messages
             in_context_messages = self.agent_manager.get_in_context_messages(
                 agent_state=self.agent_state, actor=self.actor, user=self.user
@@ -1743,7 +1730,9 @@ class Agent(BaseAgent):
             kwargs["step_count"] = step_count
 
             if (
-                self.agent_state.name in ["meta_memory_agent", "chat_agent"]
+                self.agent_state.is_type(
+                    AgentType.meta_memory_agent, AgentType.chat_agent
+                )
                 and step_count == 0
             ):
                 # When the agent first gets the screenshots, we need to extract the topic to search the query.
@@ -1763,7 +1752,10 @@ class Agent(BaseAgent):
                     )
                     pass
 
-            if self.agent_state.name == "meta_memory_agent" and step_count == 0:
+            if (
+                self.agent_state.is_type(AgentType.meta_memory_agent)
+                and step_count == 0
+            ):
                 meta_message = prepare_input_message_create(
                     MessageCreate(
                         role="user",
@@ -1808,7 +1800,7 @@ class Agent(BaseAgent):
                 break
             elif max_chaining_steps is not None and counter == max_chaining_steps:
                 # Add warning message based on agent type
-                if self.agent_state.name == "chat_agent":
+                if self.agent_state.is_type(AgentType.chat_agent):
                     warning_content = "[System Message] You have reached the maximum chaining steps. Please call 'send_message' to send your response to the user."
                 else:
                     warning_content = "[System Message] You have reached the maximum chaining steps. Please call 'finish_memory_update' to end the chaining."
