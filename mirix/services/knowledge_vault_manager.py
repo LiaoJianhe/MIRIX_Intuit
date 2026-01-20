@@ -1224,18 +1224,10 @@ class KnowledgeVaultManager:
                         return [PydanticKnowledgeVaultItem(**item) for item in results]
                 elif search_method == "embedding":
                     if embedded_text is None:
-                        import numpy as np
-
-                        from mirix.constants import MAX_EMBEDDING_DIM
                         from mirix.embeddings import embedding_model
-
-                        embedded_text = embedding_model(agent_state.embedding_config).get_text_embedding(query)
-                        embedded_text = np.array(embedded_text)
-                        embedded_text = np.pad(
-                            embedded_text,
-                            (0, MAX_EMBEDDING_DIM - embedded_text.shape[0]),
-                            mode="constant",
-                        ).tolist()
+                        embedded_text = embedding_model.embed_and_upload_batch(
+                            [query], agent_state.embedding_config
+                        )[0]
 
                     results = redis_client.search_vector_by_org(
                         index_name=redis_client.KNOWLEDGE_INDEX,
