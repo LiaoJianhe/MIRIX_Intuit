@@ -157,29 +157,44 @@ class QueueWorker:
         Args:
             message: QueueMessage protobuf that was already consumed from Kafka
             
+        Setup:
+            To use external consumers, set the environment variable:
+            ```bash
+            export MIRIX_QUEUE_AUTO_START_WORKERS=false
+            ```
+            This prevents MIRIX from starting its internal Kafka consumer,
+            avoiding conflicts with your external consumer.
+            
         Example:
             ```python
-            # Create worker without starting internal consumer
-            worker = QueueWorker(queue=None, server=server)
-            worker.set_server(server)
+            # 1. Set environment variable BEFORE starting MIRIX server
+            # export MIRIX_QUEUE_AUTO_START_WORKERS=false
             
-            # Your custom Kafka consumer
+            # 2. Start MIRIX server normally (workers won't auto-start)
+            from mirix.server.server import SyncServer
+            from mirix.queue import initialize_queue
+            server = SyncServer()
+            initialize_queue(server)  # Creates workers but doesn't start them
+            
+            # 3. Create your custom Kafka consumer
             from kafka import KafkaConsumer
+            from mirix.queue.worker import QueueWorker
+            from mirix.queue.message_pb2 import QueueMessage
+            
+            worker = QueueWorker(queue=None, server=server)
             consumer = KafkaConsumer('my-topic', ...)
             
+            # 4. Process messages via MIRIX
             for kafka_msg in consumer:
-                # Deserialize to QueueMessage protobuf
                 queue_message = QueueMessage()
                 queue_message.ParseFromString(kafka_msg.value)
-                
-                # Process via MIRIX worker
                 worker.process_external_message(queue_message)
             ```
         
         Note:
             - This method is thread-safe and can be called from multiple threads
-            - When using this method, you typically don't call worker.start()
-            - The internal _consume_messages() loop is not used in this mode
+            - With MIRIX_QUEUE_AUTO_START_WORKERS=false, internal consumers won't start
+            - You have full control over Kafka consumer configuration
         """
         logger.debug(
             "Processing externally consumed message: agent_id=%s, user_id=%s",

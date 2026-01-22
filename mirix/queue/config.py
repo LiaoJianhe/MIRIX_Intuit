@@ -50,3 +50,11 @@ ROUND_ROBIN = os.environ.get("MIRIX_MEMORY_QUEUE_ROUND_ROBIN", "false").lower() 
     "yes",
 )
 
+# Worker auto-start configuration
+# Set to 'false' or '0' to disable automatic worker startup when using external consumers
+# When disabled, you must manually call process_external_message() to process messages
+AUTO_START_WORKERS = os.environ.get("MIRIX_QUEUE_AUTO_START_WORKERS", "true").lower() in (
+    "true",
+    "1",
+    "yes",
+)
