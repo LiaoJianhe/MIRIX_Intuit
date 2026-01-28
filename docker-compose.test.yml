@@ -62,6 +62,43 @@ services:
       retries: 10
       start_period: 2s
 
+  # ==========================================================================
+  # Test API Server (for integration tests)
+  # ==========================================================================
+  test_server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mirix_test_server
+    restart: "no"
+    depends_on:
+      test_db:
+        condition: service_healthy
+      test_redis:
+        condition: service_healthy
+    ports:
+      - "${SERVER_PORT:-8000}:8000"  # Expose on configurable port (default 8000)
+    command: ["uvicorn", "mirix.server.rest_api:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      # Connect to test database and Redis
+      - MIRIX_PG_HOST=test_db
+      - MIRIX_PG_PORT=5432
+      - MIRIX_PG_USER=test
+      - MIRIX_PG_PASSWORD=test
+      - MIRIX_PG_DB=mirix_test
+      - MIRIX_PG_URI=postgresql+pg8000://test:test@test_db:5432/mirix_test
+      - MIRIX_REDIS_ENABLED=true
+      - MIRIX_REDIS_HOST=test_redis
+      - MIRIX_REDIS_PORT=6379
+      - MIRIX_LANGFUSE_ENABLED=false
+      - MIRIX_LOG_LEVEL=WARNING
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+
 # ============================================================================
 # Networks
 # ============================================================================

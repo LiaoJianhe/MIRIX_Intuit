@@ -4,14 +4,17 @@
 # ============================================================================
 # This script:
 #   1. Starts ephemeral PostgreSQL and Redis containers
-#   2. Runs pytest with test database configuration
-#   3. Stops containers when done (even on failure)
+#   2. Optionally starts test API server container (with --integration)
+#   3. Runs pytest with test database configuration
+#   4. Stops containers when done (even on failure)
 #
 # Usage:
 #   ./scripts/run_tests_with_docker.sh                    # Run all tests (uses Docker)
 #   ./scripts/run_tests_with_docker.sh --podman           # Use Podman instead
+#   ./scripts/run_tests_with_docker.sh --integration      # Start server for integration tests
 #   ./scripts/run_tests_with_docker.sh test_raw_memory.py  # Run specific test file
 #   ./scripts/run_tests_with_docker.sh -k "search"        # Run tests matching pattern
+#   ./scripts/run_tests_with_docker.sh --integration -m integration  # Run only integration tests
 # ============================================================================
 
 set -e  # Exit on error
@@ -29,6 +32,8 @@ NC='\033[0m' # No Color
 
 # Parse command-line arguments
 USE_PODMAN="0"  # Default to Docker
+START_SERVER="0"  # Default to no server
+SERVER_PORT=8000  # Default server port
 PYTEST_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -36,6 +41,15 @@ while [[ $# -gt 0 ]]; do
         --podman)
             USE_PODMAN="1"
             shift
+            ;;
+        --integration|--with-server)
+            START_SERVER="1"
+            shift
+            ;;
+        --server-port)
+            START_SERVER="1"
+            SERVER_PORT="$2"
+            shift 2
             ;;
         *)
             PYTEST_ARGS+=("$1")
@@ -109,6 +123,8 @@ fi
 cleanup() {
     echo -e "\n${YELLOW}Cleaning up test infrastructure...${NC}"
     cd "$PROJECT_ROOT"
+    
+    # Stop Docker/Podman containers (including test_server if it was started)
     "${COMPOSE_CMD_ARGS[@]}" -f "$COMPOSE_FILE" down 2>/dev/null || true
 }
 
@@ -131,12 +147,24 @@ fi
 echo -e "${GREEN}Starting test infrastructure...${NC}"
 cd "$PROJECT_ROOT"
 
-# Start test infrastructure - show output in real-time
-echo -e "${YELLOW}Running: ${COMPOSE_CMD} -f docker-compose.test.yml up -d${NC}"
+# Clean up any existing containers first (especially for Podman)
+echo -e "${YELLOW}Cleaning up any existing test containers...${NC}"
+"${COMPOSE_CMD_ARGS[@]}" -f "$COMPOSE_FILE" down 2>/dev/null || true
+
+# For Podman, also try direct cleanup to avoid proxy issues
+if [ "$USE_PODMAN" = "1" ]; then
+    echo -e "${YELLOW}Performing Podman-specific cleanup...${NC}"
+    podman stop mirix_test_db mirix_test_redis mirix_test_server 2>/dev/null || true
+    podman rm -f mirix_test_db mirix_test_redis mirix_test_server 2>/dev/null || true
+    sleep 1  # Give Podman time to clean up
+fi
+
+# Start test infrastructure (database and Redis only, server starts separately if needed)
+echo -e "${YELLOW}Running: ${COMPOSE_CMD} -f docker-compose.test.yml up -d test_db test_redis${NC}"
 echo -e "${YELLOW}(This may take a moment to pull images if needed...)${NC}"
 
-# Run the command and show output in real-time
-if ! "${COMPOSE_CMD_ARGS[@]}" -f "$COMPOSE_FILE" up -d; then
+# Start only database and Redis first (server starts separately if --integration is provided)
+if ! "${COMPOSE_CMD_ARGS[@]}" -f "$COMPOSE_FILE" up -d test_db test_redis; then
     COMPOSE_EXIT_CODE=$?
     if [ "$USE_PODMAN" = "1" ]; then
         echo -e "${RED}Error: Failed to start Podman containers (exit code: $COMPOSE_EXIT_CODE).${NC}"
@@ -257,6 +285,151 @@ else
     echo -e "${YELLOW}Note: Schema will be created automatically on first database connection${NC}"
 fi
 
+# Start server container if integration tests are requested
+if [ "$START_SERVER" = "1" ]; then
+    echo -e "${GREEN}Starting test server container on port $SERVER_PORT...${NC}"
+    cd "$PROJECT_ROOT"
+    
+    # Export SERVER_PORT so docker-compose can use it for port mapping
+    export SERVER_PORT
+    
+    # Check if port is already in use - error out if it is
+    if command -v lsof &> /dev/null; then
+        if lsof -Pi :$SERVER_PORT -sTCP:LISTEN -t >/dev/null 2>&1; then
+            echo -e "${RED}Error: Port $SERVER_PORT is already in use${NC}"
+            echo -e "${YELLOW}Please choose a different port with --server-port or stop the process using port $SERVER_PORT${NC}"
+            exit 1
+        fi
+    fi
+    
+    # Stop and remove existing test_server container if it exists (especially for Podman)
+    echo -e "${YELLOW}Cleaning up any existing test_server container...${NC}"
+    "${COMPOSE_CMD_ARGS[@]}" -f "$COMPOSE_FILE" stop test_server 2>/dev/null || true
+    "${COMPOSE_CMD_ARGS[@]}" -f "$COMPOSE_FILE" rm -f test_server 2>/dev/null || true
+    
+    # Also try direct container runtime commands as fallback (for Podman proxy issues)
+    if [ "$USE_PODMAN" = "1" ]; then
+        podman stop mirix_test_server 2>/dev/null || true
+        podman rm -f mirix_test_server 2>/dev/null || true
+        # Wait a moment for Podman to clean up
+        sleep 2
+    fi
+    
+    # Start server container (SERVER_PORT is already exported)
+    echo -e "${YELLOW}Starting server container...${NC}"
+    if ! "${COMPOSE_CMD_ARGS[@]}" -f "$COMPOSE_FILE" up -d test_server; then
+        echo -e "${RED}Error: Failed to start test server container${NC}"
+        echo -e "${YELLOW}Checking for existing containers:${NC}"
+        "${COMPOSE_CMD_ARGS[@]}" -f "$COMPOSE_FILE" ps -a 2>&1 | grep test_server || true
+        echo -e "${YELLOW}Container logs (if available):${NC}"
+        "${COMPOSE_CMD_ARGS[@]}" -f "$COMPOSE_FILE" logs test_server 2>&1 | tail -30 || true
+        exit 1
+    fi
+    
+    # Give container a moment to start
+    sleep 2
+    
+    # Wait for server to be ready
+    echo -e "${YELLOW}Waiting for server to be ready...${NC}"
+    timeout=90  # Server container may take longer (needs to build if image doesn't exist)
+    elapsed=0
+    
+    # Check if curl or python requests are available for health check
+    HEALTH_CHECK_CMD=""
+    if command -v curl &> /dev/null; then
+        HEALTH_CHECK_CMD="curl -f -s http://localhost:$SERVER_PORT/health > /dev/null 2>&1"
+    elif command -v python3 &> /dev/null; then
+        HEALTH_CHECK_CMD="python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:$SERVER_PORT/health', timeout=2)\" > /dev/null 2>&1"
+    else
+        echo -e "${YELLOW}Warning: No curl or python3 available for health check. Waiting ${timeout}s...${NC}"
+        sleep $timeout
+    fi
+    
+    # Function to get container status (handles both docker-compose and podman-compose)
+    get_container_status() {
+        if [ "$USE_PODMAN" = "1" ]; then
+            # podman-compose doesn't support filtering by service name, use podman directly
+            podman ps --filter "name=mirix_test_server" --format "{{.Names}}\t{{.Status}}\t{{.Health}}" 2>/dev/null || true
+        else
+            # docker-compose supports service name filtering
+            "${COMPOSE_CMD_ARGS[@]}" -f "$COMPOSE_FILE" ps test_server 2>&1 | grep -v "^NAME" || true
+        fi
+    }
+    
+    # Function to get container logs
+    get_container_logs() {
+        if [ "$USE_PODMAN" = "1" ]; then
+            podman logs --tail="${1:-50}" mirix_test_server 2>&1 || true
+        else
+            "${COMPOSE_CMD_ARGS[@]}" -f "$COMPOSE_FILE" logs --tail="${1:-50}" test_server 2>&1 || true
+        fi
+    }
+    
+    # Show initial container status
+    echo -e "${YELLOW}Checking container status...${NC}"
+    get_container_status
+    
+    # Show progress every 5 seconds
+    while [ $elapsed -lt $timeout ]; do
+        # Show progress every 5 seconds
+        if [ $((elapsed % 5)) -eq 0 ] && [ $elapsed -gt 0 ]; then
+            echo -e "${YELLOW}  Still waiting for server... (${elapsed}s elapsed)${NC}"
+            # Show container status
+            echo -e "${YELLOW}  Container status:${NC}"
+            get_container_status
+            # Show recent logs if available
+            if [ $elapsed -gt 10 ]; then
+                echo -e "${YELLOW}  Recent logs:${NC}"
+                get_container_logs 5
+            fi
+        fi
+        
+        # Check container health status first (faster than HTTP check)
+        SERVER_STATUS=$(get_container_status)
+        if echo "$SERVER_STATUS" | grep -qi "healthy"; then
+            echo -e "${GREEN}✓ Server container is healthy${NC}"
+            break
+        fi
+        
+        # Check if container is running
+        if echo "$SERVER_STATUS" | grep -qi "exited\|stopped\|error\|Exited"; then
+            echo -e "${RED}Error: Server container exited or stopped${NC}"
+            echo -e "${YELLOW}Container status:${NC}"
+            echo "$SERVER_STATUS"
+            echo -e "${YELLOW}Container logs:${NC}"
+            get_container_logs 50
+            exit 1
+        fi
+        
+        # Try HTTP health check if container is running
+        if [ -n "$HEALTH_CHECK_CMD" ] && eval "$HEALTH_CHECK_CMD"; then
+            echo -e "${GREEN}✓ Server is ready on port $SERVER_PORT${NC}"
+            break
+        fi
+        
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    
+    if [ $elapsed -eq $timeout ]; then
+        echo -e "${RED}Error: Server failed to start after ${timeout} seconds${NC}"
+        echo -e "${YELLOW}Container status:${NC}"
+        get_container_status
+        echo -e "${YELLOW}Container logs (last 50 lines):${NC}"
+        get_container_logs 50
+        echo -e "${YELLOW}Trying to check if server is responding:${NC}"
+        if command -v curl &> /dev/null; then
+            curl -v http://localhost:$SERVER_PORT/health 2>&1 || true
+        fi
+        exit 1
+    fi
+    
+    # If -m integration not specified, add it automatically
+    if [[ ! " ${PYTEST_ARGS[@]} " =~ " -m " ]] && [[ ! " ${PYTEST_ARGS[@]} " =~ " --marker " ]]; then
+        echo -e "${YELLOW}Note: Server started. Add '-m integration' to run only integration tests.${NC}"
+    fi
+fi
+
 # Run pytest with provided arguments
 echo -e "${GREEN}Running tests...${NC}"
 cd "$PROJECT_ROOT"
@@ -268,6 +441,11 @@ if command -v poetry &> /dev/null && [ -f "pyproject.toml" ]; then
 else
     PYTEST_CMD=("pytest")
     echo -e "${YELLOW}Using system pytest${NC}"
+fi
+
+# Set server URL for integration tests if server is running
+if [ "$START_SERVER" = "1" ]; then
+    export MIRIX_API_URL="http://localhost:$SERVER_PORT"
 fi
 
 if [ ${#PYTEST_ARGS[@]} -eq 0 ]; then
