@@ -1,0 +1,71 @@
+# ============================================================================
+# Mirix Test Infrastructure Docker Compose
+# ============================================================================
+# Ephemeral PostgreSQL and Redis containers for running tests in isolation.
+# 
+# Usage:
+#   # Start test infrastructure
+#   docker-compose -f docker-compose.test.yml up -d
+#   
+#   # Run tests (they'll connect to the test database)
+#   pytest tests/test_raw_memory.py -v
+#   
+#   # Stop and remove containers (data is ephemeral - no volumes)
+#   docker-compose -f docker-compose.test.yml down
+#
+# Environment Variables:
+#   Tests will use these connection strings automatically:
+#   - MIRIX_PG_URI=postgresql+pg8000://test:test@localhost:5433/mirix_test
+#   - MIRIX_REDIS_HOST=localhost
+#   - MIRIX_REDIS_PORT=6380
+# ============================================================================
+
+services:
+  # ==========================================================================
+  # Ephemeral PostgreSQL for Testing
+  # ==========================================================================
+  test_db:
+    image: ankane/pgvector:v0.5.1
+    container_name: mirix_test_db
+    restart: "no"  # Don't restart - tests should control lifecycle
+    environment:
+      - POSTGRES_USER=test
+      - POSTGRES_PASSWORD=test
+      - POSTGRES_DB=mirix_test
+    ports:
+      - "5433:5432"  # Different port to avoid conflicts with main DB
+    volumes:
+      # Mount init.sql to set up extensions (pgvector, uuid-ossp, pg_trgm)
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    # NO persistent volumes - ephemeral database, data is lost when container stops
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test -d mirix_test"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+      start_period: 5s
+
+  # ==========================================================================
+  # Ephemeral Redis for Testing (optional)
+  # ==========================================================================
+  test_redis:
+    image: redis/redis-stack-server:latest
+    container_name: mirix_test_redis
+    restart: "no"
+    ports:
+      - "6380:6379"  # Different port to avoid conflicts
+    # NO volumes - ephemeral Redis, data is lost when container stops
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+      start_period: 2s
+
+# ============================================================================
+# Networks
+# ============================================================================
+networks:
+  default:
+    name: mirix_test_network
+    driver: bridge
