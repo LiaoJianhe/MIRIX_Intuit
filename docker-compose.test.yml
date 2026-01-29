@@ -4,6 +4,10 @@
 # Ephemeral PostgreSQL and Redis containers for running tests in isolation.
 # 
 # Usage:
+#   # Recommended: Use the test script (handles setup, teardown, and environment)
+#   ./scripts/run_tests_with_docker.sh
+#   
+#   # Or manually:
 #   # Start test infrastructure
 #   docker-compose -f docker-compose.test.yml up -d
 #   
