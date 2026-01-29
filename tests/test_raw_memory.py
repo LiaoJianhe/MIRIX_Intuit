@@ -657,11 +657,34 @@ def api_client(server_check, test_actor):
     import requests
     from mirix.security.api_keys import generate_api_key
     from mirix.services.client_manager import ClientManager
+    from mirix.services.admin_user_manager import ClientAuthManager
+    from mirix.services.user_manager import UserManager
+    from mirix.schemas.user import User as PydanticUser
+    from mirix.orm.errors import NoResultFound
 
     # Generate and set API key for test client
     client_mgr = ClientManager()
     api_key = generate_api_key()
     client_mgr.set_client_api_key(test_actor.id, api_key)
+
+    # Ensure admin user exists for this client
+    user_mgr = UserManager()
+    admin_user_id = ClientAuthManager.get_admin_user_id_for_client(test_actor.id)
+    try:
+        user_mgr.get_user_by_id(admin_user_id)
+    except NoResultFound:
+        # Create admin user if it doesn't exist
+        user_mgr.create_user(
+            PydanticUser(
+                id=admin_user_id,
+                name="Admin",
+                status="active",
+                timezone="UTC",
+                organization_id=test_actor.organization_id,
+                is_admin=True,
+            ),
+            client_id=test_actor.id,
+        )
 
     class APIClient:
         def __init__(self, base_url, api_key):
@@ -672,6 +695,12 @@ def api_client(server_check, test_actor):
         def get(self, path, **kwargs):
             kwargs.setdefault("timeout", 10)
             return requests.get(
+                f"{self.base_url}{path}", headers=self.headers, **kwargs
+            )
+
+        def post(self, path, **kwargs):
+            kwargs.setdefault("timeout", 10)
+            return requests.post(
                 f"{self.base_url}{path}", headers=self.headers, **kwargs
             )
 
@@ -1938,13 +1967,13 @@ def test_api_search_raw_memories_endpoint(
     )
     assert response.status_code == 400
 
-    # Test invalid limit
+    # Test invalid limit (Pydantic validation returns 422)
     response = api_client.post(
         "/memory/search_raw",
         json={"limit": 200},  # Over max
         params={"user_id": test_user.id},
     )
-    assert response.status_code == 400
+    assert response.status_code == 422
 
     # Cleanup
     raw_memory_manager.delete_raw_memory(mem1.id, test_actor)

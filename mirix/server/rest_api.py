@@ -4624,6 +4624,12 @@ async def search_raw_memory(
     """
     server = get_server()
 
+    # Ensure client is provided
+    if not client:
+        raise HTTPException(
+            status_code=401, detail="Authentication required. Client not found."
+        )
+
     # If user_id is not provided, use the admin user for this client
     if not user_id:
         from mirix.services.admin_user_manager import ClientAuthManager
@@ -4632,9 +4638,15 @@ async def search_raw_memory(
         logger.debug("No user_id provided, using admin user: %s", user_id)
 
     # Get user
-    user = server.user_manager.get_user_by_id(user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail=f"User {user_id} not found")
+    try:
+        user = server.user_manager.get_user_by_id(user_id)
+    except Exception as e:
+        from mirix.orm.errors import NoResultFound
+
+        if isinstance(e, NoResultFound):
+            raise HTTPException(status_code=404, detail=f"User {user_id} not found")
+        # Re-raise other exceptions
+        raise
 
     # Process filter_tags: always set scope to client scope (overwrites any user-provided scope)
     filter_tags = (
@@ -4724,10 +4736,6 @@ async def search_raw_memory(
             status_code=400,
             detail=f"Invalid sort: {request.sort}. Must be one of {valid_sorts}",
         )
-
-    # Validate limit
-    if request.limit < 1 or request.limit > 100:
-        raise HTTPException(status_code=400, detail="limit must be between 1 and 100")
 
     try:
         items, next_cursor = server.raw_memory_manager.search_raw_memories(
