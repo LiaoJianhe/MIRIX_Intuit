@@ -335,8 +335,7 @@ class RawMemoryManager:
             memory_scope = (raw_memory.filter_tags or {}).get("scope")
             if memory_scope != actor.scope:
                 raise ValueError(
-                    f"Access denied: memory {memory_id} has scope '{memory_scope}', "
-                    f"actor has scope '{actor.scope}'"
+                    f"Access denied: memory {memory_id} has scope '{memory_scope}', " f"actor has scope '{actor.scope}'"
                 )
 
             # Perform user_id access control check if provided
