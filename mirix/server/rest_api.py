@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from mirix.helpers.message_helpers import prepare_input_message_create
 from mirix.llm_api.llm_client import LLMClient
 from mirix.log import get_logger
+from mirix.orm.errors import NoResultFound
 from mirix.schemas.agent import AgentState, AgentType, CreateAgent
 from mirix.schemas.block import Block, BlockUpdate, CreateBlock, Human, Persona
 from mirix.schemas.client import Client, ClientCreate, ClientUpdate
@@ -38,12 +39,7 @@ from mirix.schemas.message import Message, MessageCreate
 from mirix.schemas.mirix_response import MirixResponse
 from mirix.schemas.organization import Organization
 from mirix.schemas.procedural_memory import ProceduralMemoryItemUpdate
-from mirix.schemas.raw_memory import (
-    RawMemoryItem,
-    RawMemoryItemUpdate,
-    SearchRawMemoryRequest,
-    SearchRawMemoryResponse,
-)
+from mirix.schemas.raw_memory import RawMemoryItem, RawMemoryItemUpdate, SearchRawMemoryRequest, SearchRawMemoryResponse
 from mirix.schemas.resource_memory import ResourceMemoryItemUpdate
 from mirix.schemas.sandbox_config import (
     E2BSandboxConfig,
@@ -4186,6 +4182,12 @@ async def get_raw_memory(
 
     Raw memories are unprocessed task context stored for task sharing use cases,
     with a 14-day TTL.
+
+    Args:
+        memory_id: ID of the memory to fetch
+        user_id: Optional user ID - if provided, validates user exists and filters by user
+        client: Client performing the operation
+        client_id: Alternative to client - will be resolved to client
     """
     server = get_server()
 
@@ -4195,10 +4197,19 @@ async def get_raw_memory(
     if not client:
         raise HTTPException(status_code=401, detail="Client or client_id required")
 
+    # If user_id provided, validate user exists
+    if user_id:
+        try:
+            from mirix.orm.errors import NoResultFound
+
+            server.user_manager.get_user_by_id(user_id)
+        except NoResultFound:
+            raise HTTPException(status_code=404, detail=f"User {user_id} not found")
+
     try:
         from mirix.orm.errors import NoResultFound
 
-        memory = server.raw_memory_manager.get_raw_memory_by_id(memory_id, actor=client)
+        memory = server.raw_memory_manager.get_raw_memory_by_id(memory_id, actor=client, user_id=user_id)
         return {
             "success": True,
             "memory": memory.model_dump(mode="json"),
@@ -4241,6 +4252,13 @@ async def update_raw_memory(
 
     Updates the context and/or filter_tags fields of the memory.
     Supports append/replace modes for both context and tags.
+
+    Args:
+        memory_id: ID of the memory to update
+        request: Update request with new context/filter_tags
+        user_id: Optional user ID - if provided, validates user exists and filters by user
+        client: Client performing the operation
+        client_id: Alternative to client - will be resolved to client
     """
     server = get_server()
 
@@ -4250,17 +4268,14 @@ async def update_raw_memory(
     if not client:
         raise HTTPException(status_code=401, detail="Client or client_id required")
 
-    # If user_id is not provided, use the admin user for this client
-    if not user_id:
-        from mirix.services.admin_user_manager import ClientAuthManager
+    # If user_id provided, validate user exists
+    if user_id:
+        try:
+            from mirix.orm.errors import NoResultFound
 
-        user_id = ClientAuthManager.get_admin_user_id_for_client(client.id)
-        logger.debug("No user_id provided, using admin user: %s", user_id)
-
-    # Get user
-    user = server.user_manager.get_user_by_id(user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail=f"User {user_id} not found")
+            server.user_manager.get_user_by_id(user_id)
+        except NoResultFound:
+            raise HTTPException(status_code=404, detail=f"User {user_id} not found")
 
     # Get agent_state for embedding generation
     agents = server.agent_manager.list_agents(actor=client, limit=1)
@@ -4278,6 +4293,7 @@ async def update_raw_memory(
             agent_state=agent_state,
             context_update_mode=request.context_update_type,
             tags_merge_mode=request.tags_update_type,
+            user_id=user_id,
         )
         return {
             "success": True,
@@ -4317,12 +4333,19 @@ async def delete_raw_memory(
     memory_id: str,
     client: Optional[Client] = None,
     client_id: Optional[str] = None,
+    user_id: Optional[str] = None,
 ):
     """
     Delete a raw memory by ID.
 
     This performs a hard delete and removes the memory from both PostgreSQL
     and Redis cache.
+
+    Args:
+        memory_id: ID of the memory to delete
+        client: Client performing the operation
+        client_id: Alternative to client - will be resolved to client
+        user_id: Optional user ID - if provided, validates user exists and filters by user
     """
     server = get_server()
 
@@ -4332,8 +4355,17 @@ async def delete_raw_memory(
     if not client:
         raise HTTPException(status_code=401, detail="Client or client_id required")
 
+    # If user_id provided, validate user exists
+    if user_id:
+        try:
+            from mirix.orm.errors import NoResultFound
+
+            server.user_manager.get_user_by_id(user_id)
+        except NoResultFound:
+            raise HTTPException(status_code=404, detail=f"User {user_id} not found")
+
     try:
-        deleted = server.raw_memory_manager.delete_raw_memory(memory_id, client)
+        deleted = server.raw_memory_manager.delete_raw_memory(memory_id, client, user_id=user_id)
         if deleted:
             return {
                 "success": True,
@@ -4372,6 +4404,12 @@ async def search_raw_memory(
 ):
     """
     Search raw memories with filtering, sorting, cursor-based pagination, and time range filtering.
+
+    Args:
+        request: Search request with filter_tags, sort, cursor, time_range, limit
+        user_id: Optional user ID - if provided, validates user exists and filters by user
+        client: Client performing the operation
+        client_id: Alternative to client - will be resolved to client
     """
     server = get_server()
 
@@ -4381,23 +4419,14 @@ async def search_raw_memory(
     if not client:
         raise HTTPException(status_code=401, detail="Client or client_id required")
 
-    # If user_id is not provided, use the admin user for this client
-    if not user_id:
-        from mirix.services.admin_user_manager import ClientAuthManager
+    # If user_id provided, validate user exists
+    if user_id:
+        try:
+            from mirix.orm.errors import NoResultFound
 
-        user_id = ClientAuthManager.get_admin_user_id_for_client(client.id)
-        logger.debug("No user_id provided, using admin user: %s", user_id)
-
-    # Get user
-    try:
-        user = server.user_manager.get_user_by_id(user_id)
-    except Exception as e:
-        from mirix.orm.errors import NoResultFound
-
-        if isinstance(e, NoResultFound):
+            server.user_manager.get_user_by_id(user_id)
+        except NoResultFound:
             raise HTTPException(status_code=404, detail=f"User {user_id} not found")
-        # Re-raise other exceptions
-        raise
 
     # Process filter_tags: always set scope to client scope (overwrites any user-provided scope)
     filter_tags = dict[str, Any](request.filter_tags) if request.filter_tags is not None else {}
@@ -4462,9 +4491,14 @@ async def search_raw_memory(
             detail=f"Invalid sort: {request.sort}. Must be one of {valid_sorts}",
         )
 
+    # Validate client has organization_id
+    if not client.organization_id:
+        raise HTTPException(status_code=401, detail="Client must have an organization_id")
+
     try:
         items, next_cursor = server.raw_memory_manager.search_raw_memories(
-            user=user,
+            organization_id=client.organization_id,
+            user_id=user_id,
             filter_tags=filter_tags,
             sort=request.sort,
             cursor=request.cursor,

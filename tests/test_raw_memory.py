@@ -1399,7 +1399,8 @@ def test_search_raw_memories_filter_tags_multiple_keys(raw_memory_manager, test_
 
     # Search with multiple filter_tags (AND filtering)
     results, cursor = raw_memory_manager.search_raw_memories(
-        user=test_user,
+        organization_id=test_user.organization_id,
+        user_id=test_user.id,
         filter_tags={"priority": "high", "source": "iep"},
         limit=10,
     )
@@ -1457,7 +1458,8 @@ def test_search_raw_memories_sorting_all_fields(raw_memory_manager, test_actor, 
 
     # Test ascending sort by updated_at
     results, _ = raw_memory_manager.search_raw_memories(
-        user=test_user,
+        organization_id=test_user.organization_id,
+        user_id=test_user.id,
         filter_tags={"scope": test_actor.scope},
         sort="updated_at",
         limit=10,
@@ -1468,7 +1470,8 @@ def test_search_raw_memories_sorting_all_fields(raw_memory_manager, test_actor, 
 
     # Test descending sort by updated_at
     results, _ = raw_memory_manager.search_raw_memories(
-        user=test_user,
+        organization_id=test_user.organization_id,
+        user_id=test_user.id,
         filter_tags={"scope": test_actor.scope},
         sort="-updated_at",
         limit=10,
@@ -1479,7 +1482,8 @@ def test_search_raw_memories_sorting_all_fields(raw_memory_manager, test_actor, 
 
     # Test sorting by created_at
     results, _ = raw_memory_manager.search_raw_memories(
-        user=test_user,
+        organization_id=test_user.organization_id,
+        user_id=test_user.id,
         filter_tags={"scope": test_actor.scope},
         sort="-created_at",
         limit=10,
@@ -1489,7 +1493,8 @@ def test_search_raw_memories_sorting_all_fields(raw_memory_manager, test_actor, 
 
     # Test sorting by occurred_at
     results, _ = raw_memory_manager.search_raw_memories(
-        user=test_user,
+        organization_id=test_user.organization_id,
+        user_id=test_user.id,
         filter_tags={"scope": test_actor.scope},
         sort="-occurred_at",
         limit=10,
@@ -1536,7 +1541,8 @@ def test_search_raw_memories_cursor_pagination(raw_memory_manager, test_actor, t
 
     # First page (limit=2) - filter by unique test_tag to isolate
     results1, cursor1 = raw_memory_manager.search_raw_memories(
-        user=test_user,
+        organization_id=test_user.organization_id,
+        user_id=test_user.id,
         filter_tags={"scope": test_actor.scope, "test_tag": test_tag},
         sort="-updated_at",
         limit=2,
@@ -1546,7 +1552,8 @@ def test_search_raw_memories_cursor_pagination(raw_memory_manager, test_actor, t
 
     # Second page using cursor
     results2, cursor2 = raw_memory_manager.search_raw_memories(
-        user=test_user,
+        organization_id=test_user.organization_id,
+        user_id=test_user.id,
         filter_tags={"scope": test_actor.scope, "test_tag": test_tag},
         sort="-updated_at",
         cursor=cursor1,
@@ -1558,7 +1565,8 @@ def test_search_raw_memories_cursor_pagination(raw_memory_manager, test_actor, t
 
     # Third page
     results3, cursor3 = raw_memory_manager.search_raw_memories(
-        user=test_user,
+        organization_id=test_user.organization_id,
+        user_id=test_user.id,
         filter_tags={"scope": test_actor.scope, "test_tag": test_tag},
         sort="-updated_at",
         cursor=cursor2,
@@ -1615,7 +1623,8 @@ def test_search_raw_memories_cursor_different_sort_fields(raw_memory_manager, te
 
     # Get cursor with occurred_at sort
     results1, cursor1 = raw_memory_manager.search_raw_memories(
-        user=test_user,
+        organization_id=test_user.organization_id,
+        user_id=test_user.id,
         filter_tags={"scope": test_actor.scope},
         sort="-occurred_at",
         limit=1,
@@ -1624,7 +1633,8 @@ def test_search_raw_memories_cursor_different_sort_fields(raw_memory_manager, te
 
     # Use cursor with same sort field
     results2, _ = raw_memory_manager.search_raw_memories(
-        user=test_user,
+        organization_id=test_user.organization_id,
+        user_id=test_user.id,
         filter_tags={"scope": test_actor.scope},
         sort="-occurred_at",
         cursor=cursor1,
@@ -1702,7 +1712,8 @@ def test_search_raw_memories_time_range_filtering(raw_memory_manager, test_actor
         "occurred_at_lte": (base_time - timedelta(days=0)).replace(tzinfo=None),
     }
     results, _ = raw_memory_manager.search_raw_memories(
-        user=test_user,
+        organization_id=test_user.organization_id,
+        user_id=test_user.id,
         filter_tags={"scope": test_actor.scope},
         time_range=time_range,
         limit=10,
@@ -1718,7 +1729,8 @@ def test_search_raw_memories_time_range_filtering(raw_memory_manager, test_actor
         "updated_at_gte": (base_time - timedelta(days=3)).replace(tzinfo=None),
     }
     results, _ = raw_memory_manager.search_raw_memories(
-        user=test_user,
+        organization_id=test_user.organization_id,
+        user_id=test_user.id,
         filter_tags={"scope": test_actor.scope},
         time_range=time_range,
         limit=10,
@@ -1756,7 +1768,8 @@ def test_search_raw_memories_limit_enforcement(raw_memory_manager, test_actor, t
 
     # Test limit=2
     results, _ = raw_memory_manager.search_raw_memories(
-        user=test_user,
+        organization_id=test_user.organization_id,
+        user_id=test_user.id,
         filter_tags={"scope": test_actor.scope},
         limit=2,
     )
@@ -1764,7 +1777,8 @@ def test_search_raw_memories_limit_enforcement(raw_memory_manager, test_actor, t
 
     # Test limit > 100 (should be capped at 100)
     results, _ = raw_memory_manager.search_raw_memories(
-        user=test_user,
+        organization_id=test_user.organization_id,
+        user_id=test_user.id,
         filter_tags={"scope": test_actor.scope},
         limit=200,
     )
@@ -1797,7 +1811,8 @@ def test_search_raw_memories_scope_handling(raw_memory_manager, test_actor, test
 
     # Search with scope in filter_tags - should find it
     results, _ = raw_memory_manager.search_raw_memories(
-        user=test_user,
+        organization_id=test_user.organization_id,
+        user_id=test_user.id,
         filter_tags={"scope": test_actor.scope, "priority": "high"},
         limit=10,
     )
@@ -1813,7 +1828,8 @@ def test_search_raw_memories_invalid_cursor(raw_memory_manager, test_actor, test
     # Test invalid base64
     with pytest.raises(ValueError, match="Invalid cursor format"):
         raw_memory_manager.search_raw_memories(
-            user=test_user,
+            organization_id=test_user.organization_id,
+            user_id=test_user.id,
             filter_tags={"scope": test_actor.scope},
             cursor="not-valid-base64!!!",
             limit=10,
@@ -1825,7 +1841,8 @@ def test_search_raw_memories_invalid_cursor(raw_memory_manager, test_actor, test
     invalid_json = base64.b64encode(b"not json").decode()
     with pytest.raises(ValueError, match="Invalid cursor format"):
         raw_memory_manager.search_raw_memories(
-            user=test_user,
+            organization_id=test_user.organization_id,
+            user_id=test_user.id,
             filter_tags={"scope": test_actor.scope},
             cursor=invalid_json,
             limit=10,
@@ -1837,7 +1854,8 @@ def test_search_raw_memories_invalid_cursor(raw_memory_manager, test_actor, test
     incomplete_cursor = base64.b64encode(json.dumps({"id": "test"}).encode()).decode()
     with pytest.raises(ValueError, match="Invalid cursor format"):
         raw_memory_manager.search_raw_memories(
-            user=test_user,
+            organization_id=test_user.organization_id,
+            user_id=test_user.id,
             filter_tags={"scope": test_actor.scope},
             sort="-updated_at",
             cursor=incomplete_cursor,
@@ -1945,11 +1963,11 @@ def test_api_search_raw_memories_endpoint(api_client, raw_memory_manager, test_a
 
 @pytest.mark.integration
 def test_api_search_raw_memories_without_user_id(api_client, raw_memory_manager, test_actor, test_user):
-    """Test search endpoint without user_id (should use admin user)."""
-    # Create memory
+    """Test search endpoint without user_id (should return all memories for org, no user filtering)."""
+    # Create memory for test_user
     mem = raw_memory_manager.create_raw_memory(
         raw_memory=RawMemoryItemCreate(
-            context="Admin user test",
+            context="No user filter test",
             filter_tags={"scope": test_actor.scope},
             user_id=test_user.id,
             organization_id=test_actor.organization_id,
@@ -1964,7 +1982,7 @@ def test_api_search_raw_memories_without_user_id(api_client, raw_memory_manager,
         use_cache=False,
     )
 
-    # Test without user_id parameter (should use admin user)
+    # Test without user_id parameter (should return memories across all users in org)
     response = api_client.post(
         "/memory/search_raw",
         json={"limit": 10},
@@ -1974,6 +1992,8 @@ def test_api_search_raw_memories_without_user_id(api_client, raw_memory_manager,
     data = response.json()
     assert "items" in data
     assert "count" in data
+    # Memory should be found since no user_id filter is applied
+    assert any(item["id"] == mem.id for item in data["items"])
 
     # Cleanup
     raw_memory_manager.delete_raw_memory(mem.id, test_actor)
@@ -2211,3 +2231,223 @@ def test_scope_tamper_prevention_on_update(raw_memory_manager, test_actor, test_
 
     # Cleanup
     raw_memory_manager.delete_raw_memory(result.id, test_actor)
+
+
+# =================================================================
+# USER_ID FILTERING TESTS
+# =================================================================
+
+
+@pytest.fixture(scope="module")
+def test_user_different():
+    """Provide a second test user for user_id filtering tests."""
+    from mirix.services.user_manager import UserManager
+
+    user_mgr = UserManager()
+
+    # Create a different user in the same organization
+    user_id = "test-user-different-456"
+    try:
+        return user_mgr.get_user_by_id(user_id)
+    except Exception:
+        return user_mgr.create_user(
+            PydanticUser(
+                id=user_id,
+                organization_id="test-org-456",
+                name="Test User Different",
+                timezone="UTC",
+            )
+        )
+
+
+def test_get_raw_memory_filters_by_user_id(raw_memory_manager, test_actor, test_user, test_user_different):
+    """Test that get_raw_memory_by_id returns 404 when user_id doesn't match."""
+    from mirix.orm.errors import NoResultFound
+
+    # Create memory owned by test_user
+    memory_data = RawMemoryItemCreate(
+        context="User filtering test",
+        filter_tags={"custom_tag": "value"},
+        user_id=test_user.id,
+        organization_id=test_actor.organization_id,
+    )
+
+    result = raw_memory_manager.create_raw_memory(
+        raw_memory=memory_data,
+        actor=test_actor,
+        client_id=test_actor.id,
+        user_id=test_user.id,
+        use_cache=False,
+    )
+
+    # Verify owner can read it (with user_id filter)
+    fetched = raw_memory_manager.get_raw_memory_by_id(result.id, actor=test_actor, user_id=test_user.id)
+    assert fetched.id == result.id
+
+    # Verify different user cannot read it (with user_id filter)
+    with pytest.raises(NoResultFound):
+        raw_memory_manager.get_raw_memory_by_id(result.id, actor=test_actor, user_id=test_user_different.id)
+
+    # Verify reading without user_id filter still works (org-level access)
+    fetched_no_filter = raw_memory_manager.get_raw_memory_by_id(result.id, actor=test_actor)
+    assert fetched_no_filter.id == result.id
+
+    # Cleanup
+    raw_memory_manager.delete_raw_memory(result.id, test_actor)
+
+
+def test_update_raw_memory_filters_by_user_id(raw_memory_manager, test_actor, test_user, test_user_different):
+    """Test that update_raw_memory returns error when user_id doesn't match."""
+    # Create memory owned by test_user
+    memory_data = RawMemoryItemCreate(
+        context="Update user filtering test",
+        filter_tags={"custom_tag": "value"},
+        user_id=test_user.id,
+        organization_id=test_actor.organization_id,
+    )
+
+    result = raw_memory_manager.create_raw_memory(
+        raw_memory=memory_data,
+        actor=test_actor,
+        client_id=test_actor.id,
+        user_id=test_user.id,
+        use_cache=False,
+    )
+
+    # Verify owner can update it (with user_id filter)
+    updated = raw_memory_manager.update_raw_memory(
+        memory_id=result.id,
+        actor=test_actor,
+        new_context="Updated by owner",
+        user_id=test_user.id,
+    )
+    assert updated.context == "Updated by owner"
+
+    # Verify different user cannot update it (with user_id filter)
+    with pytest.raises(ValueError, match="not found"):
+        raw_memory_manager.update_raw_memory(
+            memory_id=result.id,
+            actor=test_actor,
+            new_context="Updated by wrong user",
+            user_id=test_user_different.id,
+        )
+
+    # Cleanup
+    raw_memory_manager.delete_raw_memory(result.id, test_actor)
+
+
+def test_delete_raw_memory_filters_by_user_id(raw_memory_manager, test_actor, test_user, test_user_different):
+    """Test that delete_raw_memory returns False when user_id doesn't match."""
+    # Create memory owned by test_user
+    memory_data = RawMemoryItemCreate(
+        context="Delete user filtering test",
+        filter_tags={"custom_tag": "value"},
+        user_id=test_user.id,
+        organization_id=test_actor.organization_id,
+    )
+
+    result = raw_memory_manager.create_raw_memory(
+        raw_memory=memory_data,
+        actor=test_actor,
+        client_id=test_actor.id,
+        user_id=test_user.id,
+        use_cache=False,
+    )
+
+    # Verify different user cannot delete it (with user_id filter) - returns False
+    deleted = raw_memory_manager.delete_raw_memory(result.id, test_actor, user_id=test_user_different.id)
+    assert deleted is False
+
+    # Verify memory still exists
+    fetched = raw_memory_manager.get_raw_memory_by_id(result.id, actor=test_actor)
+    assert fetched.id == result.id
+
+    # Verify owner can delete it (with user_id filter)
+    deleted = raw_memory_manager.delete_raw_memory(result.id, test_actor, user_id=test_user.id)
+    assert deleted is True
+
+
+def test_search_raw_memories_filters_by_user_id(raw_memory_manager, test_actor, test_user, test_user_different):
+    """Test that search_raw_memories filters by user_id when provided."""
+    # Create memory for test_user
+    mem1 = raw_memory_manager.create_raw_memory(
+        raw_memory=RawMemoryItemCreate(
+            context="User 1 memory",
+            filter_tags={"scope": test_actor.scope, "test_tag": "user_filter_test"},
+            user_id=test_user.id,
+            organization_id=test_actor.organization_id,
+        ),
+        actor=test_actor,
+        client_id=test_actor.id,
+        user_id=test_user.id,
+        use_cache=False,
+    )
+
+    # Create memory for test_user_different
+    mem2 = raw_memory_manager.create_raw_memory(
+        raw_memory=RawMemoryItemCreate(
+            context="User 2 memory",
+            filter_tags={"scope": test_actor.scope, "test_tag": "user_filter_test"},
+            user_id=test_user_different.id,
+            organization_id=test_actor.organization_id,
+        ),
+        actor=test_actor,
+        client_id=test_actor.id,
+        user_id=test_user_different.id,
+        use_cache=False,
+    )
+
+    # Search with user_id filter for test_user - should only return mem1
+    results, _ = raw_memory_manager.search_raw_memories(
+        organization_id=test_user.organization_id,
+        user_id=test_user.id,
+        filter_tags={"scope": test_actor.scope, "test_tag": "user_filter_test"},
+        limit=10,
+    )
+    assert len(results) == 1
+    assert results[0].id == mem1.id
+
+    # Search with user_id filter for test_user_different - should only return mem2
+    results, _ = raw_memory_manager.search_raw_memories(
+        organization_id=test_user.organization_id,
+        user_id=test_user_different.id,
+        filter_tags={"scope": test_actor.scope, "test_tag": "user_filter_test"},
+        limit=10,
+    )
+    assert len(results) == 1
+    assert results[0].id == mem2.id
+
+    # Search without user_id filter - should return both
+    results, _ = raw_memory_manager.search_raw_memories(
+        organization_id=test_user.organization_id,
+        user_id=None,
+        filter_tags={"scope": test_actor.scope, "test_tag": "user_filter_test"},
+        limit=10,
+    )
+    result_ids = {r.id for r in results}
+    assert mem1.id in result_ids
+    assert mem2.id in result_ids
+
+    # Cleanup
+    raw_memory_manager.delete_raw_memory(mem1.id, test_actor)
+    raw_memory_manager.delete_raw_memory(mem2.id, test_actor)
+
+
+def test_create_raw_memory_requires_user_id(raw_memory_manager, test_actor):
+    """Test that create_raw_memory raises error when user_id is not provided."""
+    memory_data = RawMemoryItemCreate(
+        context="Test missing user_id",
+        filter_tags={"custom_tag": "value"},
+        user_id="placeholder",  # Will be ignored, we test the parameter
+        organization_id=test_actor.organization_id,
+    )
+
+    # Verify error is raised when user_id is empty string
+    with pytest.raises(ValueError, match="user_id is required"):
+        raw_memory_manager.create_raw_memory(
+            raw_memory=memory_data,
+            actor=test_actor,
+            client_id=test_actor.id,
+            user_id="",  # Empty string should fail
+            use_cache=False,
+        )
