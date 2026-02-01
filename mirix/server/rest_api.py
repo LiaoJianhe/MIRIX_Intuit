@@ -4195,22 +4195,10 @@ async def get_raw_memory(
     if not client:
         raise HTTPException(status_code=401, detail="Client or client_id required")
 
-    # If user_id is not provided, use the admin user for this client
-    if not user_id:
-        from mirix.services.admin_user_manager import ClientAuthManager
-
-        user_id = ClientAuthManager.get_admin_user_id_for_client(client.id)
-        logger.debug("No user_id provided, using admin user: %s", user_id)
-
-    # Get user
-    user = server.user_manager.get_user_by_id(user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail=f"User {user_id} not found")
-
     try:
         from mirix.orm.errors import NoResultFound
 
-        memory = server.raw_memory_manager.get_raw_memory_by_id(memory_id, user)
+        memory = server.raw_memory_manager.get_raw_memory_by_id(memory_id, actor=client)
         return {
             "success": True,
             "memory": memory.model_dump(mode="json"),

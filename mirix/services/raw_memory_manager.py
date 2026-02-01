@@ -121,6 +121,11 @@ class RawMemoryManager:
 
             raw_memory.id = generate_unique_short_id(self.session_maker, RawMemory, "raw_mem")
 
+        # Auto-inject scope from actor
+        if raw_memory.filter_tags is None:
+            raw_memory.filter_tags = {}
+        raw_memory.filter_tags["scope"] = actor.scope
+
         logger.debug(
             "Creating raw memory: id=%s, client_id=%s, user_id=%s, filter_tags=%s",
             raw_memory.id,
@@ -181,22 +186,23 @@ class RawMemoryManager:
     def get_raw_memory_by_id(
         self,
         memory_id: str,
-        user: PydanticUser,
+        actor: PydanticClient,
     ) -> Optional[PydanticRawMemoryItem]:
         """
         Fetch a single raw memory record by ID (with Redis JSON caching).
 
         Args:
             memory_id: ID of the memory to fetch
-            user: User who owns this memory
+            actor: Client performing the operation (for scope validation)
 
         Returns:
             Raw memory as Pydantic model
 
         Raises:
-            NoResultFound: If the record doesn't exist or doesn't belong to user
+            NoResultFound: If the record doesn't exist or scope doesn't match
         """
         # Try Redis cache first (JSON-based for memory tables)
+        redis_client = None
         try:
             from mirix.database.redis_client import get_redis_client
 
@@ -206,9 +212,18 @@ class RawMemoryManager:
                 redis_key = f"{redis_client.RAW_MEMORY_PREFIX}{memory_id}"
                 cached_data = redis_client.get_json(redis_key)
                 if cached_data:
-                    # Cache HIT - return from Redis
+                    # Cache HIT - validate scope before returning
                     logger.debug("Redis cache HIT for raw memory %s", memory_id)
-                    return PydanticRawMemoryItem(**cached_data)
+                    pydantic_memory = PydanticRawMemoryItem(**cached_data)
+
+                    # Validate scope
+                    memory_scope = (pydantic_memory.filter_tags or {}).get("scope")
+                    if memory_scope != actor.scope:
+                        raise NoResultFound(f"Raw memory record with id {memory_id} not found.")
+
+                    return pydantic_memory
+        except NoResultFound:
+            raise
         except Exception as e:
             # Log but continue to PostgreSQL on Redis error
             logger.warning(
@@ -220,19 +235,18 @@ class RawMemoryManager:
         # Cache MISS or Redis unavailable - fetch from PostgreSQL
         with self.session_maker() as session:
             try:
-                # Construct a PydanticClient for actor using user's organization_id
-                actor = PydanticClient(
-                    id="system-default-client",
-                    organization_id=user.organization_id,
-                    name="system-client",
-                )
-
                 raw_memory_item = RawMemory.read(db_session=session, identifier=memory_id, actor=actor)
                 pydantic_memory = raw_memory_item.to_pydantic()
+
+                # Validate scope
+                memory_scope = (pydantic_memory.filter_tags or {}).get("scope")
+                if memory_scope != actor.scope:
+                    raise NoResultFound(f"Raw memory record with id {memory_id} not found.")
 
                 # Populate Redis cache for next time
                 try:
                     if redis_client:
+                        redis_key = f"{redis_client.RAW_MEMORY_PREFIX}{memory_id}"
                         data = pydantic_memory.model_dump(mode="json")
                         redis_client.set_json(redis_key, data, ttl=settings.redis_ttl_default)
                         logger.debug(
@@ -254,9 +268,9 @@ class RawMemoryManager:
     def update_raw_memory(
         self,
         memory_id: str,
+        actor: PydanticClient,
         new_context: Optional[str] = None,
         new_filter_tags: Optional[Dict[str, Any]] = None,
-        actor: Optional[PydanticClient] = None,
         agent_state: Optional[AgentState] = None,
         context_update_mode: str = "replace",
         tags_merge_mode: str = "replace",
@@ -268,7 +282,7 @@ class RawMemoryManager:
             memory_id: ID of the memory to update
             new_context: New context text
             new_filter_tags: New or updated filter tags
-            actor: Client performing the update (for access control and audit)
+            actor: Client performing the update (required for access control)
             agent_state: Agent state containing embedding configuration (optional)
             context_update_mode: How to handle context updates ("append" or "replace")
             tags_merge_mode: How to handle filter_tags updates ("merge" or "replace")
@@ -277,7 +291,7 @@ class RawMemoryManager:
             Updated raw memory as Pydantic model
 
         Raises:
-            ValueError: If memory not found or validation fails
+            ValueError: If memory not found, scope mismatch, or validation fails
         """
         logger.debug(
             "Updating raw memory: id=%s, context_mode=%s, tags_mode=%s",
@@ -298,12 +312,25 @@ class RawMemoryManager:
                 raise ValueError(f"Raw memory {memory_id} not found")
 
             # Perform access control check (replaces RawMemory.read's built-in check)
-            if actor and raw_memory.organization_id != actor.organization_id:
+            if raw_memory.organization_id != actor.organization_id:
                 raise ValueError(
                     f"Access denied: memory {memory_id} belongs to "
                     f"organization {raw_memory.organization_id}, "
                     f"actor belongs to {actor.organization_id}"
                 )
+
+            # Perform scope access control check
+            memory_scope = (raw_memory.filter_tags or {}).get("scope")
+            if memory_scope != actor.scope:
+                raise ValueError(
+                    f"Access denied: memory {memory_id} has scope '{memory_scope}', "
+                    f"actor has scope '{actor.scope}'"
+                )
+
+            # Prevent scope tampering in filter_tags updates
+            if new_filter_tags is not None and "scope" in new_filter_tags:
+                if new_filter_tags["scope"] != actor.scope:
+                    raise ValueError("Cannot change memory scope - scope must match actor.scope")
 
             # Update context
             if new_context is not None:
@@ -347,7 +374,7 @@ class RawMemoryManager:
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "operation": "updated",
             }
-            raw_memory._last_update_by_id = actor.id if actor else None
+            raw_memory._last_update_by_id = actor.id
 
             # Commit changes
             session.commit()
@@ -392,6 +419,15 @@ class RawMemoryManager:
         with self.session_maker() as session:
             try:
                 raw_memory = RawMemory.read(db_session=session, identifier=memory_id, actor=actor)
+
+                # Perform scope access control check
+                memory_scope = (raw_memory.filter_tags or {}).get("scope")
+                if memory_scope != actor.scope:
+                    raise ValueError(
+                        f"Access denied: memory {memory_id} has scope '{memory_scope}', "
+                        f"actor has scope '{actor.scope}'"
+                    )
+
                 session.delete(raw_memory)
                 session.commit()
 
