@@ -22,6 +22,7 @@ from mirix.schemas.client import Client as PydanticClient
 from mirix.schemas.raw_memory import RawMemoryItem as PydanticRawMemoryItem
 from mirix.schemas.raw_memory import RawMemoryItemCreate as PydanticRawMemoryItemCreate
 from mirix.schemas.user import User as PydanticUser
+from mirix.services.user_manager import UserManager
 from mirix.settings import settings
 from mirix.utils import enforce_types
 
@@ -73,10 +74,46 @@ class RawMemoryManager:
         # user_id should be explicitly provided for proper multi-user isolation
         # Fallback to admin user if not provided
         if user_id is None:
-            from mirix.services.user_manager import UserManager
-
             user_id = UserManager.ADMIN_USER_ID
             logger.warning("user_id not provided to create_raw_memory, using ADMIN_USER_ID as fallback")
+
+        # Auto-create user if it doesn't exist (matching queue worker pattern)
+        user_manager = UserManager()
+        if user_id != UserManager.ADMIN_USER_ID:
+            try:
+                user_manager.get_user_by_id(user_id)
+            except NoResultFound:
+                logger.info(
+                    "User with id=%s not found, auto-creating with organization_id=%s",
+                    user_id,
+                    actor.organization_id,
+                )
+                try:
+                    # Create user with provided user_id and client's organization
+                    user_manager.create_user(
+                        pydantic_user=PydanticUser(
+                            id=user_id,
+                            name=user_id,  # Use user_id as default name
+                            organization_id=actor.organization_id,
+                            timezone=user_manager.DEFAULT_TIME_ZONE,
+                            status="active",
+                            is_deleted=False,
+                            client_id=client_id,
+                            is_admin=False,
+                        )
+                    )
+                    logger.info(
+                        "✓ Auto-created user: %s in organization: %s",
+                        user_id,
+                        actor.organization_id,
+                    )
+                except Exception as create_error:
+                    logger.error(
+                        "Failed to auto-create user with id=%s: %s",
+                        user_id,
+                        create_error,
+                    )
+                    raise create_error
 
         # Ensure ID is set before model_dump
         if not raw_memory.id:

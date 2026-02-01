@@ -154,6 +154,58 @@ def test_manager_create_raw_memory(raw_memory_manager, sample_raw_memory_data, t
     # Note: _created_by_id is tracked in ORM but not exposed in schema
 
 
+def test_manager_create_raw_memory_auto_creates_user(raw_memory_manager, test_actor):
+    """Test that creating raw memory with non-existent user_id auto-creates the user."""
+    import uuid
+
+    from mirix.orm.errors import NoResultFound
+    from mirix.services.user_manager import UserManager
+
+    # Generate a unique user_id that doesn't exist
+    user_id = f"test-auto-user-{uuid.uuid4().hex[:8]}"
+    user_mgr = UserManager()
+
+    # Verify user does NOT exist yet
+    try:
+        user_mgr.get_user_by_id(user_id)
+        # If we get here, user exists - delete it for test
+        pytest.fail(f"User {user_id} should not exist for this test")
+    except NoResultFound:
+        pass  # Expected - user doesn't exist
+
+    # Create raw memory with non-existent user_id - should auto-create user
+    memory_data = RawMemoryItemCreate(
+        context="Test context for auto-created user",
+        filter_tags={"scope": test_actor.scope, "test": "auto_creation"},
+        user_id=user_id,
+        organization_id=test_actor.organization_id,
+    )
+
+    result = raw_memory_manager.create_raw_memory(
+        raw_memory=memory_data,
+        actor=test_actor,
+        client_id=test_actor.id,
+        user_id=user_id,  # Non-existent user_id
+        use_cache=False,
+    )
+
+    # Verify raw memory was created successfully
+    assert result.id is not None
+    assert result.user_id == user_id
+    assert result.context == memory_data.context
+
+    # Verify user was auto-created
+    created_user = user_mgr.get_user_by_id(user_id)
+    assert created_user.id == user_id
+    assert created_user.organization_id == test_actor.organization_id
+    assert created_user.name == user_id  # Default name is user_id
+    assert created_user.status == "active"
+    assert created_user.is_admin is False
+
+    # Cleanup
+    raw_memory_manager.delete_raw_memory(result.id, test_actor)
+
+
 def test_manager_get_raw_memory_by_id(raw_memory_manager, sample_raw_memory_data, test_actor, test_user):
     """Test fetching raw memory by ID via manager."""
     # Create first
