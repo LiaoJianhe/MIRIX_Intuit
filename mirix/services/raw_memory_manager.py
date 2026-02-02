@@ -367,7 +367,11 @@ class RawMemoryManager:
                     }
                     logger.debug("Merged filter_tags for memory %s", memory_id)
                 else:  # replace
+                    # Preserve scope when replacing tags - scope is immutable
+                    preserved_scope = (raw_memory.filter_tags or {}).get("scope")
                     raw_memory.filter_tags = new_filter_tags
+                    if preserved_scope:
+                        raw_memory.filter_tags["scope"] = preserved_scope
                     logger.debug("Replaced filter_tags for memory %s", memory_id)
 
             # Regenerate embeddings if context changed and agent_state provided

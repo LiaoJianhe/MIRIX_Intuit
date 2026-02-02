@@ -251,6 +251,44 @@ def test_manager_update_raw_memory_replace(raw_memory_manager, sample_raw_memory
     # Note: _last_update_by_id is tracked in ORM but not exposed in schema
 
 
+def test_manager_update_raw_memory_replace_preserves_scope(raw_memory_manager, sample_raw_memory_data, test_actor, test_user):
+    """Test that replace mode preserves scope even when not included in new filter_tags.
+    
+    This is a regression test for a bug where replace mode would wipe out scope
+    if the user didn't include it in the new_filter_tags.
+    """
+    # Create memory with scope
+    created = raw_memory_manager.create_raw_memory(
+        raw_memory=sample_raw_memory_data,
+        actor=test_actor,
+        client_id=test_actor.id,
+        user_id=test_user.id,
+        use_cache=False,
+    )
+    
+    # Verify scope was set
+    assert created.filter_tags.get("scope") == test_actor.scope
+    
+    # Update with replace mode WITHOUT including scope in new_filter_tags
+    updated = raw_memory_manager.update_raw_memory(
+        memory_id=created.id,
+        actor=test_actor,
+        new_filter_tags={"status": "completed", "new_tag": "value"},  # No scope!
+        tags_merge_mode="replace",
+    )
+    
+    # Scope should be preserved even though we didn't include it
+    assert updated.filter_tags.get("scope") == test_actor.scope, "Scope should be preserved during replace"
+    assert updated.filter_tags["status"] == "completed"
+    assert updated.filter_tags["new_tag"] == "value"
+    assert "engagement_id" not in updated.filter_tags  # Other tags replaced
+    
+    # Verify we can still fetch the memory (scope-based queries work)
+    fetched = raw_memory_manager.get_raw_memory_by_id(created.id, actor=test_actor)
+    assert fetched is not None
+    assert fetched.filter_tags.get("scope") == test_actor.scope
+
+
 def test_manager_update_raw_memory_append(raw_memory_manager, sample_raw_memory_data, test_actor, test_user):
     """Test updating raw memory with append mode."""
     # Create
