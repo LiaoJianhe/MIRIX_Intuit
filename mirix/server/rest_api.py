@@ -39,7 +39,13 @@ from mirix.schemas.message import Message, MessageCreate
 from mirix.schemas.mirix_response import MirixResponse
 from mirix.schemas.organization import Organization
 from mirix.schemas.procedural_memory import ProceduralMemoryItemUpdate
-from mirix.schemas.raw_memory import RawMemoryItem, RawMemoryItemUpdate, SearchRawMemoryRequest, SearchRawMemoryResponse
+from mirix.schemas.raw_memory import (
+    RawMemoryItem,
+    RawMemoryItemCreateRequest,
+    RawMemoryItemUpdate,
+    SearchRawMemoryRequest,
+    SearchRawMemoryResponse,
+)
 from mirix.schemas.resource_memory import ResourceMemoryItemUpdate
 from mirix.schemas.sandbox_config import (
     E2BSandboxConfig,
@@ -4153,6 +4159,101 @@ async def delete_procedural_memory(
 # ============================================================================
 
 
+@router.post("/memory/raw")
+async def create_raw_memory_handler(
+    request: RawMemoryItemCreateRequest,
+    user_id: str,
+    authorization: Optional[str] = Header(None),
+    http_request: Request = None,
+):
+    """
+    Create a new raw memory.
+
+    **Accepts both JWT (dashboard) and Client API Key (programmatic).**
+
+    Args:
+        request: Create request with context, filter_tags, etc.
+        user_id: User ID this memory belongs to (required query parameter)
+    """
+    client, auth_type = get_client_from_jwt_or_api_key(authorization, http_request)
+    response = await create_raw_memory(request, user_id, client)
+    return response
+
+
+async def create_raw_memory(
+    request: RawMemoryItemCreateRequest,
+    user_id: str,
+    client: Optional[Client] = None,
+    client_id: Optional[str] = None,
+):
+    """
+    Create a new raw memory.
+
+    Args:
+        request: Create request with context, filter_tags, etc.
+        user_id: User ID this memory belongs to (required)
+        client: Client performing the operation
+        client_id: Alternative to client - will be resolved to client
+    """
+    server = get_server()
+
+    # Resolve client: use provided client or fetch from client_id
+    if not client and client_id:
+        client = server.client_manager.get_client_by_id(client_id)
+    if not client:
+        raise HTTPException(status_code=401, detail="Client or client_id required")
+
+    # Get agent_state for embedding generation (required)
+    agents = server.agent_manager.list_agents(actor=client, limit=1)
+    agent_state = agents[0] if agents else None
+
+    if not agent_state:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No agents found for client {client.id}. An agent is required for embedding generation.",
+        )
+
+    # Build PydanticRawMemoryItemCreate from request
+    from mirix.schemas.raw_memory import RawMemoryItemCreate as PydanticRawMemoryItemCreate
+
+    assert client.organization_id is not None
+    raw_memory_create = PydanticRawMemoryItemCreate(
+        context=request.context,
+        filter_tags=request.filter_tags,
+        occurred_at=request.occurred_at,
+        id=request.id,
+        user_id=user_id,
+        organization_id=client.organization_id,
+        context_embedding=None,
+        embedding_config=None,
+    )
+
+    try:
+        created_memory = server.raw_memory_manager.create_raw_memory(
+            raw_memory=raw_memory_create,
+            actor=client,
+            user_id=user_id,
+            agent_state=agent_state,
+            client_id=client.id,
+        )
+        return {
+            "success": True,
+            "message": f"Raw memory {created_memory.id} created",
+            "memory": {
+                "id": created_memory.id,
+                "context": created_memory.context,
+                "filter_tags": created_memory.filter_tags,
+                "user_id": created_memory.user_id,
+                "created_at": created_memory.created_at.isoformat(),
+            },
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error creating raw memory: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+
+
 @router.get("/memory/raw/{memory_id}")
 async def get_raw_memory_handler(
     memory_id: str,
@@ -4277,12 +4378,15 @@ async def update_raw_memory(
         except NoResultFound:
             raise HTTPException(status_code=404, detail=f"User {user_id} not found")
 
-    # Get agent_state for embedding generation
+    # Get agent_state for embedding generation (required)
     agents = server.agent_manager.list_agents(actor=client, limit=1)
     agent_state = agents[0] if agents else None
 
     if not agent_state:
-        logger.warning("No agents found for client %s, embeddings will not be generated", client.id)
+        raise HTTPException(
+            status_code=400,
+            detail=f"No agents found for client {client.id}. An agent is required for embedding generation.",
+        )
 
     try:
         updated_memory = server.raw_memory_manager.update_raw_memory(

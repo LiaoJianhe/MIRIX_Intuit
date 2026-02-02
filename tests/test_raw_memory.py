@@ -251,9 +251,11 @@ def test_manager_update_raw_memory_replace(raw_memory_manager, sample_raw_memory
     # Note: _last_update_by_id is tracked in ORM but not exposed in schema
 
 
-def test_manager_update_raw_memory_replace_preserves_scope(raw_memory_manager, sample_raw_memory_data, test_actor, test_user):
+def test_manager_update_raw_memory_replace_preserves_scope(
+    raw_memory_manager, sample_raw_memory_data, test_actor, test_user
+):
     """Test that replace mode preserves scope even when not included in new filter_tags.
-    
+
     This is a regression test for a bug where replace mode would wipe out scope
     if the user didn't include it in the new_filter_tags.
     """
@@ -265,10 +267,10 @@ def test_manager_update_raw_memory_replace_preserves_scope(raw_memory_manager, s
         user_id=test_user.id,
         use_cache=False,
     )
-    
+
     # Verify scope was set
     assert created.filter_tags.get("scope") == test_actor.scope
-    
+
     # Update with replace mode WITHOUT including scope in new_filter_tags
     updated = raw_memory_manager.update_raw_memory(
         memory_id=created.id,
@@ -276,13 +278,13 @@ def test_manager_update_raw_memory_replace_preserves_scope(raw_memory_manager, s
         new_filter_tags={"status": "completed", "new_tag": "value"},  # No scope!
         tags_merge_mode="replace",
     )
-    
+
     # Scope should be preserved even though we didn't include it
     assert updated.filter_tags.get("scope") == test_actor.scope, "Scope should be preserved during replace"
     assert updated.filter_tags["status"] == "completed"
     assert updated.filter_tags["new_tag"] == "value"
     assert "engagement_id" not in updated.filter_tags  # Other tags replaced
-    
+
     # Verify we can still fetch the memory (scope-based queries work)
     fetched = raw_memory_manager.get_raw_memory_by_id(created.id, actor=test_actor)
     assert fetched is not None
@@ -954,6 +956,102 @@ def test_api_get_nonexistent_memory(api_client, test_user):
 
     assert response.status_code == 404
     print("\n[OK] GET nonexistent memory returns 404 as expected")
+
+
+@pytest.mark.integration
+def test_api_create_raw_memory(api_client, test_actor, test_user):
+    """Test POST /memory/raw endpoint to create a new raw memory."""
+    # Test creating raw memory via API
+    create_payload = {
+        "context": "API test: Creating new raw memory via POST endpoint.",
+        "filter_tags": {
+            "engagement_id": "tsk_api_create",
+            "priority": "high",
+        },
+    }
+
+    response = api_client.post(
+        "/memory/raw",
+        json=create_payload,
+        params={"user_id": test_user.id},
+    )
+
+    assert response.status_code == 200, f"POST failed: {response.text}"
+    data = response.json()
+    assert data["success"] is True
+    assert "memory" in data
+    assert data["memory"]["context"] == create_payload["context"]
+    assert data["memory"]["filter_tags"]["scope"] == test_actor.scope  # Auto-injected
+    assert data["memory"]["filter_tags"]["engagement_id"] == "tsk_api_create"
+    assert data["memory"]["user_id"] == test_user.id
+
+    # Cleanup via DELETE
+    memory_id = data["memory"]["id"]
+    api_client.delete(f"/memory/raw/{memory_id}")
+
+    print(f"\n[OK] POST /memory/raw successful - created {memory_id}")
+
+
+@pytest.mark.integration
+def test_api_create_raw_memory_missing_user_id(api_client):
+    """Test POST /memory/raw returns 422 when user_id is missing."""
+    create_payload = {
+        "context": "Test missing user_id",
+    }
+
+    # user_id is required - should fail validation
+    response = api_client.post("/memory/raw", json=create_payload)
+
+    assert response.status_code == 422  # Pydantic validation error
+    print("\n[OK] POST /memory/raw without user_id returns 422 as expected")
+
+
+@pytest.mark.integration
+def test_api_create_raw_memory_missing_context(api_client, test_user):
+    """Test POST /memory/raw returns 422 when context is missing."""
+    create_payload = {
+        "filter_tags": {"tag": "value"},
+    }
+
+    response = api_client.post(
+        "/memory/raw",
+        json=create_payload,
+        params={"user_id": test_user.id},
+    )
+
+    assert response.status_code == 422  # Pydantic validation error - context is required
+    print("\n[OK] POST /memory/raw without context returns 422 as expected")
+
+
+@pytest.mark.integration
+def test_api_create_raw_memory_auto_creates_user(api_client, test_actor):
+    """Test POST /memory/raw auto-creates user if user_id doesn't exist."""
+    import uuid
+
+    # Generate unique user_id that doesn't exist
+    new_user_id = f"test-auto-api-user-{uuid.uuid4().hex[:8]}"
+
+    create_payload = {
+        "context": "Testing auto user creation via API",
+        "filter_tags": {"test": "auto_user"},
+    }
+
+    response = api_client.post(
+        "/memory/raw",
+        json=create_payload,
+        params={"user_id": new_user_id},
+    )
+
+    assert response.status_code == 200, f"POST failed: {response.text}"
+    data = response.json()
+    assert data["success"] is True
+    assert data["memory"]["user_id"] == new_user_id
+
+    # Cleanup
+    memory_id = data["memory"]["id"]
+    api_client.delete(f"/memory/raw/{memory_id}")
+
+    print(f"\n[OK] POST /memory/raw auto-created user {new_user_id}")
 
 
 # =================================================================
