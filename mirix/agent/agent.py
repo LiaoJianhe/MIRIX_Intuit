@@ -34,11 +34,7 @@ from mirix.functions.functions import get_function_from_module
 from mirix.helpers import ToolRulesSolver
 from mirix.helpers.message_helpers import prepare_input_message_create
 from mirix.interface import AgentInterface
-from mirix.llm_api.helpers import (
-    calculate_summarizer_cutoff,
-    get_token_counts_for_messages,
-    is_context_overflow_error,
-)
+from mirix.llm_api.helpers import calculate_summarizer_cutoff, get_token_counts_for_messages, is_context_overflow_error
 from mirix.llm_api.llm_api_tools import create
 from mirix.llm_api.llm_client import LLMClient
 from mirix.log import get_logger
@@ -52,20 +48,11 @@ from mirix.schemas.embedding_config import EmbeddingConfig
 from mirix.schemas.enums import MessageRole, ToolType
 from mirix.schemas.memory import ContextWindowOverview, Memory
 from mirix.schemas.message import Message, MessageCreate
-from mirix.schemas.mirix_message_content import (
-    CloudFileContent,
-    FileContent,
-    ImageContent,
-    TextContent,
-)
+from mirix.schemas.mirix_message_content import CloudFileContent, FileContent, ImageContent, TextContent
 from mirix.schemas.openai.chat_completion_request import Tool as ChatCompletionRequestTool
-from mirix.schemas.openai.chat_completion_response import (
-    ChatCompletionResponse,
-)
+from mirix.schemas.openai.chat_completion_response import ChatCompletionResponse
 from mirix.schemas.openai.chat_completion_response import Message as ChatCompletionMessage
-from mirix.schemas.openai.chat_completion_response import (
-    UsageStatistics,
-)
+from mirix.schemas.openai.chat_completion_response import UsageStatistics
 from mirix.schemas.tool import Tool
 from mirix.schemas.tool_rule import TerminalToolRule
 from mirix.schemas.usage import MirixUsageStatistics
@@ -73,10 +60,7 @@ from mirix.schemas.user import User
 from mirix.services.agent_manager import AgentManager
 from mirix.services.block_manager import BlockManager
 from mirix.services.episodic_memory_manager import EpisodicMemoryManager
-from mirix.services.helpers.agent_manager_helper import (
-    check_supports_structured_output,
-    compile_memory_metadata_block,
-)
+from mirix.services.helpers.agent_manager_helper import check_supports_structured_output, compile_memory_metadata_block
 from mirix.services.knowledge_vault_manager import KnowledgeVaultManager
 from mirix.services.message_manager import MessageManager
 from mirix.services.procedural_memory_manager import ProceduralMemoryManager
@@ -1942,7 +1926,7 @@ User Focus:
 <keywords>
 {keywords}
 </keywords>
-These keywords have been used to retrieve relevant memories from the database. 
+These keywords have been used to retrieve relevant memories from the database.
 
 <core_memory>
 {core_memory}
