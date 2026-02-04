@@ -113,6 +113,53 @@ from mirix.utils import (
 logger = get_logger(__name__)
 
 
+def _filter_function_args(
+    function_name: str,
+    function_args: dict,
+    tool: Tool,
+) -> dict:
+    """
+    Filter function arguments to only include parameters accepted by the function.
+    Strips hallucinated args like 'internal_monologue' that LLMs sometimes add.
+
+    Args:
+        function_name: Name of the function being called
+        function_args: Dictionary of arguments from the LLM
+        tool: The Tool object containing tool type information
+
+    Returns:
+        Filtered dictionary containing only valid arguments
+    """
+    import inspect
+
+    # Only filter MIRIX internal tools - don't filter USER_DEFINED or MCP tools
+    if tool.tool_type == ToolType.MIRIX_CORE:
+        callable_func = get_function_from_module(MIRIX_CORE_TOOL_MODULE_NAME, function_name)
+    elif tool.tool_type == ToolType.MIRIX_MEMORY_CORE:
+        callable_func = get_function_from_module(MIRIX_MEMORY_TOOL_MODULE_NAME, function_name)
+    elif tool.tool_type == ToolType.MIRIX_EXTRA:
+        callable_func = get_function_from_module(MIRIX_EXTRA_TOOL_MODULE_NAME, function_name)
+    else:
+        return function_args  # Don't filter USER_DEFINED or MCP tools
+
+    sig = inspect.signature(callable_func)
+    valid_params = set(sig.parameters.keys())
+
+    filtered = {}
+    removed = []
+
+    for key, value in function_args.items():
+        if key in valid_params:
+            filtered[key] = value
+        else:
+            removed.append(key)
+
+    if removed:
+        logger.debug(f"Filtered unexpected args from {function_name}: {removed}")
+
+    return filtered
+
+
 class BaseAgent(ABC):
     """
     Abstract class for all agents.
@@ -463,11 +510,6 @@ class Agent(BaseAgent):
                     ]:
                         function_args["timezone_str"] = self.user.timezone
                     function_args["self"] = self
-
-                    # Defensive: finish_memory_update takes no parameters (except self)
-                    # Remove any unexpected parameters that LLM might hallucinate
-                    if function_name == "finish_memory_update":
-                        function_args = {"self": self}
 
                     function_response = callable_func(**function_args)
                     if function_name in ["core_memory_append", "core_memory_rewrite"]:
@@ -999,6 +1041,10 @@ class Agent(BaseAgent):
                     self.interface.function_message(f"Error: {error_msg}", msg_obj=messages[-1])
                     overall_function_failed = True
                     continue  # Continue with next tool call
+
+                # Filter out unexpected arguments that LLMs sometimes hallucinate
+                # (e.g., 'internal_monologue'). This must run BEFORE validators.
+                function_args = _filter_function_args(function_name, function_args, target_mirix_tool)
 
                 if function_name == "trigger_memory_update":
                     function_args["user_message"] = {
