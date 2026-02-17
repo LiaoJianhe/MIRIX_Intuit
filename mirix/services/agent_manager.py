@@ -1042,7 +1042,7 @@ class AgentManager:
                 child_data.pop("memory_block_ids", None)
                 child_data.pop("memory_prompt_template", None)
                 # Strip legacy fields no longer on AgentState
-                for legacy_key in ("memory", "topic", "tags", "metadata_", "tool_exec_environment_variables"):
+                for legacy_key in ("memory"):
                     child_data.pop(legacy_key, None)
 
                 # Children don't need their own children reconstructed (1-level depth only)
