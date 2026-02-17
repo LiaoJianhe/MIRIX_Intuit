@@ -1041,6 +1041,9 @@ class AgentManager:
                 child_data.pop("tool_ids", None)
                 child_data.pop("memory_block_ids", None)
                 child_data.pop("memory_prompt_template", None)
+                # Strip legacy fields no longer on AgentState
+                for legacy_key in ("memory", "topic", "tags", "metadata_", "tool_exec_environment_variables"):
+                    child_data.pop(legacy_key, None)
 
                 # Children don't need their own children reconstructed (1-level depth only)
                 child_data["children"] = None
@@ -1359,6 +1362,9 @@ class AgentManager:
                     cached_data.pop("tool_ids", None)  # Remove denormalized field
                     cached_data.pop("memory_block_ids", None)
                     cached_data.pop("memory_prompt_template", None)
+                    # Strip legacy fields no longer on AgentState
+                    for legacy_key in ("memory", "topic", "tags", "metadata_", "tool_exec_environment_variables"):
+                        cached_data.pop(legacy_key, None)
 
                     agent_state = PydanticAgentState(**cached_data)
 
