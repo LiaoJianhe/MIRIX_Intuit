@@ -175,7 +175,7 @@ def test_explicit_user_creation_then_add_memory(client):
 
     # Verify we got some memories back
     assert "memories" in retrieve_response, "Response should contain memories"
-    print("\n✓ TEST 1 PASSED: User was created explicitly and memory was added successfully")
+    print("\nTEST 1 PASSED: User was created explicitly and memory was added successfully")
 
 
 def test_auto_user_creation_on_add_memory(client):
@@ -246,7 +246,7 @@ def test_auto_user_creation_on_add_memory(client):
 
     # Verify we got some memories back
     assert "memories" in retrieve_response, "Response should contain memories"
-    print("\n✓ TEST 2 PASSED: User was auto-created and memory was added successfully")
+    print("\nTEST 2 PASSED: User was auto-created and memory was added successfully")
 
 
 def test_idempotent_create_or_get_user(client):
@@ -280,7 +280,7 @@ def test_idempotent_create_or_get_user(client):
     assert created_user_id_1 == created_user_id_2, "Should return same user_id on repeated calls"
     assert user_exists(client, user_id), "User should still exist in database"
 
-    print("\n✓ TEST 3 PASSED: create_or_get_user() is idempotent")
+    print("\nTEST 3 PASSED: create_or_get_user() is idempotent")
 
 
 if __name__ == "__main__":

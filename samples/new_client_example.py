@@ -170,7 +170,7 @@ if __name__ == "__main__":
         print("=" * 80)
 
     except Exception as e:
-        print(f"\n\n⚠️  Error: {e}")
+        print(f"\n\nError: {e}")
         print("\nMake sure:")
         print("1. The Mirix server is running at http://localhost:8000")
         print("2. You have set MIRIX_API_KEY environment variable")

@@ -1,3 +1,4 @@
+import asyncio
 import random
 import time
 from datetime import datetime
@@ -782,14 +783,11 @@ class SqlalchemyBase(CommonSqlalchemyMetaMixins, Base):
         """
         try:
             from mirix.database.cache_provider import get_cache_provider
-            from mirix.database.redis_client import get_redis_client
             from mirix.settings import settings
 
             cache_provider = get_cache_provider()
             if cache_provider is None:
                 return  # No cache provider registered, skip
-
-            redis_client = get_redis_client()  # For Redis-only reverse-key ops
 
             table_name = getattr(self, "__tablename__", None)
             if not table_name:
@@ -883,22 +881,15 @@ class SqlalchemyBase(CommonSqlalchemyMetaMixins, Base):
                             data["memory_block_ids"] = json.dumps(block_ids)
                             data["memory_prompt_template"] = memory_obj.get("prompt_template", "")
 
-                            # Redis-only: reverse mapping block -> agents
-                            if redis_client:
-                                for block_id in block_ids:
-                                    reverse_key = f"{redis_client.BLOCK_PREFIX}{block_id}:agents"
-                                    redis_client.client.sadd(reverse_key, self.id)
-                                    redis_client.client.expire(reverse_key, settings.redis_ttl_agents)
-
                     if "children" in data and data["children"]:
                         children_ids = [child.id if hasattr(child, "id") else child["id"] for child in data["children"]]
                         data["children_ids"] = json.dumps(children_ids)
 
-                        if redis_client:
-                            for child_id in children_ids:
-                                reverse_key = f"{redis_client.AGENT_PREFIX}{child_id}:parent"
-                                redis_client.client.set(reverse_key, self.id)
-                                redis_client.client.expire(reverse_key, settings.redis_ttl_agents)
+                        for child_id in children_ids:
+                            reverse_key = f"{cache_provider.AGENT_PREFIX}{child_id}:parent"
+                            cache_provider.set_string(
+                                reverse_key, str(self.id), ttl=settings.redis_ttl_agents
+                            )
 
                     data.pop("tools", None)
                     data.pop("memory", None)

@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -193,7 +194,7 @@ class MessageManager:
                 raise ValueError(f"Message with id {message_id} not found.")
 
     @enforce_types
-    def delete_by_client_id(self, actor: PydanticClient) -> int:
+    async def delete_by_client_id(self, actor: PydanticClient) -> int:
         """
         Bulk delete all NON-SYSTEM messages for a client (removes from Redis cache).
         System messages are preserved as they are essential for agent functionality.
@@ -205,46 +206,44 @@ class MessageManager:
         Returns:
             Number of records deleted
         """
-        from mirix.database.redis_client import get_redis_client
+        from mirix.database.cache_provider import acache_delete_many, get_cache_provider
         from mirix.schemas.message import MessageRole
 
-        with self.session_maker() as session:
-            # Get IDs for non-system messages only (preserve system messages)
-            message_ids = [
-                row[0]
-                for row in session.query(MessageModel.id)
-                .filter(
-                    MessageModel.client_id == actor.id,
-                    MessageModel.role != MessageRole.system,  # Exclude system messages
-                )
-                .all()
-            ]
+        def _db_delete():
+            with self.session_maker() as session:
+                message_ids = [
+                    row[0]
+                    for row in session.query(MessageModel.id)
+                    .filter(
+                        MessageModel.client_id == actor.id,
+                        MessageModel.role != MessageRole.system,
+                    )
+                    .all()
+                ]
+                count = len(message_ids)
+                if count == 0:
+                    return 0, []
+                session.query(MessageModel).filter(
+                    MessageModel.client_id == actor.id, MessageModel.role != MessageRole.system
+                ).delete(synchronize_session=False)
+                session.commit()
+                return count, message_ids
 
-            count = len(message_ids)
-            if count == 0:
-                return 0
+        count, message_ids = await asyncio.to_thread(_db_delete)
+        if count == 0:
+            return 0
 
-            # Bulk delete in single query (exclude system messages)
-            session.query(MessageModel).filter(
-                MessageModel.client_id == actor.id, MessageModel.role != MessageRole.system
-            ).delete(synchronize_session=False)
-
-            session.commit()
-
-        # Batch delete from Redis cache (outside of session context)
-        redis_client = get_redis_client()
-        if redis_client and message_ids:
-            redis_keys = [f"{redis_client.MESSAGE_PREFIX}{msg_id}" for msg_id in message_ids]
-
-            # Delete in batches to avoid command size limits
+        cache_provider = get_cache_provider()
+        if cache_provider and message_ids:
+            redis_keys = [f"{cache_provider.MESSAGE_PREFIX}{msg_id}" for msg_id in message_ids]
             BATCH_SIZE = 1000
             for i in range(0, len(redis_keys), BATCH_SIZE):
                 batch = redis_keys[i : i + BATCH_SIZE]
-                redis_client.client.delete(*batch)
+                await acache_delete_many(batch)
 
         return count
 
-    def soft_delete_by_client_id(self, actor: PydanticClient) -> int:
+    async def soft_delete_by_client_id(self, actor: PydanticClient) -> int:
         """
         Bulk soft delete all messages for a client (updates Redis cache).
 
@@ -254,44 +253,40 @@ class MessageManager:
         Returns:
             Number of records soft deleted
         """
-        from mirix.database.redis_client import get_redis_client
+        from mirix.database.cache_provider import acache_delete, acache_update_hash_field, get_cache_provider
 
-        with self.session_maker() as session:
-            # Query all non-deleted records for this client (use actor.id)
-            messages = (
-                session.query(MessageModel)
-                .filter(MessageModel.client_id == actor.id, MessageModel.is_deleted == False)
-                .all()
-            )
+        def _db_soft_delete():
+            with self.session_maker() as session:
+                messages = (
+                    session.query(MessageModel)
+                    .filter(MessageModel.client_id == actor.id, MessageModel.is_deleted == False)
+                    .all()
+                )
+                count = len(messages)
+                if count == 0:
+                    return 0, []
+                message_ids = [msg.id for msg in messages]
+                for msg in messages:
+                    msg.is_deleted = True
+                    msg.set_updated_at()
+                session.commit()
+                return count, message_ids
 
-            count = len(messages)
-            if count == 0:
-                return 0
+        count, message_ids = await asyncio.to_thread(_db_soft_delete)
+        if count == 0:
+            return 0
 
-            # Extract IDs BEFORE committing (to avoid detached instance errors)
-            message_ids = [msg.id for msg in messages]
-
-            # Soft delete from database (set is_deleted = True directly, don't call msg.delete())
-            for msg in messages:
-                msg.is_deleted = True
-                msg.set_updated_at()
-
-            session.commit()
-
-        # Update Redis cache with is_deleted=true (outside session)
-        redis_client = get_redis_client()
-        if redis_client:
+        cache_provider = get_cache_provider()
+        if cache_provider:
             for msg_id in message_ids:
-                redis_key = f"{redis_client.MESSAGE_PREFIX}{msg_id}"
-                try:
-                    redis_client.client.hset(redis_key, "is_deleted", "true")
-                except Exception:
-                    # If update fails, remove from cache
-                    redis_client.delete(redis_key)
+                redis_key = f"{cache_provider.MESSAGE_PREFIX}{msg_id}"
+                ok = await acache_update_hash_field(redis_key, "is_deleted", "true")
+                if not ok:
+                    await acache_delete(redis_key)
 
         return count
 
-    def soft_delete_by_user_id(self, user_id: str) -> int:
+    async def soft_delete_by_user_id(self, user_id: str) -> int:
         """
         Bulk soft delete all messages for a user (updates Redis cache).
 
@@ -301,44 +296,40 @@ class MessageManager:
         Returns:
             Number of records soft deleted
         """
-        from mirix.database.redis_client import get_redis_client
+        from mirix.database.cache_provider import acache_delete, acache_update_hash_field, get_cache_provider
 
-        with self.session_maker() as session:
-            # Query all non-deleted records for this user
-            messages = (
-                session.query(MessageModel)
-                .filter(MessageModel.user_id == user_id, MessageModel.is_deleted == False)
-                .all()
-            )
+        def _db_soft_delete():
+            with self.session_maker() as session:
+                messages = (
+                    session.query(MessageModel)
+                    .filter(MessageModel.user_id == user_id, MessageModel.is_deleted == False)
+                    .all()
+                )
+                count = len(messages)
+                if count == 0:
+                    return 0, []
+                message_ids = [msg.id for msg in messages]
+                for msg in messages:
+                    msg.is_deleted = True
+                    msg.set_updated_at()
+                session.commit()
+                return count, message_ids
 
-            count = len(messages)
-            if count == 0:
-                return 0
+        count, message_ids = await asyncio.to_thread(_db_soft_delete)
+        if count == 0:
+            return 0
 
-            # Extract IDs BEFORE committing (to avoid detached instance errors)
-            message_ids = [msg.id for msg in messages]
-
-            # Soft delete from database (set is_deleted = True directly, don't call msg.delete())
-            for msg in messages:
-                msg.is_deleted = True
-                msg.set_updated_at()
-
-            session.commit()
-
-        # Update Redis cache with is_deleted=true (outside session)
-        redis_client = get_redis_client()
-        if redis_client:
+        cache_provider = get_cache_provider()
+        if cache_provider:
             for msg_id in message_ids:
-                redis_key = f"{redis_client.MESSAGE_PREFIX}{msg_id}"
-                try:
-                    redis_client.client.hset(redis_key, "is_deleted", "true")
-                except Exception:
-                    # If update fails, remove from cache
-                    redis_client.delete(redis_key)
+                redis_key = f"{cache_provider.MESSAGE_PREFIX}{msg_id}"
+                ok = await acache_update_hash_field(redis_key, "is_deleted", "true")
+                if not ok:
+                    await acache_delete(redis_key)
 
         return count
 
-    def delete_by_user_id(self, user_id: str) -> int:
+    async def delete_by_user_id(self, user_id: str) -> int:
         """
         Bulk hard delete all NON-SYSTEM messages for a user (removes from Redis cache).
         System messages are preserved as they are essential for agent functionality.
@@ -350,41 +341,40 @@ class MessageManager:
         Returns:
             Number of records deleted
         """
-        from mirix.database.redis_client import get_redis_client
+        from mirix.database.cache_provider import acache_delete_many, get_cache_provider
         from mirix.schemas.message import MessageRole
 
-        with self.session_maker() as session:
-            # Get IDs for non-system messages only (preserve system messages)
-            message_ids = [
-                row[0]
-                for row in session.query(MessageModel.id)
-                .filter(
-                    MessageModel.user_id == user_id, MessageModel.role != MessageRole.system  # Exclude system messages
-                )
-                .all()
-            ]
+        def _db_delete():
+            with self.session_maker() as session:
+                message_ids = [
+                    row[0]
+                    for row in session.query(MessageModel.id)
+                    .filter(
+                        MessageModel.user_id == user_id,
+                        MessageModel.role != MessageRole.system,
+                    )
+                    .all()
+                ]
+                count = len(message_ids)
+                if count == 0:
+                    return 0, []
+                session.query(MessageModel).filter(
+                    MessageModel.user_id == user_id, MessageModel.role != MessageRole.system
+                ).delete(synchronize_session=False)
+                session.commit()
+                return count, message_ids
 
-            count = len(message_ids)
-            if count == 0:
-                return 0
+        count, message_ids = await asyncio.to_thread(_db_delete)
+        if count == 0:
+            return 0
 
-            # Bulk delete in single query (exclude system messages)
-            session.query(MessageModel).filter(
-                MessageModel.user_id == user_id, MessageModel.role != MessageRole.system
-            ).delete(synchronize_session=False)
-
-            session.commit()
-
-        # Batch delete from Redis cache (outside of session context)
-        redis_client = get_redis_client()
-        if redis_client and message_ids:
-            redis_keys = [f"{redis_client.MESSAGE_PREFIX}{msg_id}" for msg_id in message_ids]
-
-            # Delete in batches to avoid command size limits
+        cache_provider = get_cache_provider()
+        if cache_provider and message_ids:
+            redis_keys = [f"{cache_provider.MESSAGE_PREFIX}{msg_id}" for msg_id in message_ids]
             BATCH_SIZE = 1000
             for i in range(0, len(redis_keys), BATCH_SIZE):
                 batch = redis_keys[i : i + BATCH_SIZE]
-                redis_client.client.delete(*batch)
+                await acache_delete_many(batch)
 
         return count
 
@@ -544,17 +534,15 @@ class MessageManager:
             # Identify detached messages (not in current message_ids)
             detached_messages = [msg for msg in all_messages if msg.id not in current_message_ids]
 
-            # Delete detached messages (and clean up Redis cache)
+            # Delete detached messages (and clean up cache)
             deleted_count = 0
-            from mirix.database.redis_client import get_redis_client
+            from mirix.database.cache_provider import get_cache_provider
 
-            redis_client = get_redis_client()
-
+            cache_provider = get_cache_provider()
             for msg in detached_messages:
-                # Remove from Redis cache
-                if redis_client:
-                    redis_key = f"{redis_client.MESSAGE_PREFIX}{msg.id}"
-                    redis_client.delete(redis_key)
+                if cache_provider:
+                    redis_key = f"{cache_provider.MESSAGE_PREFIX}{msg.id}"
+                    cache_provider.delete(redis_key)
                 msg.hard_delete(session, actor=actor)
                 deleted_count += 1
 
@@ -597,15 +585,13 @@ class MessageManager:
                 detached_messages = [msg for msg in all_messages if msg.id not in current_message_ids]
 
                 deleted_count = 0
-                from mirix.database.redis_client import get_redis_client
+                from mirix.database.cache_provider import get_cache_provider
 
-                redis_client = get_redis_client()
-
+                cache_provider = get_cache_provider()
                 for msg in detached_messages:
-                    # Remove from Redis cache
-                    if redis_client:
-                        redis_key = f"{redis_client.MESSAGE_PREFIX}{msg.id}"
-                        redis_client.delete(redis_key)
+                    if cache_provider:
+                        redis_key = f"{cache_provider.MESSAGE_PREFIX}{msg.id}"
+                        cache_provider.delete(redis_key)
                     msg.hard_delete(session)
                     deleted_count += 1
 

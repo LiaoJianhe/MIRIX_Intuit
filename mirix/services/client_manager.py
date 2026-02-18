@@ -1,3 +1,4 @@
+import asyncio
 from typing import List, Optional
 
 from mirix.orm.client import Client as ClientModel
@@ -40,11 +41,13 @@ class ClientManager:
                 client = ClientModel.read(db_session=session, identifier=self.DEFAULT_CLIENT_ID)
             except NoResultFound:
                 # If it doesn't exist, make it
+                # Default client is read-only (no write_scope) with no read access
                 client = ClientModel(
                     id=self.DEFAULT_CLIENT_ID,
                     name=self.DEFAULT_CLIENT_NAME,
                     status="active",
-                    scope="",
+                    write_scope=None,
+                    read_scopes=[],
                     organization_id=org_id,
                 )
                 client.create(session)
@@ -223,7 +226,7 @@ class ClientManager:
             return client.to_pydantic()
 
     @enforce_types
-    def delete_client_by_id(self, client_id: str):
+    async def delete_client_by_id(self, client_id: str):
         """
         Soft delete a client and cascade soft delete to all associated records.
 
@@ -250,7 +253,6 @@ class ClientManager:
         Args:
             client_id: ID of the client to soft delete
         """
-        from mirix.database.redis_client import get_redis_client
         from mirix.log import get_logger
 
         logger = get_logger(__name__)
@@ -275,118 +277,119 @@ class ClientManager:
         knowledge_manager = KnowledgeVaultManager()
         message_manager = MessageManager()
 
-        episodic_count = episodic_manager.soft_delete_by_client_id(actor=client)
+        episodic_count = await episodic_manager.soft_delete_by_client_id(actor=client)
         logger.debug("Soft deleted %d episodic memories", episodic_count)
 
-        semantic_count = semantic_manager.soft_delete_by_client_id(actor=client)
+        semantic_count = await semantic_manager.soft_delete_by_client_id(actor=client)
         logger.debug("Soft deleted %d semantic memories", semantic_count)
 
-        procedural_count = procedural_manager.soft_delete_by_client_id(actor=client)
+        procedural_count = await procedural_manager.soft_delete_by_client_id(actor=client)
         logger.debug("Soft deleted %d procedural memories", procedural_count)
 
-        resource_count = resource_manager.soft_delete_by_client_id(actor=client)
+        resource_count = await resource_manager.soft_delete_by_client_id(actor=client)
         logger.debug("Soft deleted %d resource memories", resource_count)
 
-        knowledge_count = knowledge_manager.soft_delete_by_client_id(actor=client)
+        knowledge_count = await knowledge_manager.soft_delete_by_client_id(actor=client)
         logger.debug("Soft deleted %d knowledge vault items", knowledge_count)
 
-        message_count = message_manager.soft_delete_by_client_id(actor=client)
+        message_count = await message_manager.soft_delete_by_client_id(actor=client)
         logger.debug("Soft deleted %d messages", message_count)
 
         # 2. Soft delete client metadata records
-        with self.session_maker() as session:
-            # Find client
-            client_orm = ClientModel.read(db_session=session, identifier=client_id)
-            if not client_orm:
-                logger.warning("Client %s not found", client_id)
-                return
+        def _db_soft_delete():
+            with self.session_maker() as session:
+                # Find client
+                client_orm = ClientModel.read(db_session=session, identifier=client_id)
+                if not client_orm:
+                    logger.warning("Client %s not found", client_id)
+                    return []
 
-            # Find all agents created by this client
-            from mirix.orm.agent import Agent as AgentModel
-            from mirix.orm.block import Block as BlockModel
-            from mirix.orm.tool import Tool as ToolModel
+                # Find all agents created by this client
+                from mirix.orm.agent import Agent as AgentModel
+                from mirix.orm.block import Block as BlockModel
+                from mirix.orm.tool import Tool as ToolModel
 
-            agents_created_by_client = (
-                session.query(AgentModel)
-                .filter(AgentModel._created_by_id == client_id, AgentModel.is_deleted == False)
-                .all()
-            )
-            agent_ids = [agent.id for agent in agents_created_by_client]
-            logger.debug("Found %d agents created by client %s", len(agent_ids), client_id)
+                agents_created_by_client = (
+                    session.query(AgentModel)
+                    .filter(AgentModel._created_by_id == client_id, AgentModel.is_deleted == False)
+                    .all()
+                )
+                agent_ids = [agent.id for agent in agents_created_by_client]
+                logger.debug("Found %d agents created by client %s", len(agent_ids), client_id)
 
-            # Soft delete agents (set is_deleted = True directly, don't call agent.delete())
-            for agent in agents_created_by_client:
-                agent.is_deleted = True
-                agent.set_updated_at()
-            logger.debug("Soft deleted %d agents", len(agent_ids))
+                # Soft delete agents (set is_deleted = True directly, don't call agent.delete())
+                for agent in agents_created_by_client:
+                    agent.is_deleted = True
+                    agent.set_updated_at()
+                logger.debug("Soft deleted %d agents", len(agent_ids))
 
-            # Soft delete tools created by this client
-            tools = (
-                session.query(ToolModel)
-                .filter(ToolModel._created_by_id == client_id, ToolModel.is_deleted == False)
-                .all()
-            )
-            for tool in tools:
-                tool.is_deleted = True
-                tool.set_updated_at()
-            logger.debug("Soft deleted %d tools", len(tools))
+                # Soft delete tools created by this client
+                tools = (
+                    session.query(ToolModel)
+                    .filter(ToolModel._created_by_id == client_id, ToolModel.is_deleted == False)
+                    .all()
+                )
+                for tool in tools:
+                    tool.is_deleted = True
+                    tool.set_updated_at()
+                logger.debug("Soft deleted %d tools", len(tools))
 
-            # Soft delete blocks created by this client
-            blocks = (
-                session.query(BlockModel)
-                .filter(BlockModel._created_by_id == client_id, BlockModel.is_deleted == False)
-                .all()
-            )
-            for block in blocks:
-                block.is_deleted = True
-                block.set_updated_at()
-            logger.debug("Soft deleted %d blocks", len(blocks))
+                # Soft delete blocks created by this client
+                blocks = (
+                    session.query(BlockModel)
+                    .filter(BlockModel._created_by_id == client_id, BlockModel.is_deleted == False)
+                    .all()
+                )
+                for block in blocks:
+                    block.is_deleted = True
+                    block.set_updated_at()
+                logger.debug("Soft deleted %d blocks", len(blocks))
 
-            # Soft delete client (set is_deleted = True directly, don't call client_orm.delete())
-            client_orm.is_deleted = True
-            client_orm.set_updated_at()
-            session.commit()
-            logger.info("Soft deleted client %s from database", client_id)
+                # Soft delete client (set is_deleted = True directly, don't call client_orm.delete())
+                client_orm.is_deleted = True
+                client_orm.set_updated_at()
+                session.commit()
+                logger.info("Soft deleted client %s from database", client_id)
+                return agent_ids
 
-            # 3. Update Redis cache to reflect soft delete
-            try:
-                redis_client = get_redis_client()
-                if redis_client:
-                    # Update client hash with is_deleted=true
-                    client_key = f"{redis_client.CLIENT_PREFIX}{client_id}"
-                    try:
-                        # Update the is_deleted field in Redis
-                        redis_client.client.hset(client_key, "is_deleted", "true")
-                        logger.debug("Updated client %s in Redis (is_deleted=true)", client_id)
-                    except Exception as e:
-                        logger.warning("Failed to update client in Redis, removing instead: %s", e)
-                        redis_client.delete(client_key)
+        agent_ids = await asyncio.to_thread(_db_soft_delete)
 
-                    # Update agent hashes with is_deleted=true
-                    for agent_id in agent_ids:
-                        agent_key = f"{redis_client.AGENT_PREFIX}{agent_id}"
-                        try:
-                            redis_client.client.hset(agent_key, "is_deleted", "true")
-                        except Exception:
-                            # If update fails, remove from cache
-                            redis_client.delete(agent_key)
-                    logger.debug("Updated %d agents in Redis cache (is_deleted=true)", len(agent_ids))
+        # 3. Update cache to reflect soft delete
+        try:
+            from mirix.database.cache_provider import acache_delete, acache_update_hash_field, get_cache_provider
 
-                    logger.info(
-                        "Client %s and all associated records soft deleted: "
-                        "%d episodic, %d semantic, %d procedural, %d resource, %d knowledge_vault, %d messages",
-                        client_id,
-                        episodic_count,
-                        semantic_count,
-                        procedural_count,
-                        resource_count,
-                        knowledge_count,
-                        message_count,
-                    )
-            except Exception as e:
-                logger.warning("Failed to update Redis cache for client %s: %s", client_id, e)
+            cache_provider = get_cache_provider()
+            if cache_provider:
+                # Update client hash with is_deleted=true
+                client_key = f"{cache_provider.CLIENT_PREFIX}{client_id}"
+                ok = await acache_update_hash_field(client_key, "is_deleted", "true")
+                if not ok:
+                    await acache_delete(client_key)
+                logger.debug("Updated client %s in cache (is_deleted=true)", client_id)
 
-    def delete_memories_by_client_id(self, client_id: str):
+                # Update agent hashes with is_deleted=true
+                for agent_id in agent_ids:
+                    agent_key = f"{cache_provider.AGENT_PREFIX}{agent_id}"
+                    ok = await acache_update_hash_field(agent_key, "is_deleted", "true")
+                    if not ok:
+                        await acache_delete(agent_key)
+                logger.debug("Updated %d agents in cache (is_deleted=true)", len(agent_ids))
+
+                logger.info(
+                    "Client %s and all associated records soft deleted: "
+                    "%d episodic, %d semantic, %d procedural, %d resource, %d knowledge_vault, %d messages",
+                    client_id,
+                    episodic_count,
+                    semantic_count,
+                    procedural_count,
+                    resource_count,
+                    knowledge_count,
+                    message_count,
+                )
+        except Exception as e:
+            logger.warning("Failed to update Redis cache for client %s: %s", client_id, e)
+
+    async def delete_memories_by_client_id(self, client_id: str):
         """
         Hard delete memories, messages, and blocks for a client using memory managers' bulk delete.
 
@@ -444,63 +447,62 @@ class ClientManager:
         # Use managers' bulk delete methods (much more efficient)
         try:
             # Bulk delete memories using manager methods (actor.id is used as client_id)
-            episodic_count = episodic_manager.delete_by_client_id(actor=client)
+            episodic_count = await episodic_manager.delete_by_client_id(actor=client)
             logger.debug("Bulk deleted %d episodic memories", episodic_count)
 
-            semantic_count = semantic_manager.delete_by_client_id(actor=client)
+            semantic_count = await semantic_manager.delete_by_client_id(actor=client)
             logger.debug("Bulk deleted %d semantic memories", semantic_count)
 
-            procedural_count = procedural_manager.delete_by_client_id(actor=client)
+            procedural_count = await procedural_manager.delete_by_client_id(actor=client)
             logger.debug("Bulk deleted %d procedural memories", procedural_count)
 
-            resource_count = resource_manager.delete_by_client_id(actor=client)
+            resource_count = await resource_manager.delete_by_client_id(actor=client)
             logger.debug("Bulk deleted %d resource memories", resource_count)
 
-            knowledge_count = knowledge_manager.delete_by_client_id(actor=client)
+            knowledge_count = await knowledge_manager.delete_by_client_id(actor=client)
             logger.debug("Bulk deleted %d knowledge vault items", knowledge_count)
 
-            message_count = message_manager.delete_by_client_id(actor=client)
+            message_count = await message_manager.delete_by_client_id(actor=client)
             logger.debug("Bulk deleted %d messages", message_count)
 
             # Delete blocks created by this client (using bulk operations)
-            block_count = 0
-            block_ids = []
-            with self.session_maker() as session:
-                from mirix.orm.block import Block as BlockModel
+            def _db_delete_blocks():
+                with self.session_maker() as session:
+                    from mirix.orm.block import Block as BlockModel
 
-                # Get block IDs first (for Redis cleanup and agent cache invalidation)
-                block_ids = [
-                    row[0] for row in session.query(BlockModel.id).filter(BlockModel._created_by_id == client_id).all()
-                ]
+                    block_ids = [
+                        row[0]
+                        for row in session.query(BlockModel.id).filter(
+                            BlockModel._created_by_id == client_id
+                        ).all()
+                    ]
+                    block_count = len(block_ids)
+                    if block_count > 0:
+                        from mirix.services.block_manager import BlockManager
 
-                block_count = len(block_ids)
-                if block_count > 0:
-                    # Invalidate agent caches for all blocks (before deletion)
-                    from mirix.services.block_manager import BlockManager
+                        block_manager = BlockManager()
+                        for block_id in block_ids:
+                            block_manager._invalidate_block_cache(block_id)
 
-                    block_manager = BlockManager()
-                    for block_id in block_ids:
-                        block_manager._invalidate_agent_caches_for_block(block_id)
+                        session.query(BlockModel).filter(BlockModel._created_by_id == client_id).delete(
+                            synchronize_session=False
+                        )
+                        session.commit()
+                    return block_count, block_ids
 
-                    # Bulk delete in single query
-                    session.query(BlockModel).filter(BlockModel._created_by_id == client_id).delete(
-                        synchronize_session=False
-                    )
+            block_count, block_ids = await asyncio.to_thread(_db_delete_blocks)
 
-                    session.commit()
-
-            # Remove blocks from Redis cache (outside session context)
+            # Remove blocks from cache (outside session context)
             if block_ids:
-                from mirix.database.redis_client import get_redis_client
+                from mirix.database.cache_provider import acache_delete_many, get_cache_provider
 
-                redis_client = get_redis_client()
-                if redis_client:
-                    redis_keys = [f"{redis_client.BLOCK_PREFIX}{block_id}" for block_id in block_ids]
-                    # Delete in batches
+                cache_provider = get_cache_provider()
+                if cache_provider:
+                    redis_keys = [f"{cache_provider.BLOCK_PREFIX}{block_id}" for block_id in block_ids]
                     BATCH_SIZE = 1000
                     for i in range(0, len(redis_keys), BATCH_SIZE):
                         batch = redis_keys[i : i + BATCH_SIZE]
-                        redis_client.client.delete(*batch)
+                        await acache_delete_many(batch)
 
             logger.debug("Bulk deleted %d blocks", block_count)
 
@@ -569,6 +571,19 @@ class ClientManager:
                 cached_data = cache_provider.get_hash(cache_key)
                 if cached_data:
                     logger.debug("Cache HIT for client %s", client_id)
+                    # Multi-scope (PR 53): ensure read_scopes is a list when from cache
+                    if "read_scopes" in cached_data and isinstance(
+                        cached_data["read_scopes"], str
+                    ):
+                        import json as _json
+                        try:
+                            cached_data["read_scopes"] = (
+                                _json.loads(cached_data["read_scopes"])
+                                if cached_data["read_scopes"]
+                                else []
+                            )
+                        except (TypeError, ValueError):
+                            cached_data["read_scopes"] = []
                     return PydanticClient(**cached_data)
         except Exception as e:
             logger.warning("Cache read failed for client %s: %s", client_id, e)
@@ -630,7 +645,8 @@ class ClientManager:
                         organization_id=organization_id,
                         name=f"Local Client {client_id}",
                         status="active",
-                        scope="local",
+                        write_scope="local",
+                        read_scopes=["local"],
                     )
                 )
             # Otherwise return default client

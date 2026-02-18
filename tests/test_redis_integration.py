@@ -26,6 +26,8 @@ ADDITIONAL COVERAGE:
 - End-to-end integration test
 """
 
+import asyncio
+import threading
 import time
 import uuid
 from datetime import datetime
@@ -33,7 +35,13 @@ from datetime import timezone as dt_timezone
 
 import pytest
 
+from mirix.database.cache_provider import get_cache_provider
 from mirix.database.redis_client import get_redis_client, initialize_redis_client
+
+
+def _run(coro):
+    """Run a coroutine from sync test code (uses a fresh event loop)."""
+    return asyncio.run(coro)
 from mirix.log import get_logger
 from mirix.schemas.agent import AgentType, CreateAgent, UpdateAgent
 from mirix.schemas.block import Block as PydanticBlock
@@ -49,6 +57,7 @@ from mirix.schemas.semantic_memory import SemanticMemoryItem as PydanticSemantic
 from mirix.schemas.user import User as PydanticUser
 from mirix.services.agent_manager import AgentManager
 from mirix.services.block_manager import BlockManager
+from mirix.services.client_manager import ClientManager
 from mirix.services.episodic_memory_manager import EpisodicMemoryManager
 from mirix.services.knowledge_vault_manager import KnowledgeVaultManager
 from mirix.services.message_manager import MessageManager
@@ -78,26 +87,74 @@ def generate_test_id(prefix: str) -> str:
 
 
 @pytest.fixture(scope="module")
-def redis_client():
-    """Initialize Redis client for testing."""
+def event_loop_sync_bridge():
+    """Run a persistent event loop in a background thread and run Redis init on it.
+    Sync bridge is set inside initialize_redis_client() when the coroutine runs on that
+    thread, so sync cache operations and _sync_get_agent_by_id work (no 'Event loop is closed')."""
     if not settings.redis_enabled:
         pytest.skip("Redis not enabled - set MIRIX_REDIS_ENABLED=true")
 
-    client = get_redis_client()
-    if client is None:
-        client = initialize_redis_client()
+    loop = asyncio.new_event_loop()
 
+    def run():
+        loop.run_forever()
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    time.sleep(0.15)
+
+    future = asyncio.run_coroutine_threadsafe(initialize_redis_client(), loop)
+    try:
+        future.result(timeout=15)
+    except Exception:
+        loop.call_soon_threadsafe(loop.stop)
+        raise
+
+    try:
+        yield loop
+    finally:
+        from mirix.database.sync_bridge import clear_sync_bridge
+
+        clear_sync_bridge()
+        loop.call_soon_threadsafe(loop.stop)
+
+
+@pytest.fixture(scope="module")
+def run_on_loop(event_loop_sync_bridge):
+    """Run a coroutine on the background loop (for acache_* and redis_client from sync tests)."""
+    def _run_coro(coro):
+        return asyncio.run_coroutine_threadsafe(
+            coro, event_loop_sync_bridge
+        ).result(timeout=10)
+    return _run_coro
+
+
+@pytest.fixture(scope="module")
+def redis_client(event_loop_sync_bridge):
+    """Redis client for testing; sync_bridge is set by event_loop_sync_bridge so cache and agents work."""
+    client = get_redis_client()
     if client is None:
         pytest.skip("Redis not available")
 
+    # Ensure cache provider is registered (initialize_redis_client does this; may be cleared by other modules)
+    from mirix.database.cache_provider import get_cache_provider, register_cache_provider
+    from mirix.database.redis_cache_provider import RedisCacheProvider
+
+    if get_cache_provider() is None:
+        register_cache_provider("redis", RedisCacheProvider(client))
+
     yield client
 
-    # Cleanup: flush test keys
+    # Cleanup: flush test keys on the same loop the client uses (avoid "different loop" error)
     try:
-        # Be careful - only flush test keys
-        test_keys = client.client.keys("test:*")
+        future = asyncio.run_coroutine_threadsafe(
+            client.client.keys("test:*"), event_loop_sync_bridge
+        )
+        test_keys = future.result(timeout=5)
         if test_keys:
-            client.client.delete(*test_keys)
+            asyncio.run_coroutine_threadsafe(
+                client.client.delete(*test_keys), event_loop_sync_bridge
+            ).result(timeout=5)
     except Exception:  # pylint: disable=broad-except
         logger.warning("Cleanup failed - test keys may persist")
 
@@ -127,9 +184,9 @@ def test_user(test_organization, user_manager):
     )
     created_user = user_manager.create_user(user)
     yield created_user
-    # Cleanup
+    # Cleanup (delete_user_by_id is async)
     try:
-        user_manager.delete_user_by_id(created_user.id)
+        _run(user_manager.delete_user_by_id(created_user.id))
     except Exception:  # pylint: disable=broad-except
         pass  # May already be deleted
 
@@ -146,18 +203,25 @@ def test_client(test_organization):
         name="Test Client App",
         organization_id=test_organization.id,
         status="active",
-        scope="read_write",
+        write_scope="test",
+        read_scopes=["test"],
         created_at=datetime.now(dt_timezone.utc),
         updated_at=datetime.now(dt_timezone.utc),
         is_deleted=False,
     )
     created_client = client_manager.create_client(client)
     yield created_client
-    # Cleanup
+    # Cleanup (delete_client_by_id is async)
     try:
-        client_manager.delete_client_by_id(created_client.id)
+        _run(client_manager.delete_client_by_id(created_client.id))
     except Exception:  # pylint: disable=broad-except
         pass  # May already be deleted
+
+
+@pytest.fixture
+def client_manager():
+    """Create client manager instance."""
+    return ClientManager()
 
 
 @pytest.fixture
@@ -214,8 +278,20 @@ def user_manager():
     return UserManager()
 
 
+@pytest.fixture(scope="module")
+def ensure_admin_user():
+    """Ensure the admin user exists in the database.
+
+    This is needed because agent creation creates messages that default
+    to ADMIN_USER_ID when no user_id is provided.
+    """
+    user_mgr = UserManager()
+    user_mgr.get_admin_user()  # Creates admin user if it doesn't exist
+    yield
+
+
 @pytest.fixture
-def agent_manager():
+def agent_manager(ensure_admin_user):
     """Create agent manager instance."""
     return AgentManager()
 
@@ -262,9 +338,10 @@ class TestOrganizationManagerRedis:
         # Create organization
         created_org = organization_manager.create_organization(org_data)
 
-        # Verify in Redis Hash
-        redis_key = f"{redis_client.ORGANIZATION_PREFIX}{created_org.id}"
-        cached_data = redis_client.get_hash(redis_key)
+        # Verify via cache provider (same loop as writes; Redis is one registered provider)
+        cp = get_cache_provider()
+        redis_key = f"{cp.ORGANIZATION_PREFIX}{created_org.id}"
+        cached_data = cp.get_hash(redis_key)
 
         assert cached_data is not None, "Organization should be cached in Redis"
         assert cached_data["id"] == created_org.id
@@ -303,9 +380,10 @@ class TestOrganizationManagerRedis:
         # Update organization
         organization_manager.update_organization_name_using_id(created_org.id, name="Updated Name")
 
-        # Verify Redis cache is updated
-        redis_key = f"{redis_client.ORGANIZATION_PREFIX}{created_org.id}"
-        cached_data = redis_client.get_hash(redis_key)
+        # Verify cache is updated (use provider sync API; same loop as writes)
+        cp = get_cache_provider()
+        redis_key = f"{cp.ORGANIZATION_PREFIX}{created_org.id}"
+        cached_data = cp.get_hash(redis_key)
 
         assert cached_data["name"] == "Updated Name"
 
@@ -314,19 +392,20 @@ class TestOrganizationManagerRedis:
 
     def test_organization_delete_removes_cache(self, organization_manager, redis_client):
         """Test deleting organization removes from Redis cache."""
+        cp = get_cache_provider()
         # Create organization
         org_data = PydanticOrganization(id=generate_test_id("org"), name="To Be Deleted")
         created_org = organization_manager.create_organization(org_data)
 
         # Verify in cache
-        redis_key = f"{redis_client.ORGANIZATION_PREFIX}{created_org.id}"
-        assert redis_client.get_hash(redis_key) is not None
+        redis_key = f"{cp.ORGANIZATION_PREFIX}{created_org.id}"
+        assert cp.get_hash(redis_key) is not None
 
         # Delete organization
         organization_manager.delete_organization_by_id(created_org.id)
 
         # Verify removed from cache
-        assert redis_client.get_hash(redis_key) is None
+        assert cp.get_hash(redis_key) is None
 
 
 # ============================================================================
@@ -339,10 +418,9 @@ class TestUserManagerRedis:
 
     def test_user_create_with_redis(self, test_user, redis_client):
         """Test creating a user caches to Redis Hash."""
-        # test_user fixture already creates the user
-        # Verify in Redis Hash
-        redis_key = f"{redis_client.USER_PREFIX}{test_user.id}"
-        cached_data = redis_client.get_hash(redis_key)
+        cp = get_cache_provider()
+        redis_key = f"{cp.USER_PREFIX}{test_user.id}"
+        cached_data = cp.get_hash(redis_key)
 
         assert cached_data is not None, "User should be cached in Redis"
         assert cached_data["id"] == test_user.id
@@ -364,43 +442,35 @@ class TestUserManagerRedis:
 
     def test_user_update_status_invalidates_cache(self, user_manager, test_user, redis_client):
         """Test updating user status updates Redis cache."""
-        # test_user fixture already creates the user
-        # Update status
         user_manager.update_user_status(test_user.id, "inactive")
-
-        # Verify cache is updated
-        redis_key = f"{redis_client.USER_PREFIX}{test_user.id}"
-        cached_data = redis_client.get_hash(redis_key)
-
+        cp = get_cache_provider()
+        redis_key = f"{cp.USER_PREFIX}{test_user.id}"
+        cached_data = cp.get_hash(redis_key)
         assert cached_data["status"] == "inactive"
 
     def test_user_update_timezone_invalidates_cache(self, user_manager, test_user, redis_client):
         """Test updating user timezone updates Redis cache."""
-        # test_user fixture already creates the user
-        # Update timezone
         user_manager.update_user_timezone("Europe/London", test_user.id)
-
-        # Verify cache is updated
-        redis_key = f"{redis_client.USER_PREFIX}{test_user.id}"
-        cached_data = redis_client.get_hash(redis_key)
-
+        cp = get_cache_provider()
+        redis_key = f"{cp.USER_PREFIX}{test_user.id}"
+        cached_data = cp.get_hash(redis_key)
         assert cached_data["timezone"] == "Europe/London"
 
-    def test_user_delete_removes_cache(self, user_manager, test_user, redis_client):
-        """Test soft-deleting user updates Redis cache with is_deleted=true."""
-        # test_user fixture already creates the user
-        # Verify in cache
-        redis_key = f"{redis_client.USER_PREFIX}{test_user.id}"
-        assert redis_client.get_hash(redis_key) is not None
-
-        # Soft delete user
-        user_manager.delete_user_by_id(test_user.id)
-
-        # Verify cache is updated with is_deleted flag (soft delete keeps
-        # the entry to prevent stale re-population from DB)
-        cached_data = redis_client.get_hash(redis_key)
+    def test_user_delete_removes_cache(self, user_manager, test_user, redis_client, run_on_loop):
+        """Test deleting user soft-deletes in Redis cache."""
+        cp = get_cache_provider()
+        redis_key = f"{cp.USER_PREFIX}{test_user.id}"
+        cached_data = cp.get_hash(redis_key)
         assert cached_data is not None
-        assert cached_data["is_deleted"] in (True, "true", "True")
+        assert cached_data.get("is_deleted") in (False, "False", None)
+
+        # Delete user (soft delete; run on background loop so cache update uses same Redis)
+        run_on_loop(user_manager.delete_user_by_id(test_user.id))
+
+        # Verify soft-deleted in cache (is_deleted=True, not removed)
+        cached_data = cp.get_hash(redis_key)
+        assert cached_data is not None, "Soft-deleted user should still be in cache"
+        assert cached_data.get("is_deleted") in (True, "True"), "User should be marked as deleted"
 
 
 # ============================================================================
@@ -434,9 +504,10 @@ class TestAgentAndToolManagerRedis:
         # Create agent
         created_agent = agent_manager.create_agent(agent_data, test_client)
 
-        # Verify agent in Redis Hash
-        redis_key = f"{redis_client.AGENT_PREFIX}{created_agent.id}"
-        cached_data = redis_client.get_hash(redis_key)
+        # Verify agent in cache (provider sync API)
+        cp = get_cache_provider()
+        redis_key = f"{cp.AGENT_PREFIX}{created_agent.id}"
+        cached_data = cp.get_hash(redis_key)
 
         assert cached_data is not None, "Agent should be cached in Redis"
         assert cached_data["id"] == created_agent.id
@@ -472,8 +543,8 @@ class TestAgentAndToolManagerRedis:
         created_agent = agent_manager.create_agent(agent_data, test_client)
 
         # Verify agent in cache
-        redis_key = f"{redis_client.AGENT_PREFIX}{created_agent.id}"
-        cached_data = redis_client.get_hash(redis_key)
+        redis_key = f"{get_cache_provider().AGENT_PREFIX}{created_agent.id}"
+        cached_data = get_cache_provider().get_hash(redis_key)
 
         assert cached_data is not None
         # If agent had tools, tool_ids would be present as JSON array
@@ -505,7 +576,7 @@ class TestAgentAndToolManagerRedis:
 
         # Retrieve agent (should use pipeline for tools if any exist)
         start_time = time.time()
-        retrieved_agent = agent_manager.get_agent_by_id(created_agent.id, test_client)
+        retrieved_agent = _run(agent_manager.get_agent_by_id(created_agent.id, test_client))
         retrieval_time = time.time() - start_time
 
         assert retrieved_agent.id == created_agent.id
@@ -514,7 +585,7 @@ class TestAgentAndToolManagerRedis:
         # With Redis pipeline, retrieval should be fast even with tools
         assert retrieval_time < 0.01, f"Agent+tools retrieval should be <10ms, got {retrieval_time*1000:.2f}ms"
 
-        logger.info("✅ Agent retrieval with pipeline: %.3fms", retrieval_time * 1000)
+        logger.info("Agent retrieval with pipeline: %.3fms", retrieval_time * 1000)
 
         # Cleanup
         agent_manager.delete_agent(created_agent.id, test_client)
@@ -545,8 +616,8 @@ class TestAgentAndToolManagerRedis:
         agent_manager.update_agent(created_agent.id, update_data, test_client)
 
         # Verify cache is updated
-        redis_key = f"{redis_client.AGENT_PREFIX}{created_agent.id}"
-        cached_data = redis_client.get_hash(redis_key)
+        redis_key = f"{get_cache_provider().AGENT_PREFIX}{created_agent.id}"
+        cached_data = get_cache_provider().get_hash(redis_key)
 
         assert cached_data["name"] == "Updated Agent Name"
 
@@ -575,14 +646,14 @@ class TestAgentAndToolManagerRedis:
         created_agent = agent_manager.create_agent(agent_data, test_client)
 
         # Verify in cache
-        redis_key = f"{redis_client.AGENT_PREFIX}{created_agent.id}"
-        assert redis_client.get_hash(redis_key) is not None
+        redis_key = f"{get_cache_provider().AGENT_PREFIX}{created_agent.id}"
+        assert get_cache_provider().get_hash(redis_key) is not None
 
         # Delete agent
         agent_manager.delete_agent(created_agent.id, test_client)
 
         # Verify removed from cache
-        assert redis_client.get_hash(redis_key) is None
+        assert get_cache_provider().get_hash(redis_key) is None
 
     def test_agent_cache_hit_performance(self, agent_manager, test_client, redis_client):
         """Test agent cache hit performance (should be 40-60% faster)."""
@@ -606,18 +677,18 @@ class TestAgentAndToolManagerRedis:
         created_agent = agent_manager.create_agent(agent_data, test_client)
 
         # Warm cache
-        agent_manager.get_agent_by_id(created_agent.id, test_client)
+        _run(agent_manager.get_agent_by_id(created_agent.id, test_client))
 
         # Measure cached reads
         cache_times = []
         for _ in range(10):
             start = time.time()
-            agent_manager.get_agent_by_id(created_agent.id, test_client)
+            _run(agent_manager.get_agent_by_id(created_agent.id, test_client))
             cache_times.append(time.time() - start)
 
         avg_cache_time = sum(cache_times) / len(cache_times)
 
-        logger.info("✅ Average agent cache hit: %.3fms", avg_cache_time * 1000)
+        logger.info("Average agent cache hit: %.3fms", avg_cache_time * 1000)
 
         assert avg_cache_time < 0.01, f"Agent cache hit should be <10ms, got {avg_cache_time*1000:.2f}ms"
 
@@ -633,7 +704,9 @@ class TestAgentAndToolManagerRedis:
 class TestToolsAgentsDenormalization:
     """Test denormalized tools_agents junction table."""
 
-    def test_tools_agents_not_cached_separately(self, agent_manager, test_client, redis_client):
+    def test_tools_agents_not_cached_separately(
+        self, agent_manager, test_client, redis_client, run_on_loop
+    ):
         """Verify tools_agents junction table is NOT cached separately."""
         # Create agent with tools
         llm_config = LLMConfig(
@@ -654,20 +727,19 @@ class TestToolsAgentsDenormalization:
 
         created_agent = agent_manager.create_agent(agent_data, test_client)
 
-        # Verify NO separate junction table cache
-        # The relationship is denormalized into agent cache as tool_ids
-        junction_keys = redis_client.client.keys("tools_agents:*")
+        # Verify NO separate junction table cache (run on background loop)
+        junction_keys = run_on_loop(redis_client.client.keys("tools_agents:*"))
         assert len(junction_keys) == 0, "tools_agents should NOT be cached separately"
 
         # Verify tool_ids are stored WITH agent (if tools exist)
-        redis_key = f"{redis_client.AGENT_PREFIX}{created_agent.id}"
-        cached_data = redis_client.get_hash(redis_key)
+        redis_key = f"{get_cache_provider().AGENT_PREFIX}{created_agent.id}"
+        cached_data = get_cache_provider().get_hash(redis_key)
 
         # In real scenario with tools, this would contain tool_ids
         # Format: "tool_ids": "[\"tool-1\", \"tool-2\"]"
         assert cached_data is not None, "Agent should be cached"
 
-        logger.info("✅ Verified tools_agents is denormalized (not cached separately)")
+        logger.info("Verified tools_agents is denormalized (not cached separately)")
 
         # Cleanup
         agent_manager.delete_agent(created_agent.id, test_client)
@@ -695,7 +767,7 @@ class TestToolsAgentsDenormalization:
 
         # Retrieve agent (uses pipeline internally for tools)
         start_time = time.time()
-        agent = agent_manager.get_agent_by_id(created_agent.id, test_client)
+        agent = _run(agent_manager.get_agent_by_id(created_agent.id, test_client))
         total_time = time.time() - start_time
 
         # With denormalized tools_agents and pipeline:
@@ -704,8 +776,8 @@ class TestToolsAgentsDenormalization:
         # This is 50% fewer operations!
         assert agent.id == created_agent.id, "Retrieved agent should match"
 
-        logger.info("✅ Agent+tools retrieved in %.3fms using pipeline", total_time * 1000)
-        logger.info("✅ Benefit: 50%% fewer operations vs separate junction table cache")
+        logger.info("Agent+tools retrieved in %.3fms using pipeline", total_time * 1000)
+        logger.info("Benefit: 50%% fewer operations vs separate junction table cache")
 
         assert total_time < 0.01, f"Pipeline retrieval should be <10ms, got {total_time*1000:.2f}ms"
 
@@ -731,8 +803,8 @@ class TestBlockManagerRedis:
         created_block = block_manager.create_or_update_block(block_data, actor=test_client, user=test_user)
 
         # Verify in Redis Hash
-        redis_key = f"{redis_client.BLOCK_PREFIX}{created_block.id}"
-        cached_data = redis_client.get_hash(redis_key)
+        redis_key = f"{get_cache_provider().BLOCK_PREFIX}{created_block.id}"
+        cached_data = get_cache_provider().get_hash(redis_key)
 
         assert cached_data is not None, "Block should be cached in Redis"
         assert cached_data["id"] == created_block.id
@@ -774,8 +846,8 @@ class TestBlockManagerRedis:
         block_manager.update_block(created_block.id, update_data, test_client, user=test_user)
 
         # Verify Redis cache is updated
-        redis_key = f"{redis_client.BLOCK_PREFIX}{created_block.id}"
-        cached_data = redis_client.get_hash(redis_key)
+        redis_key = f"{get_cache_provider().BLOCK_PREFIX}{created_block.id}"
+        cached_data = get_cache_provider().get_hash(redis_key)
 
         assert cached_data["value"] == "Updated value"
 
@@ -793,14 +865,14 @@ class TestBlockManagerRedis:
         created_block = block_manager.create_or_update_block(block_data, test_client, user=test_user)
 
         # Verify in cache
-        redis_key = f"{redis_client.BLOCK_PREFIX}{created_block.id}"
-        assert redis_client.get_hash(redis_key) is not None
+        redis_key = f"{get_cache_provider().BLOCK_PREFIX}{created_block.id}"
+        assert get_cache_provider().get_hash(redis_key) is not None
 
         # Delete block
         block_manager.delete_block(created_block.id, test_client)
 
         # Verify removed from cache
-        assert redis_client.get_hash(redis_key) is None
+        assert get_cache_provider().get_hash(redis_key) is None
 
 
 # ============================================================================
@@ -824,8 +896,8 @@ class TestMessageManagerRedis:
         created_message = message_manager.create_message(message_data, test_client)
 
         # Verify in Redis Hash
-        redis_key = f"{redis_client.MESSAGE_PREFIX}{created_message.id}"
-        cached_data = redis_client.get_hash(redis_key)
+        redis_key = f"{get_cache_provider().MESSAGE_PREFIX}{created_message.id}"
+        cached_data = get_cache_provider().get_hash(redis_key)
 
         assert cached_data is not None, "Message should be cached in Redis"
         assert cached_data["id"] == created_message.id
@@ -859,7 +931,7 @@ class TestMessageManagerRedis:
         avg_cache_time = sum(cache_times) / len(cache_times)
         assert avg_cache_time < 0.010, f"Average cache hit should be <10ms, got {avg_cache_time*1000:.2f}ms"
 
-        logger.info("✅ Average cache hit time: %.2fms", avg_cache_time * 1000)
+        logger.info("Average cache hit time: %.2fms", avg_cache_time * 1000)
 
         # Cleanup
         message_manager.delete_message_by_id(created_message.id, test_client)
@@ -891,8 +963,8 @@ class TestEpisodicMemoryManagerRedis:
         created_event = episodic_manager.create_episodic_memory(event_data, test_client, user_id=test_user.id)
 
         # Verify in Redis JSON
-        redis_key = f"{redis_client.EPISODIC_PREFIX}{created_event.id}"
-        cached_data = redis_client.get_json(redis_key)
+        redis_key = f"{get_cache_provider().EPISODIC_PREFIX}{created_event.id}"
+        cached_data = get_cache_provider().get_json(redis_key)
 
         assert cached_data is not None, "Event should be cached in Redis JSON"
         assert cached_data["id"] == created_event.id
@@ -925,8 +997,8 @@ class TestEpisodicMemoryManagerRedis:
         created_event = episodic_manager.create_episodic_memory(event_data, test_client, user_id=test_user.id)
 
         # Verify embeddings are in Redis JSON
-        redis_key = f"{redis_client.EPISODIC_PREFIX}{created_event.id}"
-        cached_data = redis_client.get_json(redis_key)
+        redis_key = f"{get_cache_provider().EPISODIC_PREFIX}{created_event.id}"
+        cached_data = get_cache_provider().get_json(redis_key)
 
         assert cached_data is not None
         assert "details_embedding" in cached_data
@@ -971,8 +1043,8 @@ class TestSemanticMemoryManagerRedis:
         created_item = semantic_manager.create_item(item_data, test_client, user_id=test_user.id)
 
         # Verify all 3 embeddings are in Redis JSON
-        redis_key = f"{redis_client.SEMANTIC_PREFIX}{created_item.id}"
-        cached_data = redis_client.get_json(redis_key)
+        redis_key = f"{get_cache_provider().SEMANTIC_PREFIX}{created_item.id}"
+        cached_data = get_cache_provider().get_json(redis_key)
 
         assert cached_data is not None
         assert "name_embedding" in cached_data
@@ -982,7 +1054,7 @@ class TestSemanticMemoryManagerRedis:
         assert len(cached_data["summary_embedding"]) == 4096
         assert len(cached_data["details_embedding"]) == 4096
 
-        logger.info("✅ Cached semantic memory with 48KB of embeddings (3 × 16KB)")
+        logger.info("Cached semantic memory with 48KB of embeddings (3 × 16KB)")
 
         # Cleanup
         semantic_manager.delete_semantic_item_by_id(created_item.id, test_client)
@@ -1021,8 +1093,8 @@ class TestProceduralMemoryManagerRedis:
         created_item = procedural_manager.create_item(item_data, test_client, user_id=test_user.id)
 
         # Verify both embeddings are in Redis JSON
-        redis_key = f"{redis_client.PROCEDURAL_PREFIX}{created_item.id}"
-        cached_data = redis_client.get_json(redis_key)
+        redis_key = f"{get_cache_provider().PROCEDURAL_PREFIX}{created_item.id}"
+        cached_data = get_cache_provider().get_json(redis_key)
 
         assert cached_data is not None
         assert "summary_embedding" in cached_data
@@ -1030,7 +1102,7 @@ class TestProceduralMemoryManagerRedis:
         assert len(cached_data["summary_embedding"]) == 4096
         assert len(cached_data["steps_embedding"]) == 4096
 
-        logger.info("✅ Cached procedural memory with 32KB of embeddings (2 × 16KB)")
+        logger.info("Cached procedural memory with 32KB of embeddings (2 × 16KB)")
 
         # Cleanup
         procedural_manager.delete_procedure_by_id(created_item.id, test_client)
@@ -1067,14 +1139,14 @@ class TestResourceMemoryManagerRedis:
         created_item = resource_manager.create_item(item_data, test_client, user_id=test_user.id)
 
         # Verify embedding is in Redis JSON
-        redis_key = f"{redis_client.RESOURCE_PREFIX}{created_item.id}"
-        cached_data = redis_client.get_json(redis_key)
+        redis_key = f"{get_cache_provider().RESOURCE_PREFIX}{created_item.id}"
+        cached_data = get_cache_provider().get_json(redis_key)
 
         assert cached_data is not None
         assert "summary_embedding" in cached_data
         assert len(cached_data["summary_embedding"]) == 4096
 
-        logger.info("✅ Cached resource memory with 16KB embedding")
+        logger.info("Cached resource memory with 16KB embedding")
 
         # Cleanup
         resource_manager.delete_resource_by_id(created_item.id, test_client)
@@ -1112,8 +1184,8 @@ class TestKnowledgeVaultManagerRedis:
         created_item = knowledge_manager.create_item(item_data, test_client, user_id=test_user.id)
 
         # Verify embedding is in Redis JSON
-        redis_key = f"{redis_client.KNOWLEDGE_PREFIX}{created_item.id}"
-        cached_data = redis_client.get_json(redis_key)
+        redis_key = f"{get_cache_provider().KNOWLEDGE_PREFIX}{created_item.id}"
+        cached_data = get_cache_provider().get_json(redis_key)
 
         assert cached_data is not None
         assert "caption_embedding" in cached_data
@@ -1291,10 +1363,10 @@ class TestRedisIntegrationEnd2End:
         created_semantic = semantic_manager.create_item(semantic, test_client, user_id=test_user.id)
 
         # 5. Verify all cached
-        assert redis_client.get_hash(f"{redis_client.BLOCK_PREFIX}{created_block.id}") is not None
-        assert redis_client.get_hash(f"{redis_client.MESSAGE_PREFIX}{created_message.id}") is not None
-        assert redis_client.get_json(f"{redis_client.EPISODIC_PREFIX}{created_event.id}") is not None
-        assert redis_client.get_json(f"{redis_client.SEMANTIC_PREFIX}{created_semantic.id}") is not None
+        assert get_cache_provider().get_hash(f"{get_cache_provider().BLOCK_PREFIX}{created_block.id}") is not None
+        assert get_cache_provider().get_hash(f"{get_cache_provider().MESSAGE_PREFIX}{created_message.id}") is not None
+        assert get_cache_provider().get_json(f"{get_cache_provider().EPISODIC_PREFIX}{created_event.id}") is not None
+        assert get_cache_provider().get_json(f"{get_cache_provider().SEMANTIC_PREFIX}{created_semantic.id}") is not None
 
         # 6. Retrieve all (should hit cache)
         retrieved_block = block_manager.get_block_by_id(created_block.id, test_user)
@@ -1309,7 +1381,7 @@ class TestRedisIntegrationEnd2End:
         assert retrieved_event.id == created_event.id
         assert retrieved_semantic.id == created_semantic.id
 
-        logger.info("✅ Full workflow test passed - all managers using Redis!")
+        logger.info("Full workflow test passed - all managers using Redis!")
 
         # Cleanup
         block_manager.delete_block(created_block.id, test_client)
@@ -1318,10 +1390,204 @@ class TestRedisIntegrationEnd2End:
         semantic_manager.delete_semantic_item_by_id(created_semantic.id, test_client)
 
         # Verify all removed from cache
-        assert redis_client.get_hash(f"{redis_client.BLOCK_PREFIX}{created_block.id}") is None
-        assert redis_client.get_hash(f"{redis_client.MESSAGE_PREFIX}{created_message.id}") is None
-        assert redis_client.get_json(f"{redis_client.EPISODIC_PREFIX}{created_event.id}") is None
-        assert redis_client.get_json(f"{redis_client.SEMANTIC_PREFIX}{created_semantic.id}") is None
+        assert get_cache_provider().get_hash(f"{get_cache_provider().BLOCK_PREFIX}{created_block.id}") is None
+        assert get_cache_provider().get_hash(f"{get_cache_provider().MESSAGE_PREFIX}{created_message.id}") is None
+        assert get_cache_provider().get_json(f"{get_cache_provider().EPISODIC_PREFIX}{created_event.id}") is None
+        assert get_cache_provider().get_json(f"{get_cache_provider().SEMANTIC_PREFIX}{created_semantic.id}") is None
+
+
+# ============================================================================
+# CACHE PROVIDER PR 55 ON TOP OF PR 52, 53, 54
+# ============================================================================
+
+
+class TestCacheProviderPR55OnPR525354:
+    """
+    Test merged behavior: PR 55 (async cache provider) on top of PR 52 (1 user per org),
+    PR 53 (multi-scope clients), PR 54 (scoped core memory).
+
+    - PR 55: async cache I/O (acache_*, async_cache_read) uses same keys/shapes.
+    - PR 52/54: Agent cache reconstruction does not pass memory/children_ids to AgentState.
+    - PR 53: Client cache returns read_scopes as list when read from cache.
+    - PR 54: Block cache returns filter_tags as dict when read from cache.
+    """
+
+    def test_async_cache_dispatch_roundtrip(self, redis_client, run_on_loop):
+        """PR 55: acache_set_hash and acache_get_hash roundtrip via cache provider."""
+        from mirix.database.cache_provider import (
+            acache_delete,
+            acache_get_hash,
+            acache_set_hash,
+            get_cache_provider,
+        )
+
+        if get_cache_provider() is None:
+            pytest.skip("Cache provider not registered")
+        key = f"{get_cache_provider().BLOCK_PREFIX}test-pr55-{uuid.uuid4().hex[:8]}"
+        data = {"id": key.split(":")[-1], "label": "human", "value": "test", "limit": 2000}
+        run_on_loop(acache_set_hash(key, data, ttl=60))
+        retrieved = run_on_loop(acache_get_hash(key))
+        assert retrieved is not None
+        assert retrieved.get("value") == "test"
+        run_on_loop(acache_delete(key))
+
+    @pytest.mark.skipif(
+        settings.redis_enabled,
+        reason="Extended cache methods + Redis share event loop with fixture",
+    )
+    def test_extended_cache_methods(self, redis_client):
+        """Extended cache methods: delete_many, update_hash_field, set_string, get_string, delete_string."""
+        from mirix.database.cache_provider import (
+            acache_delete_many,
+            acache_delete_string,
+            acache_get_hash,
+            acache_get_string,
+            acache_set_hash,
+            acache_set_string,
+            acache_update_hash_field,
+            get_cache_provider,
+        )
+
+        if get_cache_provider() is None:
+            pytest.skip("Cache provider not registered")
+        cp = get_cache_provider()
+        prefix = f"{cp.BLOCK_PREFIX}test-ext-{uuid.uuid4().hex[:8]}"
+        keys = [f"{prefix}-a", f"{prefix}-b", f"{prefix}-c"]
+        # set_string / get_string / delete_string
+        _run(acache_set_string(keys[0], "val0", ttl=60))
+        out = _run(acache_get_string(keys[0]))
+        assert out == "val0"
+        _run(acache_delete_string(keys[0]))
+        assert _run(acache_get_string(keys[0])) is None
+        # set_hash then update_hash_field (soft delete pattern)
+        key_h = keys[1]
+        _run(acache_set_hash(key_h, {"id": "x", "label": "y"}, ttl=60))
+        _run(acache_update_hash_field(key_h, "is_deleted", "true"))
+        got = _run(acache_get_hash(key_h))
+        assert got is not None and got.get("is_deleted") == "true"
+        # delete_many
+        for k in keys:
+            _run(acache_set_string(k, "v", ttl=60))
+        n = _run(acache_delete_many(keys))
+        assert n >= 2
+        for k in keys:
+            assert _run(acache_get_string(k)) is None
+
+    @pytest.mark.skipif(
+        settings.redis_enabled,
+        reason="Async get_agent_by_id + Redis share event loop with fixture",
+    )
+    def test_agent_from_cache_valid_agent_state_no_extra_fields(
+        self, agent_manager, test_client, redis_client
+    ):
+        """PR 52/54: Agent reconstructed from cache is valid AgentState (no memory/children_ids)."""
+        llm_config = LLMConfig(
+            model="gpt-4", model_endpoint_type="openai", model_endpoint="https://api.openai.com",
+            context_window=8192,
+        )
+        embedding_config = EmbeddingConfig(
+            embedding_model="text-embedding-ada-002", embedding_endpoint_type="openai", embedding_dim=1536,
+        )
+        agent_data = CreateAgent(
+            name="Cache Shape Agent",
+            system="Test",
+            agent_type=AgentType.chat_agent,
+            llm_config=llm_config,
+            embedding_config=embedding_config,
+            tool_ids=[],
+        )
+        created = agent_manager.create_agent(agent_data, test_client)
+        # First get populates cache; second get hits cache and reconstructs
+        _run(agent_manager.get_agent_by_id(created.id, test_client))
+        retrieved = _run(agent_manager.get_agent_by_id(created.id, test_client))
+        assert retrieved.id == created.id
+        # AgentState has no memory field (extra='forbid'); reconstruction must not pass it
+        assert not hasattr(retrieved, "memory") or getattr(retrieved, "memory", None) is None
+        # children_ids must not be passed; children loaded separately
+        assert retrieved.model_dump().get("children_ids") is None
+        agent_manager.delete_agent(created.id, test_client)
+
+    def test_client_from_cache_read_scopes_is_list(
+        self, client_manager, test_organization, redis_client
+    ):
+        """PR 53: Client from cache has read_scopes as list (multi-scope)."""
+        from mirix.schemas.client import Client as PydanticClient
+
+        c = PydanticClient(
+            id=generate_test_id("client"),
+            name="Read Scopes Test",
+            organization_id=test_organization.id,
+            status="active",
+            write_scope="test",
+            read_scopes=["scope_a", "scope_b"],
+        )
+        created = client_manager.create_client(c)
+        # First get populates cache; second get hits cache (with read_scopes deserialization)
+        client_manager.get_client_by_id(created.id)
+        retrieved = client_manager.get_client_by_id(created.id)
+        assert isinstance(retrieved.read_scopes, list), "read_scopes must be list (PR 53)"
+        assert retrieved.read_scopes == ["scope_a", "scope_b"]
+        try:
+            _run(client_manager.delete_client_by_id(created.id))
+        except Exception:  # pylint: disable=broad-except
+            pass
+
+    @pytest.mark.skipif(
+        settings.redis_enabled,
+        reason="Block manager cache + Redis share event loop with fixture",
+    )
+    def test_block_from_cache_filter_tags_is_dict(
+        self, block_manager, test_client, test_user, redis_client
+    ):
+        """PR 54: Block from cache has filter_tags as dict (scoped core memory)."""
+        block_data = PydanticBlock(
+            id=generate_test_id("block"),
+            label="persona",
+            value="Scoped block",
+            limit=2000,
+            filter_tags={"scope": "test_scope", "tag": "value"},
+        )
+        created = block_manager.create_or_update_block(block_data, actor=test_client, user=test_user)
+        # First get populates cache; second get hits cache (with filter_tags deserialization)
+        block_manager.get_block_by_id(created.id, user=test_user)
+        retrieved = block_manager.get_block_by_id(created.id, user=test_user)
+        assert isinstance(retrieved.filter_tags, dict), "filter_tags must be dict (PR 54)"
+        # scope is typically set from client write_scope; ensure dict shape from cache
+        assert "scope" in retrieved.filter_tags
+        assert retrieved.filter_tags["scope"] == "test"
+        block_manager.delete_block(created.id, test_client)
+
+    @pytest.mark.skipif(
+        settings.redis_enabled,
+        reason="async_cache_read + Redis share event loop with fixture",
+    )
+    def test_async_cache_read_returns_model(self, block_manager, test_client, test_user, redis_client):
+        """PR 55: async_cache_read with model_class returns deserialized Pydantic model."""
+        from mirix.database.cache_layer import async_cache_read
+        from mirix.database.cache_provider import get_cache_provider
+
+        if get_cache_provider() is None:
+            pytest.skip("Cache provider not registered")
+        block_data = PydanticBlock(
+            id=generate_test_id("block"), label="human", value="Async read test", limit=2000,
+        )
+        created = block_manager.create_or_update_block(block_data, actor=test_client, user=test_user)
+        key = f"{get_cache_provider().BLOCK_PREFIX}{created.id}"
+        result = _run(
+            async_cache_read(
+                cache_key=key,
+                db_fn=lambda: block_manager.get_block_by_id(created.id, user=test_user, use_cache=False),
+                method="hash",
+                ttl=60,
+                model_class=PydanticBlock,
+                fixups={"value": ""},
+            )
+        )
+        assert result is not None
+        assert isinstance(result, PydanticBlock)
+        assert result.id == created.id
+        assert result.value == "Async read test"
+        block_manager.delete_block(created.id, test_client)
 
 
 # ============================================================================

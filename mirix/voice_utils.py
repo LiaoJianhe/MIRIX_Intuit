@@ -38,7 +38,7 @@ def process_voice_files(voice_items):
     if not voice_items:
         return None
 
-    logger.debug("🎵 Agent processing %s voice files", len(voice_items))
+    logger.debug("Agent processing %s voice files", len(voice_items))
     temp_files = []
 
     try:
@@ -133,7 +133,7 @@ def process_voice_files(voice_items):
 
     finally:
         # Clean up any temporary files that might have been created
-        logger.debug("🧹 Cleaning up %s temporary voice files...", len(temp_files))
+        logger.debug("Cleaning up %s temporary voice files...", len(temp_files))
         for temp_file in temp_files:
             if os.path.exists(temp_file):
                 try:

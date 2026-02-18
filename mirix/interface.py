@@ -84,7 +84,7 @@ class CLIInterface(AgentInterface):
 
     @staticmethod
     def memory_message(msg: str, msg_obj: Optional[Message] = None):
-        fstr = f"{Fore.LIGHTMAGENTA_EX}{Style.BRIGHT}🧠 {Fore.LIGHTMAGENTA_EX}{{msg}}{Style.RESET_ALL}"
+        fstr = f"{Fore.LIGHTMAGENTA_EX}{Style.BRIGHT}[memory] {Fore.LIGHTMAGENTA_EX}{{msg}}{Style.RESET_ALL}"
         if STRIP_UI:
             fstr = "{msg}"
         print(fstr.format(msg=msg))
@@ -187,9 +187,9 @@ class CLIInterface(AgentInterface):
                             "archival_memory_insert",
                             "core_memory_append",
                         ]:
-                            print_function_message("🧠", f"updating memory with {function_name}")
+                            print_function_message("[memory]", f"updating memory with {function_name}")
                         elif function_name == "archival_memory_search":
-                            print_function_message("🧠", f"searching memory with {function_name}")
+                            print_function_message("[memory]", f"searching memory with {function_name}")
                         try:
                             msg_dict = eval(function_args)
                             if function_name == "archival_memory_search":
@@ -218,7 +218,7 @@ class CLIInterface(AgentInterface):
                         "conversation_search",
                         "conversation_search_date",
                     ]:
-                        print_function_message("🧠", f"searching memory with {function_name}")
+                        print_function_message("[memory]", f"searching memory with {function_name}")
                         try:
                             msg_dict = eval(function_args)
                             output = f"\tquery: {msg_dict['query']}, page: {msg_dict['page']}"

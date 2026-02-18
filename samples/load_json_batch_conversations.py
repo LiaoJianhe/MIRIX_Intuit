@@ -248,9 +248,9 @@ def process_conversations(
                 client.create_or_get_user(
                     user_id=user_id, user_name="Sales User {}".format(user_id), org_id=LoadConfig.ORG_ID
                 )
-                logger.info("  ✓ User ready: %s", user_id)
+                logger.info("  User ready: %s", user_id)
             except Exception as e:  # pylint: disable=broad-except
-                logger.error("  ✗ Failed to create user %s: %s", user_id, e)
+                logger.error("  Failed to create user %s: %s", user_id, e)
 
     # Process conversations in batches
     for batch_num in range(0, total, batch_size):
@@ -329,12 +329,12 @@ def main():
     logger.info("Loading JSON file...")
     try:
         conversations = load_json_file(args.json_file)
-        logger.info("✓ Loaded %d conversation records", len(conversations))
+        logger.info("Loaded %d conversation records", len(conversations))
     except ValueError as e:
-        logger.error("✗ %s", e)
+        logger.error("%s", e)
         sys.exit(1)
     except Exception as e:  # pylint: disable=broad-except
-        logger.error("✗ Unexpected error: %s", e)
+        logger.error("Unexpected error: %s", e)
         sys.exit(1)
 
     if not conversations:
@@ -362,7 +362,7 @@ def main():
                 org_id=LoadConfig.ORG_ID,
                 debug=False,
             )
-            logger.info("✓ Client initialized")
+            logger.info("Client initialized")
 
             # Initialize meta agent
             logger.info("Initializing meta agent...")
@@ -370,9 +370,9 @@ def main():
             config_path = project_root / "mirix" / "configs" / "examples" / "mirix_gemini.yaml"
 
             client.initialize_meta_agent(config_path=str(config_path), update_agents=False)
-            logger.info("✓ Meta agent initialized")
+            logger.info("Meta agent initialized")
         except Exception as e:  # pylint: disable=broad-except
-            logger.error("✗ Failed to initialize: %s", e)
+            logger.error("Failed to initialize: %s", e)
             sys.exit(1)
 
     # Confirm before processing

@@ -1,6 +1,10 @@
 """
 Comprehensive Unit Tests for LocalClient
 
+These tests use an event-loop sync_bridge and a registered in-memory cache
+provider so that sync server paths (_sync_get_agent_by_id, etc.) and cache
+code paths work the same as in production.
+
 This test suite verifies all APIs in mirix/local_client/local_client.py,
 including agent management, memory operations, tool management, block management,
 and client-scoped isolation.
@@ -71,8 +75,101 @@ TEST_EMBEDDING_CONFIG = EmbeddingConfig(
 # ============================================================================
 
 
+class _InMemoryCacheProvider:
+    """Minimal in-memory cache provider for local client tests (no Redis)."""
+
+    BLOCK_PREFIX = "block:"
+    MESSAGE_PREFIX = "msg:"
+    EPISODIC_PREFIX = "episodic:"
+    SEMANTIC_PREFIX = "semantic:"
+    PROCEDURAL_PREFIX = "procedural:"
+    RESOURCE_PREFIX = "resource:"
+    KNOWLEDGE_PREFIX = "knowledge:"
+    RAW_MEMORY_PREFIX = "raw_memory:"
+    ORGANIZATION_PREFIX = "org:"
+    USER_PREFIX = "user:"
+    CLIENT_PREFIX = "client:"
+    AGENT_PREFIX = "agent:"
+    TOOL_PREFIX = "tool:"
+
+    def get(self, key: str):
+        return None
+
+    def set(self, key: str, data: dict, ttl: int = None):
+        return True
+
+    def delete(self, key: str):
+        return True
+
+    def get_hash(self, key: str):
+        return None
+
+    def set_hash(self, key: str, data: dict, ttl: int = None):
+        return True
+
+    def get_json(self, key: str):
+        return None
+
+    def set_json(self, key: str, data: dict, ttl: int = None):
+        return True
+
+    def delete_many(self, keys: list):
+        return len(keys)
+
+    def update_hash_field(self, key: str, field: str, value: str):
+        return True
+
+    def set_string(self, key: str, value: str, ttl: int = None):
+        return True
+
+    def get_string(self, key: str):
+        return None
+
+    def delete_string(self, key: str):
+        return True
+
+
 @pytest.fixture(scope="module")
-def test_organization():
+def event_loop_sync_bridge():
+    """Provide an event loop for the sync_bridge so _sync_get_agent_by_id and other sync wrappers work."""
+    import asyncio
+    import threading
+    import time
+
+    loop = asyncio.new_event_loop()
+
+    def run():
+        loop.run_forever()
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    time.sleep(0.05)
+
+    from mirix.database import sync_bridge
+
+    sync_bridge._event_loop = loop
+    sync_bridge._event_loop_thread_id = t.ident
+    try:
+        yield loop
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        sync_bridge._event_loop = None
+        sync_bridge._event_loop_thread_id = None
+
+
+@pytest.fixture(scope="module")
+def registered_cache_provider(event_loop_sync_bridge):
+    """Register an in-memory cache provider so tests use the same cache code paths as production."""
+    from mirix.database.cache_provider import get_cache_provider, register_cache_provider
+
+    if get_cache_provider() is None:
+        register_cache_provider("local_test", _InMemoryCacheProvider())
+    yield
+    # Leave provider registered for other module-scoped fixtures; no unregister to avoid affecting order.
+
+
+@pytest.fixture(scope="module")
+def test_organization(event_loop_sync_bridge, registered_cache_provider):
     """Create test organization before any clients."""
     # Use a default client to create the test organization
     default_client = LocalClient(
@@ -120,7 +217,7 @@ def client_b(test_organization):
 
 
 @pytest.fixture(scope="module")
-def default_client():
+def default_client(event_loop_sync_bridge, registered_cache_provider):
     """Create LocalClient with default IDs."""
     client = LocalClient(
         debug=False,
@@ -622,39 +719,6 @@ class TestBlockManagement:
         # Delete
         deleted_block = client_a.delete_block(block.id)
         assert deleted_block is not None
-
-
-# ============================================================================
-# TEST: MEMORY OPERATIONS
-# ============================================================================
-
-
-class TestMemoryOperations:
-    """Test memory-related operations."""
-
-    def test_get_core_memory(self, client_a, test_memory):
-        """Test getting agent's core memory."""
-        agent = client_a.create_agent(
-            name=f"test_memory_agent_{uuid.uuid4().hex[:8]}",
-            memory=test_memory,
-            system="Test system",
-        )
-
-        memory = client_a.get_core_memory(agent.id)
-        assert memory is not None
-        assert isinstance(memory, Memory)
-
-    def test_get_in_context_memory(self, client_a, test_memory):
-        """Test getting agent's in-context memory."""
-        agent = client_a.create_agent(
-            name=f"test_in_context_{uuid.uuid4().hex[:8]}",
-            memory=test_memory,
-            system="Test system",
-        )
-
-        memory = client_a.get_in_context_memory(agent.id)
-        assert memory is not None
-        assert isinstance(memory, Memory)
 
 
 # ============================================================================

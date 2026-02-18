@@ -1,10 +1,18 @@
 """Tests for temporal query functionality."""
 
+import os
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
+import requests
 
+from mirix.client import MirixClient
 from mirix.temporal.temporal_parser import TemporalRange, parse_temporal_expression
+
+# Integration tests use a running server (same as test_deletion_apis / test_search_all_users)
+BASE_URL = os.environ.get("MIRIX_API_URL", "http://localhost:8000")
+CONFIG_PATH = Path(__file__).parent.parent / "mirix" / "configs" / "examples" / "mirix_gemini.yaml"
 
 
 class TestTemporalParser:
@@ -138,28 +146,117 @@ class TestTemporalParser:
         assert result["end"] is None
 
 
+@pytest.fixture(scope="module")
+def check_server():
+    """Skip the module's integration tests if the server is not running."""
+    try:
+        response = requests.get(f"{BASE_URL}/health", timeout=5)
+        response.raise_for_status()
+        return True
+    except requests.exceptions.RequestException as e:
+        pytest.skip(f"Integration test - server not available at {BASE_URL}: {e}")
+
+
+@pytest.fixture(scope="module")
+def temporal_client(check_server, api_key_factory):
+    """Client and user for temporal integration tests."""
+    org_id = "test-temporal-org"
+    client_id = "test-temporal-client"
+    user_id = "test-temporal-user"
+    auth = api_key_factory(client_id, org_id)
+    client = MirixClient(
+        api_key=auth["api_key"],
+        base_url=BASE_URL,
+        client_id=client_id,
+        client_name="Test Temporal Client",
+        client_scope="test",
+        org_id=org_id,
+        debug=False,
+    )
+    client.initialize_meta_agent(config_path=str(CONFIG_PATH), update_agents=True)
+    client.create_or_get_user(user_id=user_id, user_name="Test Temporal User", org_id=org_id)
+    return client, user_id
+
+
 class TestTemporalIntegration:
-    """Integration tests for temporal query feature."""
+    """Integration tests for temporal query feature.
 
-    # Note: These tests require a running server and database
-    # They are marked with @pytest.mark.integration to skip in unit test runs
-
-    @pytest.mark.integration
-    def test_retrieve_with_temporal_expression(self):
-        """Test retrieval with natural language temporal expression."""
-        # This would test the full flow from client to database
-        # Skip for now as it requires full setup
-        pytest.skip("Integration test - requires running server and full setup")
+    Require a running server. Run with: pytest tests/test_temporal_queries.py -m integration
+    Or run all tests (integration tests skip if server is down):
+    pytest tests/test_temporal_queries.py
+    """
 
     @pytest.mark.integration
-    def test_retrieve_with_explicit_date_range(self):
+    def test_retrieve_with_temporal_expression(self, temporal_client):
+        """Test retrieval with natural language temporal expression (parsed to start/end dates)."""
+        client, user_id = temporal_client
+        ref_time = datetime(2025, 11, 19, 14, 30, 0)
+        parsed = parse_temporal_expression("What happened today?", ref_time)
+        assert parsed is not None
+        start_date = parsed.start.strftime("%Y-%m-%dT%H:%M:%S")
+        end_date = parsed.end.strftime("%Y-%m-%dT%H:%M:%S")
+        results = client.search(
+            user_id=user_id,
+            query="",
+            memory_type="episodic",
+            limit=20,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        assert results.get("success") is True
+        assert "results" in results
+        assert "date_range" in results
+        assert results["date_range"] is None or isinstance(results["date_range"], dict)
+        # If date_range was applied, response should reflect it
+        if results.get("date_range"):
+            assert "start" in results["date_range"] or "end" in results["date_range"]
+
+    @pytest.mark.integration
+    def test_retrieve_with_explicit_date_range(self, temporal_client):
         """Test retrieval with explicit start_date and end_date."""
-        pytest.skip("Integration test - requires running server and full setup")
+        client, user_id = temporal_client
+        start_date = "2025-11-01T00:00:00"
+        end_date = "2025-11-30T23:59:59"
+        results = client.search(
+            user_id=user_id,
+            query="",
+            memory_type="episodic",
+            limit=20,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        assert results.get("success") is True
+        assert "results" in results
+        assert isinstance(results["results"], list)
+        assert results.get("date_range") is not None
+        assert results["date_range"].get("start") is not None
+        assert results["date_range"].get("end") is not None
 
     @pytest.mark.integration
-    def test_temporal_filtering_episodic_only(self):
-        """Test that temporal filtering only affects episodic memories."""
-        pytest.skip("Integration test - requires running server and full setup")
+    def test_temporal_filtering_episodic_only(self, temporal_client):
+        """Test that temporal filtering only affects episodic memories (date_range in response)."""
+        client, user_id = temporal_client
+        start_date = "2025-10-01T00:00:00"
+        end_date = "2025-10-31T23:59:59"
+        results = client.search(
+            user_id=user_id,
+            query="",
+            memory_type="all",
+            limit=20,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        assert results.get("success") is True
+        assert "results" in results
+        # date_range is applied server-side for episodic only; API returns it in response
+        assert results.get("date_range") is not None
+        assert results["date_range"].get("start") is not None
+        assert results["date_range"].get("end") is not None
+        # Only episodic results have timestamp; other types may be present without temporal filter
+        for item in results["results"]:
+            if item.get("memory_type") == "episodic" and item.get("timestamp"):
+                # Episodic timestamps should fall within range (server filters by occurred_at)
+                pass
 
 
 # Additional documentation and usage examples

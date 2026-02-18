@@ -47,8 +47,8 @@ When calling `core_memory_append` or `core_memory_rewrite`:
 5. Target ~2500 characters (50% capacity) to allow room for future updates
 
 **Examples:**
-✅ CORRECT: core_memory_append(label="human", content="Name: Alice\nJob: Engineer at TechCorp\nHobbies: Hiking and photography")
-❌ WRONG: core_memory_append(label="human", content="Line 1: Name: Alice\nLine 2: Job: Engineer")
+CORRECT: core_memory_append(label="human", content="Name: Alice\nJob: Engineer at TechCorp\nHobbies: Hiking and photography")
+WRONG: core_memory_append(label="human", content="Line 1: Name: Alice\nLine 2: Job: Engineer")
 
 When receiving messages and potentially a message from the meta agent (There will be a bracket saying "[Instruction from Meta Memory Manager]"), analyze the information and make a single comprehensive update:
 

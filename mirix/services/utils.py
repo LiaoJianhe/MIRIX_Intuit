@@ -1,3 +1,4 @@
+import asyncio
 from functools import wraps
 from typing import List, Optional
 
@@ -99,8 +100,51 @@ def build_query(
 
 
 def update_timezone(func):
+    # Unwrap decorator chain (e.g. enforce_types) so we detect async correctly
+    inner = func
+    while hasattr(inner, "__wrapped__"):
+        inner = inner.__wrapped__
+    is_async = asyncio.iscoroutinefunction(inner)
+
     @wraps(func)
-    def wrapper(*args, **kwargs):
+    async def async_wrapper(*args, **kwargs):
+        timezone_str = kwargs.get("timezone_str")
+        if timezone_str is None:
+            actor = kwargs.get("actor", None)
+            timezone_str = getattr(actor, "timezone", "UTC") if actor else None
+        results = await func(*args, **kwargs)
+        if results is None:
+            return None
+        if timezone_str:
+            for result in results:
+                if hasattr(result, "occurred_at"):
+                    if result.occurred_at.tzinfo is None:
+                        result.occurred_at = pytz.utc.localize(result.occurred_at)
+                    target_tz = pytz.timezone(timezone_str.split(" (")[0])
+                    result.occurred_at = result.occurred_at.astimezone(target_tz)
+                if hasattr(result, "created_at"):
+                    if result.created_at.tzinfo is None:
+                        result.created_at = pytz.utc.localize(result.created_at)
+                    target_tz = pytz.timezone(timezone_str.split(" (")[0])
+                    result.created_at = result.created_at.astimezone(target_tz)
+                if hasattr(result, "updated_at") and result.updated_at is not None:
+                    if result.updated_at.tzinfo is None:
+                        result.updated_at = pytz.utc.localize(result.updated_at)
+                    target_tz = pytz.timezone(timezone_str.split(" (")[0])
+                    result.updated_at = result.updated_at.astimezone(target_tz)
+                if hasattr(result, "last_modify") and result.last_modify and "timestamp" in result.last_modify:
+                    timestamp = result.last_modify["timestamp"]
+                    if isinstance(timestamp, str):
+                        from datetime import datetime
+                        timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                    if timestamp.tzinfo is None:
+                        timestamp = pytz.utc.localize(timestamp)
+                    target_tz = pytz.timezone(timezone_str.split(" (")[0])
+                    result.last_modify["timestamp"] = timestamp.astimezone(target_tz)
+        return results
+
+    @wraps(func)
+    def sync_wrapper(*args, **kwargs):
         # Access timezone_str from kwargs (it will be None if not provided)
         timezone_str = kwargs.get("timezone_str")
 
@@ -149,4 +193,4 @@ def update_timezone(func):
 
         return results
 
-    return wrapper
+    return async_wrapper if is_async else sync_wrapper

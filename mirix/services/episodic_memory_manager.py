@@ -1,3 +1,4 @@
+import asyncio
 import datetime as dt
 import json
 import re
@@ -328,7 +329,7 @@ class EpisodicMemoryManager:
                 raise NoResultFound(f"Episodic episodic_memory record with id {id} not found.")
 
     @enforce_types
-    def delete_by_client_id(self, actor: PydanticClient) -> int:
+    async def delete_by_client_id(self, actor: PydanticClient) -> int:
         """
         Bulk delete all episodic memory records for a client (removes from Redis cache).
         Optimized with single DB query and batch Redis deletion.
@@ -339,37 +340,38 @@ class EpisodicMemoryManager:
         Returns:
             Number of records deleted
         """
-        from mirix.database.redis_client import get_redis_client
+        from mirix.database.cache_provider import acache_delete_many, get_cache_provider
 
-        with self.session_maker() as session:
-            # Get IDs for Redis cleanup (only fetch IDs, not full objects)
-            item_ids = [
-                row[0] for row in session.query(EpisodicEvent.id).filter(EpisodicEvent.client_id == actor.id).all()
-            ]
+        def _db_delete():
+            with self.session_maker() as session:
+                item_ids = [
+                    row[0]
+                    for row in session.query(EpisodicEvent.id).filter(EpisodicEvent.client_id == actor.id).all()
+                ]
+                count = len(item_ids)
+                if count == 0:
+                    return 0, []
+                session.query(EpisodicEvent).filter(EpisodicEvent.client_id == actor.id).delete(
+                    synchronize_session=False
+                )
+                session.commit()
+                return count, item_ids
 
-            count = len(item_ids)
-            if count == 0:
-                return 0
+        count, item_ids = await asyncio.to_thread(_db_delete)
+        if count == 0:
+            return 0
 
-            # Bulk delete in single query
-            session.query(EpisodicEvent).filter(EpisodicEvent.client_id == actor.id).delete(synchronize_session=False)
-
-            session.commit()
-
-        # Batch delete from Redis cache (outside of session context)
-        redis_client = get_redis_client()
-        if redis_client and item_ids:
-            redis_keys = [f"{redis_client.EPISODIC_PREFIX}{item_id}" for item_id in item_ids]
-
-            # Delete in batches to avoid command size limits
+        cache_provider = get_cache_provider()
+        if cache_provider and item_ids:
+            redis_keys = [f"{cache_provider.EPISODIC_PREFIX}{item_id}" for item_id in item_ids]
             BATCH_SIZE = 1000
             for i in range(0, len(redis_keys), BATCH_SIZE):
                 batch = redis_keys[i : i + BATCH_SIZE]
-                redis_client.client.delete(*batch)
+                await acache_delete_many(batch)
 
         return count
 
-    def soft_delete_by_client_id(self, actor: PydanticClient) -> int:
+    async def soft_delete_by_client_id(self, actor: PydanticClient) -> int:
         """
         Bulk soft delete all episodic memory records for a client (updates Redis cache).
 
@@ -379,47 +381,43 @@ class EpisodicMemoryManager:
         Returns:
             Number of records soft deleted
         """
-        from mirix.database.redis_client import get_redis_client
+        from mirix.database.cache_provider import acache_delete, acache_update_hash_field, get_cache_provider
 
-        with self.session_maker() as session:
-            # Query all non-deleted records for this client (use actor.id)
-            items = (
-                session.query(EpisodicEvent)
-                .filter(
-                    EpisodicEvent.client_id == actor.id,
-                    EpisodicEvent.is_deleted == False,
+        def _db_soft_delete():
+            with self.session_maker() as session:
+                items = (
+                    session.query(EpisodicEvent)
+                    .filter(
+                        EpisodicEvent.client_id == actor.id,
+                        EpisodicEvent.is_deleted == False,
+                    )
+                    .all()
                 )
-                .all()
-            )
+                count = len(items)
+                if count == 0:
+                    return 0, []
+                item_ids = [item.id for item in items]
+                for item in items:
+                    item.is_deleted = True
+                    item.set_updated_at()
+                session.commit()
+                return count, item_ids
 
-            count = len(items)
-            if count == 0:
-                return 0
+        count, item_ids = await asyncio.to_thread(_db_soft_delete)
+        if count == 0:
+            return 0
 
-            # Extract IDs BEFORE committing (to avoid detached instance errors)
-            item_ids = [item.id for item in items]
-
-            # Soft delete from database (set is_deleted = True directly, don't call item.delete())
-            for item in items:
-                item.is_deleted = True
-                item.set_updated_at()
-
-            session.commit()
-
-        # Update Redis cache with is_deleted=true (outside session)
-        redis_client = get_redis_client()
-        if redis_client:
+        cache_provider = get_cache_provider()
+        if cache_provider:
             for item_id in item_ids:
-                redis_key = f"{redis_client.EPISODIC_PREFIX}{item_id}"
-                try:
-                    redis_client.client.hset(redis_key, "is_deleted", "true")
-                except Exception:
-                    # If update fails, remove from cache
-                    redis_client.delete(redis_key)
+                redis_key = f"{cache_provider.EPISODIC_PREFIX}{item_id}"
+                ok = await acache_update_hash_field(redis_key, "is_deleted", "true")
+                if not ok:
+                    await acache_delete(redis_key)
 
         return count
 
-    def soft_delete_by_user_id(self, user_id: str) -> int:
+    async def soft_delete_by_user_id(self, user_id: str) -> int:
         """
         Bulk soft delete all episodic memory records for a user (updates Redis cache).
 
@@ -432,60 +430,43 @@ class EpisodicMemoryManager:
         import datetime as dt
         from datetime import datetime
 
-        from mirix.database.redis_client import get_redis_client
+        from mirix.database.cache_provider import acache_delete, acache_update_hash_field, get_cache_provider
 
-        with self.session_maker() as session:
-            # Extract IDs BEFORE bulk update (for Redis cleanup)
-            item_ids = [
-                row[0]
-                for row in session.query(EpisodicEvent.id)
-                .filter(EpisodicEvent.user_id == user_id, EpisodicEvent.is_deleted == False)
-                .all()
-            ]
-
-            count = len(item_ids)
-            if count == 0:
-                return 0
-
-            # Batch soft delete in database using single SQL UPDATE
-            session.query(EpisodicEvent).filter(
-                EpisodicEvent.user_id == user_id, EpisodicEvent.is_deleted == False
-            ).update(
-                {"is_deleted": True, "updated_at": datetime.now(dt.UTC)},
-                synchronize_session=False,
-            )
-
-            session.commit()
-
-        # Batch update Redis cache using pipeline (outside session)
-        redis_client = get_redis_client()
-        if redis_client and item_ids:
-            try:
-                # Use Redis pipeline for batch operations
-                pipe = redis_client.client.pipeline()
-                for item_id in item_ids:
-                    redis_key = f"{redis_client.EPISODIC_PREFIX}{item_id}"
-                    pipe.hset(redis_key, "is_deleted", "true")
-                pipe.execute()
-            except Exception as e:
-                # If pipeline fails, fall back to individual deletions
-                from mirix.log import get_logger
-
-                logger = get_logger(__name__)
-                logger.warning(
-                    "Redis pipeline failed for soft_delete_by_user_id, removing keys: %s",
-                    e,
+        def _db_soft_delete():
+            with self.session_maker() as session:
+                item_ids = [
+                    row[0]
+                    for row in session.query(EpisodicEvent.id)
+                    .filter(EpisodicEvent.user_id == user_id, EpisodicEvent.is_deleted == False)
+                    .all()
+                ]
+                count = len(item_ids)
+                if count == 0:
+                    return 0, []
+                session.query(EpisodicEvent).filter(
+                    EpisodicEvent.user_id == user_id, EpisodicEvent.is_deleted == False
+                ).update(
+                    {"is_deleted": True, "updated_at": datetime.now(dt.UTC)},
+                    synchronize_session=False,
                 )
-                for item_id in item_ids:
-                    redis_key = f"{redis_client.EPISODIC_PREFIX}{item_id}"
-                    try:
-                        redis_client.delete(redis_key)
-                    except Exception:
-                        pass
+                session.commit()
+                return count, item_ids
+
+        count, item_ids = await asyncio.to_thread(_db_soft_delete)
+        if count == 0:
+            return 0
+
+        cache_provider = get_cache_provider()
+        if cache_provider and item_ids:
+            for item_id in item_ids:
+                redis_key = f"{cache_provider.EPISODIC_PREFIX}{item_id}"
+                ok = await acache_update_hash_field(redis_key, "is_deleted", "true")
+                if not ok:
+                    await acache_delete(redis_key)
 
         return count
 
-    def delete_by_user_id(self, user_id: str) -> int:
+    async def delete_by_user_id(self, user_id: str) -> int:
         """
         Bulk hard delete all episodic memory records for a user (removes from Redis cache).
         Optimized with single DB query and batch Redis deletion.
@@ -496,33 +477,34 @@ class EpisodicMemoryManager:
         Returns:
             Number of records deleted
         """
-        from mirix.database.redis_client import get_redis_client
+        from mirix.database.cache_provider import acache_delete_many, get_cache_provider
 
-        with self.session_maker() as session:
-            # Get IDs for Redis cleanup (only fetch IDs, not full objects)
-            item_ids = [
-                row[0] for row in session.query(EpisodicEvent.id).filter(EpisodicEvent.user_id == user_id).all()
-            ]
+        def _db_delete():
+            with self.session_maker() as session:
+                item_ids = [
+                    row[0]
+                    for row in session.query(EpisodicEvent.id).filter(EpisodicEvent.user_id == user_id).all()
+                ]
+                count = len(item_ids)
+                if count == 0:
+                    return 0, []
+                session.query(EpisodicEvent).filter(EpisodicEvent.user_id == user_id).delete(
+                    synchronize_session=False
+                )
+                session.commit()
+                return count, item_ids
 
-            count = len(item_ids)
-            if count == 0:
-                return 0
+        count, item_ids = await asyncio.to_thread(_db_delete)
+        if count == 0:
+            return 0
 
-            # Bulk delete in single query
-            session.query(EpisodicEvent).filter(EpisodicEvent.user_id == user_id).delete(synchronize_session=False)
-
-            session.commit()
-
-        # Batch delete from Redis cache (outside of session context)
-        redis_client = get_redis_client()
-        if redis_client and item_ids:
-            redis_keys = [f"{redis_client.EPISODIC_PREFIX}{item_id}" for item_id in item_ids]
-
-            # Delete in batches to avoid command size limits
+        cache_provider = get_cache_provider()
+        if cache_provider and item_ids:
+            redis_keys = [f"{cache_provider.EPISODIC_PREFIX}{item_id}" for item_id in item_ids]
             BATCH_SIZE = 1000
             for i in range(0, len(redis_keys), BATCH_SIZE):
                 batch = redis_keys[i : i + BATCH_SIZE]
-                redis_client.client.delete(*batch)
+                await acache_delete_many(batch)
 
         return count
 
@@ -643,7 +625,7 @@ class EpisodicMemoryManager:
 
     @update_timezone
     @enforce_types
-    def list_episodic_memory(
+    async def list_episodic_memory(
         self,
         agent_state: AgentState,
         user: PydanticUser,
@@ -703,17 +685,17 @@ class EpisodicMemoryManager:
         # Extract organization_id from user for multi-tenant isolation
         organization_id = user.organization_id
 
-        # Try Redis Search first (if cache enabled and Redis is available)
-        from mirix.database.redis_client import get_redis_client
+        # Try search provider first (if cache enabled and a provider is available)
+        from mirix.database.search_provider import get_search_provider
 
-        redis_client = get_redis_client()
+        search_provider = get_search_provider()
 
-        if use_cache and redis_client:
+        if use_cache and search_provider:
             try:
                 # Case 1: No query - get recent items
                 if not query or query == "":
-                    results = redis_client.search_recent(
-                        index_name=redis_client.EPISODIC_INDEX,
+                    results = await search_provider.search_recent(
+                        index_name=search_provider.EPISODIC_INDEX,
                         limit=limit or 50,
                         user_id=user.id,
                         organization_id=organization_id,
@@ -724,11 +706,10 @@ class EpisodicMemoryManager:
                     )
                     if results:
                         logger.debug(
-                            "Redis cache HIT: returned %d recent episodic events",
+                            "Cache HIT: returned %d recent episodic events",
                             len(results),
                         )
-                        # Clean Redis-specific fields before Pydantic validation
-                        results = redis_client.clean_redis_fields(results)
+                        results = search_provider.clean_search_fields(results)
                         return [PydanticEpisodicEvent(**item) for item in results]
 
                 # Case 2: Vector similarity search
@@ -751,8 +732,8 @@ class EpisodicMemoryManager:
                     # Determine vector field
                     vector_field = f"{search_field}_embedding" if search_field else "details_embedding"
 
-                    results = redis_client.search_vector(
-                        index_name=redis_client.EPISODIC_INDEX,
+                    results = await search_provider.search_vector(
+                        index_name=search_provider.EPISODIC_INDEX,
                         embedding=embedded_text,
                         vector_field=vector_field,
                         limit=limit or 50,
@@ -764,11 +745,10 @@ class EpisodicMemoryManager:
                     )
                     if results:
                         logger.debug(
-                            "Redis vector search HIT: found %d episodic events",
+                            "Vector search HIT: found %d episodic events",
                             len(results),
                         )
-                        # Clean Redis-specific fields before Pydantic validation
-                        results = redis_client.clean_redis_fields(results)
+                        results = search_provider.clean_search_fields(results)
                         return [PydanticEpisodicEvent(**item) for item in results]
 
                 # Case 3: Full-text search (BM25-like)
@@ -776,8 +756,8 @@ class EpisodicMemoryManager:
                     # Determine search field
                     fields = [search_field] if search_field else ["details", "summary"]
 
-                    results = redis_client.search_text(
-                        index_name=redis_client.EPISODIC_INDEX,
+                    results = await search_provider.search_text(
+                        index_name=search_provider.EPISODIC_INDEX,
                         query=query,
                         search_fields=fields,
                         limit=limit or 50,
@@ -789,30 +769,28 @@ class EpisodicMemoryManager:
                     )
                     if results:
                         logger.debug(
-                            "Redis text search HIT: found %d episodic events",
+                            "Text search HIT: found %d episodic events",
                             len(results),
                         )
-                        # Clean Redis-specific fields before Pydantic validation
-                        results = redis_client.clean_redis_fields(results)
+                        results = search_provider.clean_search_fields(results)
                         return [PydanticEpisodicEvent(**item) for item in results]
 
             except Exception as e:
                 logger.warning(
-                    "Redis search failed for episodic memory, falling back to PostgreSQL: %s",
+                    "Search provider failed for episodic memory, falling back to PostgreSQL: %s",
                     e,
                 )
                 # Fall through to PostgreSQL
 
-        # Log when bypassing cache or Redis unavailable
+        # Log when bypassing cache or no search provider
         if not use_cache:
-            logger.debug("Bypassing Redis cache (use_cache=False), querying PostgreSQL directly for episodic memory")
-        elif not redis_client:
-            logger.debug("Redis unavailable, querying PostgreSQL directly for episodic memory")
+            logger.debug("Bypassing cache (use_cache=False), querying PostgreSQL directly for episodic memory")
+        elif not search_provider:
+            logger.debug("No search provider, querying PostgreSQL directly for episodic memory")
 
         # Original PostgreSQL implementation (unchanged - serves as fallback)
         with self.session_maker() as session:
             # TODO: handle the case where query is None, we need to extract the 50 most recent results
-
             if query == "":
                 query_stmt = (
                     select(EpisodicEvent)
@@ -1008,6 +986,17 @@ class EpisodicMemoryManager:
 
                 return [event.to_pydantic() for event in episodic_memory]
 
+    def _sync_list_episodic_memory(self, *args, **kwargs) -> List[PydanticEpisodicEvent]:
+        """Sync wrapper for list_episodic_memory (for use from sync callers e.g. agent step)."""
+        from mirix.database.sync_bridge import get_event_loop
+
+        loop = get_event_loop()
+        if loop:
+            return asyncio.run_coroutine_threadsafe(
+                self.list_episodic_memory(*args, **kwargs), loop
+            ).result(timeout=60)
+        raise RuntimeError("No event loop available for sync list_episodic_memory")
+
     def _postgresql_fulltext_search(
         self,
         session,
@@ -1125,14 +1114,25 @@ class EpisodicMemoryManager:
             "limit_val": limit or 50,
         }
 
-        # Add filter_tags filtering (e.g., {"scope": "CARE"})
+        # Add filter_tags filtering (e.g., {"scope": "CARE"} or {"read_scopes": ["scope1", "scope2"]})
         # This allows clients to filter memories by custom tags for access control
         # CRITICAL: Without this filter, searches return 0 results when filter_tags are provided
         if filter_tags:
             for key, value in filter_tags.items():
-                # Use JSONB operator to filter by tag key-value pairs
-                where_clauses.append(f"filter_tags->>'{key}' = :filter_tag_{key}")
-                query_params[f"filter_tag_{key}"] = str(value)
+                if key == "read_scopes":
+                    # Multi-scope filtering: memory's scope must be IN the provided read_scopes list
+                    if isinstance(value, list) and value:
+                        scope_placeholders = [f":read_scope_{i}" for i in range(len(value))]
+                        where_clauses.append(f"filter_tags->>'scope' IN ({', '.join(scope_placeholders)})")
+                        for i, scope in enumerate(value):
+                            query_params[f"read_scope_{i}"] = scope
+                    elif isinstance(value, list) and not value:
+                        # Empty read_scopes means no access - add impossible condition
+                        where_clauses.append("1 = 0")
+                else:
+                    # Use JSONB operator to filter by tag key-value pairs
+                    where_clauses.append(f"filter_tags->>'{key}' = :filter_tag_{key}")
+                    query_params[f"filter_tag_{key}"] = str(value)
 
         # Add temporal filtering if provided
         if start_date is not None:
@@ -1382,7 +1382,7 @@ class EpisodicMemoryManager:
 
     @update_timezone
     @enforce_types
-    def list_episodic_memory_by_org(
+    async def list_episodic_memory_by_org(
         self,
         agent_state: AgentState,
         organization_id: str,
@@ -1411,7 +1411,7 @@ class EpisodicMemoryManager:
             search_method: Search method ('embedding', 'bm25', 'string_match', etc.)
             limit: Maximum number of results to return
             timezone_str: Timezone string for timestamp conversion
-            filter_tags: Filter tags dict (should include "scope": client.scope)
+            filter_tags: Filter tags dict (should include "read_scopes": client.read_scopes)
             use_cache: If True, try Redis cache first
             start_date: Optional start datetime for filtering by occurred_at
             end_date: Optional end datetime for filtering by occurred_at
@@ -1420,17 +1420,17 @@ class EpisodicMemoryManager:
             List of episodic events matching org_id and filter_tags["scope"]
         """
 
-        # Try Redis Search first (if cache enabled and Redis is available)
-        from mirix.database.redis_client import get_redis_client
+        # Try search provider first (if cache enabled)
+        from mirix.database.search_provider import get_search_provider
 
-        redis_client = get_redis_client()
+        search_provider = get_search_provider()
 
-        if use_cache and redis_client:
+        if use_cache and search_provider:
             try:
                 # Case 1: No query - get recent items
                 if not query or query == "":
-                    results = redis_client.search_recent_by_org(
-                        index_name=redis_client.EPISODIC_INDEX,
+                    results = await search_provider.search_recent_by_org(
+                        index_name=search_provider.EPISODIC_INDEX,
                         limit=limit or 50,
                         organization_id=organization_id,
                         sort_by="occurred_at_ts",
@@ -1440,11 +1440,11 @@ class EpisodicMemoryManager:
                     )
                     if results:
                         logger.debug(
-                            "Redis cache HIT: returned %d recent episodic events for org %s",
+                            "Cache HIT: returned %d recent episodic events for org %s",
                             len(results),
                             organization_id,
                         )
-                        results = redis_client.clean_redis_fields(results)
+                        results = search_provider.clean_search_fields(results)
                         return [PydanticEpisodicEvent(**item) for item in results]
 
                 # Case 2: Vector similarity search
@@ -1467,8 +1467,8 @@ class EpisodicMemoryManager:
                     # Determine vector field
                     vector_field = f"{search_field}_embedding" if search_field else "details_embedding"
 
-                    results = redis_client.search_vector_by_org(
-                        index_name=redis_client.EPISODIC_INDEX,
+                    results = await search_provider.search_vector_by_org(
+                        index_name=search_provider.EPISODIC_INDEX,
                         embedding=embedded_text,
                         vector_field=vector_field,
                         limit=limit or 50,
@@ -1479,17 +1479,17 @@ class EpisodicMemoryManager:
                     )
                     if results:
                         logger.debug(
-                            "Redis vector search HIT: %d results for org %s",
+                            "Vector search HIT: %d results for org %s",
                             len(results),
                             organization_id,
                         )
-                        results = redis_client.clean_redis_fields(results)
+                        results = search_provider.clean_search_fields(results)
                         return [PydanticEpisodicEvent(**item) for item in results]
 
                 # Case 3: Text search (BM25, string match, etc.)
                 else:
-                    results = redis_client.search_text_by_org(
-                        index_name=redis_client.EPISODIC_INDEX,
+                    results = await search_provider.search_text_by_org(
+                        index_name=search_provider.EPISODIC_INDEX,
                         query_text=query,
                         search_field=search_field or "details",
                         search_method=search_method,
@@ -1501,19 +1501,19 @@ class EpisodicMemoryManager:
                     )
                     if results:
                         logger.debug(
-                            "Redis text search HIT: %d results for org %s",
+                            "Text search HIT: %d results for org %s",
                             len(results),
                             organization_id,
                         )
-                        results = redis_client.clean_redis_fields(results)
+                        results = search_provider.clean_search_fields(results)
                         return [PydanticEpisodicEvent(**item) for item in results]
 
             except Exception as e:
-                logger.warning("Redis search failed for org %s: %s", organization_id, e)
+                logger.warning("Search failed for org %s: %s", organization_id, e)
 
         # Fallback to PostgreSQL
         logger.debug(
-            "Redis cache MISS or disabled - falling back to PostgreSQL for org %s",
+            "Cache MISS or no search provider - falling back to PostgreSQL for org %s",
             organization_id,
         )
 
@@ -1523,20 +1523,25 @@ class EpisodicMemoryManager:
             base_query = select(EpisodicEvent).where(EpisodicEvent.organization_id == organization_id)
 
             # Apply filter_tags (INCLUDING SCOPE)
-            # For scope: check if input value is contained in memory's scope
+            # For read_scopes: check if memory's scope is IN the provided list
             # For other keys: exact match
             if filter_tags:
                 from sqlalchemy import func, or_
 
                 for key, value in filter_tags.items():
-                    if key == "scope":
-                        # Scope matching: input value must be in memory's scope field
-                        base_query = base_query.where(
-                            or_(
-                                func.lower(EpisodicEvent.filter_tags[key].as_string()).contains(str(value).lower()),
-                                EpisodicEvent.filter_tags[key].as_string() == str(value),
-                            )
-                        )
+                    if key == "read_scopes":
+                        # Multi-scope filtering: memory's scope must be IN the provided read_scopes list
+                        if isinstance(value, list) and value:
+                            scope_conditions = [
+                                EpisodicEvent.filter_tags["scope"].as_string() == scope for scope in value
+                            ]
+                            base_query = base_query.where(or_(*scope_conditions))
+                        elif isinstance(value, list) and not value:
+                            # Empty read_scopes means no access - return no results
+                            base_query = base_query.where(False)
+                    elif key == "scope":
+                        # Single scope matching (backward compatibility)
+                        base_query = base_query.where(EpisodicEvent.filter_tags[key].as_string() == str(value))
                     else:
                         # Other keys: exact match
                         base_query = base_query.where(EpisodicEvent.filter_tags[key].as_string() == str(value))

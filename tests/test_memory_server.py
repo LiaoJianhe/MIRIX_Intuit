@@ -17,6 +17,7 @@ Usage:
     pytest tests/test_memory_server.py -v
 """
 
+import asyncio
 import os
 import sys
 import threading
@@ -46,8 +47,35 @@ pytestmark = pytest.mark.skipif(not os.getenv("GEMINI_API_KEY"), reason="GEMINI_
 
 
 @pytest.fixture(scope="module")
-def server():
-    """Create server instance for all tests."""
+def event_loop_sync_bridge():
+    """Provide an event loop for the sync_bridge so _sync_get_agent_by_id and other sync wrappers work."""
+    import threading
+    import time
+
+    loop = asyncio.new_event_loop()
+
+    def run():
+        loop.run_forever()
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    time.sleep(0.05)
+
+    from mirix.database import sync_bridge
+
+    sync_bridge._event_loop = loop
+    sync_bridge._event_loop_thread_id = t.ident
+    try:
+        yield loop
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        sync_bridge._event_loop = None
+        sync_bridge._event_loop_thread_id = None
+
+
+@pytest.fixture(scope="module")
+def server(event_loop_sync_bridge):
+    """Create server instance for all tests. Depends on event_loop_sync_bridge for sync agent manager wrappers."""
     return SyncServer()
 
 
@@ -111,7 +139,8 @@ def client(server, user):
             name=client_id,
             organization_id=user.organization_id,
             status="active",
-            scope="read_write",
+            write_scope="test",
+            read_scopes=["test"],
         )
     )
 
@@ -124,15 +153,23 @@ def meta_agent(server, client):
     from mirix import EmbeddingConfig, LLMConfig
     from mirix.schemas.agent import CreateMetaAgent
 
-    # Check if meta agent already exists
-    existing_agents = server.agent_manager.list_agents(actor=client, limit=1000)
+    # Check if meta agent already exists (list_agents is async; run in new loop for sync fixture)
+    existing_agents = asyncio.run(server.agent_manager.list_agents(actor=client, limit=1000))
 
     for agent in existing_agents:
         if agent.agent_type == AgentType.meta_memory_agent:
-            print(f"\n[OK] Using existing meta agent: {agent.id}")
-            return agent
+            # Ensure it has children (avoid orphan from a run that failed after creating meta but before sub-agents)
+            children = asyncio.run(
+                server.agent_manager.list_agents(actor=client, parent_id=agent.id)
+            )
+            if children:
+                print(f"\n[OK] Using existing meta agent: {agent.id}")
+                return agent
+            # Orphan meta agent (no children); remove it so we create a fresh one with sub-agents
+            print(f"\n[SETUP] Removing orphan meta agent {agent.id} (no children), will create fresh.")
+            server.agent_manager.delete_agent(agent_id=agent.id, actor=client)
 
-    # Meta agent doesn't exist, create it
+    # Meta agent doesn't exist or was orphaned, create it
     print("\n[SETUP] Initializing meta agent and sub-agents...")
 
     # Load config (same pattern as rest_api.py)
@@ -164,8 +201,8 @@ def meta_agent(server, client):
 
 
 def get_sub_agent(server, client, meta_agent, agent_type):
-    """Helper to get sub agent by type."""
-    sub_agents = server.agent_manager.list_agents(actor=client, parent_id=meta_agent.id)
+    """Helper to get sub agent by type (list_agents is async)."""
+    sub_agents = asyncio.run(server.agent_manager.list_agents(actor=client, parent_id=meta_agent.id))
 
     for agent in sub_agents:
         if agent.agent_type == agent_type:
@@ -196,6 +233,7 @@ class TestDirectEpisodicMemory:
             summary="Attended team meeting",
             details="Weekly standup meeting with the development team",
             organization_id=user.organization_id,
+            user_id=user.id,
         )
 
         assert event is not None
@@ -207,12 +245,14 @@ class TestDirectEpisodicMemory:
         """Test BM25 search on episodic memory."""
         episodic_agent = get_sub_agent(server, client, meta_agent, AgentType.episodic_memory_agent)
 
-        results = server.episodic_memory_manager.list_episodic_memory(
-            agent_state=episodic_agent,
-            user=user,
-            query="meeting",
-            search_method="bm25",
-            limit=10,
+        results = asyncio.run(
+            server.episodic_memory_manager.list_episodic_memory(
+                agent_state=episodic_agent,
+                user=user,
+                query="meeting",
+                search_method="bm25",
+                limit=10,
+            )
         )
 
         assert isinstance(results, list)
@@ -223,13 +263,15 @@ class TestDirectEpisodicMemory:
         """Test embedding search on episodic memory."""
         episodic_agent = get_sub_agent(server, client, meta_agent, AgentType.episodic_memory_agent)
 
-        results = server.episodic_memory_manager.list_episodic_memory(
-            agent_state=episodic_agent,
-            user=user,
-            query="team collaboration",
-            search_method="embedding",
-            search_field="details",
-            limit=10,
+        results = asyncio.run(
+            server.episodic_memory_manager.list_episodic_memory(
+                agent_state=episodic_agent,
+                user=user,
+                query="team collaboration",
+                search_method="embedding",
+                search_field="details",
+                limit=10,
+            )
         )
 
         assert isinstance(results, list)
@@ -271,13 +313,15 @@ class TestDirectProceduralMemory:
         """Test searching procedures."""
         procedural_agent = get_sub_agent(server, client, meta_agent, AgentType.procedural_memory_agent)
 
-        results = server.procedural_memory_manager.list_procedures(
-            agent_state=procedural_agent,
-            user=user,
-            query="deploy",
-            search_method="embedding",
-            search_field="summary",
-            limit=10,
+        results = asyncio.run(
+            server.procedural_memory_manager.list_procedures(
+                agent_state=procedural_agent,
+                user=user,
+                query="deploy",
+                search_method="embedding",
+                search_field="summary",
+                limit=10,
+            )
         )
 
         assert isinstance(results, list)
@@ -326,13 +370,15 @@ class TestDirectResourceMemory:
             user_id=user.id,
         )
 
-        results = server.resource_memory_manager.list_resources(
-            agent_state=resource_agent,
-            user=user,
-            query="Python",
-            search_method="bm25",
-            search_field="title",
-            limit=10,
+        results = asyncio.run(
+            server.resource_memory_manager.list_resources(
+                agent_state=resource_agent,
+                user=user,
+                query="Python",
+                search_method="bm25",
+                search_field="title",
+                limit=10,
+            )
         )
 
         assert isinstance(results, list)
@@ -343,13 +389,15 @@ class TestDirectResourceMemory:
         """Test embedding search on resources."""
         resource_agent = get_sub_agent(server, client, meta_agent, AgentType.resource_memory_agent)
 
-        results = server.resource_memory_manager.list_resources(
-            agent_state=resource_agent,
-            user=user,
-            query="coding standards",
-            search_method="embedding",
-            search_field="summary",
-            limit=10,
+        results = asyncio.run(
+            server.resource_memory_manager.list_resources(
+                agent_state=resource_agent,
+                user=user,
+                query="coding standards",
+                search_method="embedding",
+                search_field="summary",
+                limit=10,
+            )
         )
 
         assert isinstance(results, list)
@@ -400,13 +448,15 @@ class TestDirectKnowledgeVault:
             user_id=user.id,
         )
 
-        results = server.knowledge_vault_manager.list_knowledge(
-            agent_state=knowledge_vault_memory_agent,
-            user=user,
-            query="api_key",
-            search_method="bm25",
-            search_field="secret_value",
-            limit=10,
+        results = asyncio.run(
+            server.knowledge_vault_manager.list_knowledge(
+                agent_state=knowledge_vault_memory_agent,
+                user=user,
+                query="api_key",
+                search_method="bm25",
+                search_field="secret_value",
+                limit=10,
+            )
         )
 
         assert isinstance(results, list)
@@ -442,13 +492,15 @@ class TestDirectSemanticMemory:
         """Test embedding search on semantic memory."""
         semantic_agent = get_sub_agent(server, client, meta_agent, AgentType.semantic_memory_agent)
 
-        results = server.semantic_memory_manager.list_semantic_items(
-            agent_state=semantic_agent,
-            user=user,
-            query="machine learning",
-            search_method="embedding",
-            search_field="name",
-            limit=10,
+        results = asyncio.run(
+            server.semantic_memory_manager.list_semantic_items(
+                agent_state=semantic_agent,
+                user=user,
+                query="machine learning",
+                search_method="embedding",
+                search_field="name",
+                limit=10,
+            )
         )
 
         assert isinstance(results, list)
@@ -477,13 +529,15 @@ class TestSearchMethodComparison:
         ]
 
         for query, field, method in test_cases:
-            results = server.episodic_memory_manager.list_episodic_memory(
-                agent_state=episodic_agent,
-                user=user,
-                query=query,
-                search_method=method,
-                search_field=field,
-                limit=10,
+            results = asyncio.run(
+                server.episodic_memory_manager.list_episodic_memory(
+                    agent_state=episodic_agent,
+                    user=user,
+                    query=query,
+                    search_method=method,
+                    search_field=field,
+                    limit=10,
+                )
             )
             assert isinstance(results, list)
             assert len(results) > 0, f"{method} on '{field}' should find results for '{query}'"
@@ -521,13 +575,15 @@ class TestSearchMethodComparison:
         ]
 
         for query, field, method in test_cases:
-            results = server.procedural_memory_manager.list_procedures(
-                agent_state=procedural_agent,
-                user=user,
-                query=query,
-                search_method=method,
-                search_field=field,
-                limit=10,
+            results = asyncio.run(
+                server.procedural_memory_manager.list_procedures(
+                    agent_state=procedural_agent,
+                    user=user,
+                    query=query,
+                    search_method=method,
+                    search_field=field,
+                    limit=10,
+                )
             )
             assert isinstance(results, list)
             assert len(results) > 0, f"{method} on '{field}' should find results for '{query}'"
@@ -545,13 +601,15 @@ class TestSearchMethodComparison:
         ]
 
         for query, field, method in test_cases:
-            results = server.resource_memory_manager.list_resources(
-                agent_state=resource_agent,
-                user=user,
-                query=query,
-                search_method=method,
-                search_field=field,
-                limit=10,
+            results = asyncio.run(
+                server.resource_memory_manager.list_resources(
+                    agent_state=resource_agent,
+                    user=user,
+                    query=query,
+                    search_method=method,
+                    search_field=field,
+                    limit=10,
+                )
             )
             assert isinstance(results, list)
             assert len(results) > 0, f"{method} on '{field}' should find results for '{query}'"
@@ -583,13 +641,15 @@ class TestSearchMethodComparison:
         ]
 
         for query, field, method in test_cases:
-            results = server.knowledge_vault_manager.list_knowledge(
-                agent_state=knowledge_vault_memory_agent,
-                user=user,
-                query=query,
-                search_method=method,
-                search_field=field,
-                limit=10,
+            results = asyncio.run(
+                server.knowledge_vault_manager.list_knowledge(
+                    agent_state=knowledge_vault_memory_agent,
+                    user=user,
+                    query=query,
+                    search_method=method,
+                    search_field=field,
+                    limit=10,
+                )
             )
             assert isinstance(results, list)
             assert len(results) > 0, f"{method} on '{field}' should find results for '{query}'"
@@ -610,13 +670,15 @@ class TestSearchMethodComparison:
         ]
 
         for query, field, method in test_cases:
-            results = server.semantic_memory_manager.list_semantic_items(
-                agent_state=semantic_agent,
-                user=user,
-                query=query,
-                search_method=method,
-                search_field=field,
-                limit=10,
+            results = asyncio.run(
+                server.semantic_memory_manager.list_semantic_items(
+                    agent_state=semantic_agent,
+                    user=user,
+                    query=query,
+                    search_method=method,
+                    search_field=field,
+                    limit=10,
+                )
             )
             assert isinstance(results, list)
             assert len(results) > 0, f"{method} on '{field}' should find results for '{query}'"
@@ -626,56 +688,66 @@ class TestSearchMethodComparison:
         """Test search across all five memory types."""
         # Episodic
         episodic_agent = get_sub_agent(server, client, meta_agent, AgentType.episodic_memory_agent)
-        episodic_results = server.episodic_memory_manager.list_episodic_memory(
-            agent_state=episodic_agent,
-            user=user,
-            query="test",
-            search_method="bm25",
-            limit=5,
+        episodic_results = asyncio.run(
+            server.episodic_memory_manager.list_episodic_memory(
+                agent_state=episodic_agent,
+                user=user,
+                query="test",
+                search_method="bm25",
+                limit=5,
+            )
         )
         print(f"[OK] Episodic: {len(episodic_results)} results")
 
         # Procedural
         procedural_agent = get_sub_agent(server, client, meta_agent, AgentType.procedural_memory_agent)
-        procedural_results = server.procedural_memory_manager.list_procedures(
-            agent_state=procedural_agent,
-            user=user,
-            query="test",
-            search_method="bm25",
-            limit=5,
+        procedural_results = asyncio.run(
+            server.procedural_memory_manager.list_procedures(
+                agent_state=procedural_agent,
+                user=user,
+                query="test",
+                search_method="bm25",
+                limit=5,
+            )
         )
         print(f"[OK] Procedural: {len(procedural_results)} results")
 
         # Resource
         resource_agent = get_sub_agent(server, client, meta_agent, AgentType.resource_memory_agent)
-        resource_results = server.resource_memory_manager.list_resources(
-            agent_state=resource_agent,
-            user=user,
-            query="test",
-            search_method="bm25",
-            limit=5,
+        resource_results = asyncio.run(
+            server.resource_memory_manager.list_resources(
+                agent_state=resource_agent,
+                user=user,
+                query="test",
+                search_method="bm25",
+                limit=5,
+            )
         )
         print(f"[OK] Resource: {len(resource_results)} results")
 
         # Knowledge Vault
         knowledge_vault_memory_agent = get_sub_agent(server, client, meta_agent, AgentType.knowledge_vault_memory_agent)
-        knowledge_results = server.knowledge_vault_manager.list_knowledge(
-            agent_state=knowledge_vault_memory_agent,
-            user=user,
-            query="test",
-            search_method="bm25",
-            limit=5,
+        knowledge_results = asyncio.run(
+            server.knowledge_vault_manager.list_knowledge(
+                agent_state=knowledge_vault_memory_agent,
+                user=user,
+                query="test",
+                search_method="bm25",
+                limit=5,
+            )
         )
         print(f"[OK] Knowledge: {len(knowledge_results)} results")
 
         # Semantic
         semantic_agent = get_sub_agent(server, client, meta_agent, AgentType.semantic_memory_agent)
-        semantic_results = server.semantic_memory_manager.list_semantic_items(
-            agent_state=semantic_agent,
-            user=user,
-            query="test",
-            search_method="bm25",
-            limit=5,
+        semantic_results = asyncio.run(
+            server.semantic_memory_manager.list_semantic_items(
+                agent_state=semantic_agent,
+                user=user,
+                query="test",
+                search_method="bm25",
+                limit=5,
+            )
         )
         print(f"[OK] Semantic: {len(semantic_results)} results")
 
@@ -693,10 +765,12 @@ class TestMetaMemoryParallelism:
         from mirix.schemas.message import MessageCreate
         from mirix.schemas.mirix_message_content import TextContent
 
-        child_agents = server.agent_manager.list_agents(
-            actor=client,
-            user=user,
-            parent_id=meta_agent.id,
+        child_agents = asyncio.run(
+            server.agent_manager.list_agents(
+                actor=client,
+                user=user,
+                parent_id=meta_agent.id,
+            )
         )
         target_types = {
             AgentType.episodic_memory_agent.value,
@@ -712,7 +786,7 @@ class TestMetaMemoryParallelism:
             def __init__(self, agent_state, interface, actor, user, filter_tags=None, use_cache=True):
                 self.agent_state = agent_state
 
-            def step(self, input_messages, chaining, actor=None, user=None):
+            def step(self, input_messages, chaining, actor=None, user=None, topics=None, retrieved_memories=None):
                 memory_type = self.agent_state.agent_type.replace("_memory_agent", "")
                 with lock:
                     tracker["start_times"][memory_type] = time.perf_counter()
@@ -725,6 +799,10 @@ class TestMetaMemoryParallelism:
 
         class StubAgentManager:
             def list_agents(self, *, parent_id, actor, limit=None):
+                assert parent_id == meta_agent.id
+                return relevant_agents
+
+            def _sync_list_agents(self, *, parent_id, actor, limit=None):
                 assert parent_id == meta_agent.id
                 return relevant_agents
 

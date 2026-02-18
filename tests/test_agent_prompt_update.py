@@ -109,7 +109,7 @@ def client(server_check, api_auth):
         )
         # result is an AgentState object, not a dict
         agent_id = result.id if hasattr(result, "id") else "N/A"
-        print(f"[SETUP] ✓ Meta agent initialized: {agent_id}")
+        print(f"[SETUP] Meta agent initialized: {agent_id}")
 
         # Trigger sub-agent creation by sending a test message
         # Sub-agents are created lazily during message processing
@@ -123,9 +123,9 @@ def client(server_check, api_auth):
                 ],
                 chaining=True,
             )
-            print(f"[SETUP] ✓ Test memory added: {test_result.get('success', False)}")
+            print(f"[SETUP] Test memory added: {test_result.get('success', False)}")
         except Exception as e:
-            print(f"[SETUP] ⚠ Warning: Test memory addition failed: {e}")
+            print(f"[SETUP] Warning: Test memory addition failed: {e}")
 
         # Wait for sub-agents to be created
         print("[SETUP] Waiting 10 seconds for sub-agent creation...")
@@ -133,7 +133,7 @@ def client(server_check, api_auth):
 
         # Verify agents were created - need to list both top-level and sub-agents
         top_level_agents = client.list_agents()
-        print(f"[SETUP] ✓ Found {len(top_level_agents)} top-level agents")
+        print(f"[SETUP] Found {len(top_level_agents)} top-level agents")
 
         # Get meta agent and its sub-agents
         meta_agent = None
@@ -152,11 +152,11 @@ def client(server_check, api_auth):
 
                 sub_agents = [AgentState(**agent_data) for agent_data in sub_agents_data]
                 all_agents.extend(sub_agents)
-                print(f"[SETUP] ✓ Found {len(sub_agents)} sub-agents under meta agent")
+                print(f"[SETUP] Found {len(sub_agents)} sub-agents under meta agent")
             except Exception as e:
-                print(f"[SETUP] ⚠ Warning: Could not fetch sub-agents: {e}")
+                print(f"[SETUP] Warning: Could not fetch sub-agents: {e}")
 
-        print(f"[SETUP] ✓ Total agents: {len(all_agents)}")
+        print(f"[SETUP] Total agents: {len(all_agents)}")
 
         # Display all agents
         print("[SETUP] Available agents:")
@@ -379,7 +379,7 @@ Test ID: {agent_name}-test-{int(time.time())}
     assert updated_agent.system != original_agent.system, "New system prompt should be different from original"
     print(f"[OK] System prompt was successfully changed")
 
-    print(f"\n✓ TEST PASSED for '{agent_name}' agent")
+    print(f"\nTEST PASSED for '{agent_name}' agent")
     print("=" * 70)
 
 
@@ -404,7 +404,7 @@ def test_update_all_agents_sequentially(client):
         # Get original state
         original_agent = get_agent_direct_from_api(client, agent_name)
         if not original_agent:
-            print(f"  ⚠ Agent '{agent_name}' not found, skipping")
+            print(f"  Agent '{agent_name}' not found, skipping")
             continue
 
         # Create unique prompt
@@ -418,9 +418,9 @@ def test_update_all_agents_sequentially(client):
                 "prompt": new_prompt,
                 "original_prompt": original_agent.system,
             }
-            print(f"  ✓ Updated {agent_name}")
+            print(f"  Updated {agent_name}")
         except Exception as e:
-            print(f"  ✗ Failed to update {agent_name}: {e}")
+            print(f"  Failed to update {agent_name}: {e}")
 
     # Wait for all updates to propagate
     print("\n[Waiting 3 seconds for propagation...]")
@@ -433,13 +433,13 @@ def test_update_all_agents_sequentially(client):
     for agent_name, data in updated_agents.items():
         refetched = get_agent_direct_from_api(client, agent_name)
         if refetched and refetched.system == data["prompt"]:
-            print(f"  ✓ {agent_name}: Verified")
+            print(f"  {agent_name}: Verified")
         else:
-            print(f"  ✗ {agent_name}: Failed verification")
+            print(f"  {agent_name}: Failed verification")
             all_verified = False
 
     assert all_verified, "All agent updates should persist"
-    print(f"\n✓ TEST PASSED: All {len(updated_agents)} agents updated successfully")
+    print(f"\nTEST PASSED: All {len(updated_agents)} agents updated successfully")
     print("=" * 70)
 
 
@@ -473,18 +473,18 @@ def test_update_same_agent_multiple_times(client):
 
         # Verify prompt changed
         assert updated.system == new_prompt, f"Update {i} should apply new prompt"
-        print(f"    ✓ Prompt updated")
+        print(f"    Prompt updated")
 
         # Verify message_ids[0] changed
         current_message_id = updated.message_ids[0] if updated.message_ids else None
         if previous_message_id:
             assert current_message_id != previous_message_id, f"Update {i} should create new system message"
-            print(f"    ✓ Message ID changed: {previous_message_id[:20]}... → {current_message_id[:20]}...")
+            print(f"    Message ID changed: {previous_message_id[:20]}... -> {current_message_id[:20]}...")
 
         # Verify prompt is different from previous
         if previous_prompt:
             assert updated.system != previous_prompt, f"Update {i} should change prompt from previous"
-            print(f"    ✓ Prompt changed from previous")
+            print(f"    Prompt changed from previous")
 
         previous_message_id = current_message_id
         previous_prompt = new_prompt
@@ -497,9 +497,9 @@ def test_update_same_agent_multiple_times(client):
     final_agent = get_agent_direct_from_api(client, agent_name)
 
     assert final_agent.system == previous_prompt, "Final prompt should match last update"
-    print(f"  ✓ Final prompt matches last update")
+    print(f"  Final prompt matches last update")
 
-    print(f"\n✓ TEST PASSED: Multiple updates to same agent work correctly")
+    print(f"\nTEST PASSED: Multiple updates to same agent work correctly")
     print("=" * 70)
 
 
@@ -524,7 +524,7 @@ def test_error_handling_nonexistent_agent(client):
     with pytest.raises(Exception) as exc_info:
         client.update_system_prompt(agent_name=fake_agent_name, system_prompt="This should fail")
 
-    print(f"  ✓ Exception raised: {type(exc_info.value).__name__}")
+    print(f"  Exception raised: {type(exc_info.value).__name__}")
     error_message = str(exc_info.value)
     print(f"    Full message: {error_message}")
 
@@ -535,7 +535,7 @@ def test_error_handling_nonexistent_agent(client):
 
     # Verify it suggests available agents (if any exist)
     if "available agents:" in error_lower or "available" in error_lower:
-        print(f"  ✓ Error message suggests available agents")
+        print(f"  Error message suggests available agents")
 
     # Test Case 2: Typo in short name (e.g., "episodick" instead of "episodic")
     print("\n[Test Case 2] Attempting to update with typo in agent name...")
@@ -544,7 +544,7 @@ def test_error_handling_nonexistent_agent(client):
     with pytest.raises(Exception) as exc_info:
         client.update_system_prompt(agent_name=typo_agent_name, system_prompt="This should also fail")
 
-    print(f"  ✓ Exception raised for typo: {type(exc_info.value).__name__}")
+    print(f"  Exception raised for typo: {type(exc_info.value).__name__}")
     error_message = str(exc_info.value)
     print(f"    Message excerpt: {error_message[:150]}...")
 
@@ -557,7 +557,7 @@ def test_error_handling_nonexistent_agent(client):
     with pytest.raises(Exception) as exc_info:
         client.update_system_prompt(agent_name=partial_agent_name, system_prompt="This should fail too")
 
-    print(f"  ✓ Exception raised for partial name: {type(exc_info.value).__name__}")
+    print(f"  Exception raised for partial name: {type(exc_info.value).__name__}")
 
     # Test Case 4: Wrong case (e.g., "EPISODIC" instead of "episodic")
     print("\n[Test Case 4] Attempting to update with wrong case...")
@@ -566,7 +566,7 @@ def test_error_handling_nonexistent_agent(client):
     with pytest.raises(Exception) as exc_info:
         client.update_system_prompt(agent_name=wrong_case_name, system_prompt="This should fail - case sensitive")
 
-    print(f"  ✓ Exception raised for wrong case: {type(exc_info.value).__name__}")
+    print(f"  Exception raised for wrong case: {type(exc_info.value).__name__}")
     print(f"    Note: Agent names are case-sensitive")
 
     # Test Case 5: Empty string
@@ -575,9 +575,9 @@ def test_error_handling_nonexistent_agent(client):
     with pytest.raises(Exception) as exc_info:
         client.update_system_prompt(agent_name="", system_prompt="This should fail - empty name")
 
-    print(f"  ✓ Exception raised for empty name: {type(exc_info.value).__name__}")
+    print(f"  Exception raised for empty name: {type(exc_info.value).__name__}")
 
-    print(f"\n✓ TEST PASSED: All error handling scenarios work correctly")
+    print(f"\nTEST PASSED: All error handling scenarios work correctly")
     print("  - Invalid agent names are rejected")
     print("  - Error messages are informative")
     print("  - Server remains stable")

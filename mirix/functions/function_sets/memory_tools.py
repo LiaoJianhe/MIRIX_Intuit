@@ -2,9 +2,12 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 from mirix.agent import Agent, AgentState
+
+if TYPE_CHECKING:
+    from mirix.schemas.memory import Memory
 from mirix.log import get_logger
 from mirix.observability.context import (
     clear_trace_context,
@@ -24,7 +27,7 @@ logger = get_logger(__name__)
 
 
 def core_memory_append(
-    self: "Agent", agent_state: "AgentState", label: str, content: str
+    self: "Agent", blocks_in_memory: "Memory", label: str, content: str
 ) -> Optional[str]:  # type: ignore
     """
     Append to the contents of core memory. The content will be appended to the end of the block with the given label. If you hit the limit, you can use `core_memory_rewrite` to rewrite the entire block to shorten the content. Note that "Line n:" is only for your visualization of the memory, and you should not include it in the content.
@@ -41,7 +44,7 @@ def core_memory_append(
         raise ValueError("You should not include 'Line n:' (here n is a number) in the content.")
 
     # Get the current block and its limit
-    current_block = agent_state.memory.get_block(label)
+    current_block = blocks_in_memory.get_block(label)
     current_value = str(current_block.value)
     limit = current_block.limit
 
@@ -63,12 +66,12 @@ def core_memory_append(
         return error_msg
 
     # If within limit, perform the append
-    agent_state.memory.update_block_value(label=label, value=new_value)
+    blocks_in_memory.update_block_value(label=label, value=new_value)
     return None
 
 
 def core_memory_rewrite(
-    self: "Agent", agent_state: "AgentState", label: str, content: str
+    self: "Agent", blocks_in_memory: "Memory", label: str, content: str
 ) -> Optional[str]:  # type: ignore
     """
     Rewrite the entire content of block <label> in core memory. The entire content in that block will be replaced with the new content. If the old content is full, and you have to rewrite the entire content, make sure to be extremely concise and make it shorter than 20% of the limit.
@@ -80,7 +83,7 @@ def core_memory_rewrite(
         Optional[str]: None is returned on success, or an error message string if the new content exceeds the limit.
     """
     # Get the current block and its limit
-    current_block = agent_state.memory.get_block(label)
+    current_block = blocks_in_memory.get_block(label)
     current_value = str(current_block.value)
     limit = current_block.limit
     new_value = content.strip()
@@ -97,7 +100,7 @@ def core_memory_rewrite(
 
     # Only update if the content actually changed
     if current_value != new_value:
-        agent_state.memory.update_block_value(label=label, value=new_value)
+        blocks_in_memory.update_block_value(label=label, value=new_value)
         # Provide feedback on the operation
         percentage = int((new_length / limit) * 100)
         return f"Successfully rewrote '{label}' block: {new_length}/{limit} characters ({percentage}% full)."
@@ -307,7 +310,8 @@ def resource_memory_insert(self: "Agent", items: List[ResourceMemoryItemBase]):
 
     for item in items:
         # Check for existing similar resources (by title, summary, and filter_tags)
-        existing_resources = self.resource_memory_manager.list_resources(
+        # Use sync wrapper: tool runs in sync context (agent step)
+        existing_resources = self.resource_memory_manager._sync_list_resources(
             agent_state=self.agent_state,
             user=self.user,  # User for read operations (data filtering)
             query="",  # Get all resources
@@ -416,7 +420,8 @@ def procedural_memory_insert(self: "Agent", items: List[ProceduralMemoryItemBase
 
     for item in items:
         # Check for existing similar procedures (by summary and filter_tags)
-        existing_procedures = self.procedural_memory_manager.list_procedures(
+        # Use sync wrapper: tool runs in sync context (agent step)
+        existing_procedures = self.procedural_memory_manager._sync_list_procedures(
             agent_state=self.agent_state,
             user=self.user,  # User for read operations (data filtering)
             query="",  # Get all procedures
@@ -555,7 +560,8 @@ def semantic_memory_insert(self: "Agent", items: List[SemanticMemoryItemBase]):
 
     for item in items:
         # Check for existing similar semantic items (by name, summary, and filter_tags)
-        existing_items = self.semantic_memory_manager.list_semantic_items(
+        # Use sync wrapper: tool runs in sync context (agent step)
+        existing_items = self.semantic_memory_manager._sync_list_semantic_items(
             agent_state=self.agent_state,
             user=self.user,  # User for read operations (data filtering)
             query="",  # Get all items
@@ -680,7 +686,8 @@ def knowledge_vault_insert(self: "Agent", items: List[KnowledgeVaultItemBase]):
 
     for item in items:
         # Check for existing similar knowledge vault items (by caption, source, and filter_tags)
-        existing_items = self.knowledge_vault_manager.list_knowledge(
+        # Use sync wrapper: tool runs in sync context (agent step)
+        existing_items = self.knowledge_vault_manager._sync_list_knowledge(
             agent_state=self.agent_state,
             user=self.user,  # User for read operations (data filtering)
             query="",  # Get all items
@@ -889,8 +896,10 @@ def trigger_memory_update(self: "Agent", user_message: object, memory_types: Lis
                 f"Memory type '{memory_type}' is not supported. Please choose from 'core', 'episodic', 'resource', 'procedural', 'knowledge_vault', 'semantic'."
             )
 
-    # Get child agents
-    child_agent_states = self.agent_manager.list_agents(parent_id=self.agent_state.id, actor=self.actor)
+    # Get child agents (sync: we are in sync tool context; list_agents is async)
+    child_agent_states = self.agent_manager._sync_list_agents(
+        parent_id=self.agent_state.id, actor=self.actor
+    )
 
     # Map agent types to agent states
     agent_type_to_state = {agent_state.agent_type: agent_state for agent_state in child_agent_states}

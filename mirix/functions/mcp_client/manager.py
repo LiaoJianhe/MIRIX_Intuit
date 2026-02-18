@@ -280,7 +280,7 @@ class MCPClientManager:
                         continue
 
                     # Try to reconnect (but don't save to disk to avoid recursion)
-                    logger.debug(f"🔗 Attempting to restore {server_name} ({server_type.value})...")
+                    logger.debug(f"Attempting to restore {server_name} ({server_type.value})...")
                     if self._add_server_without_persistence(config):
                         logger.debug("Restored MCP connection: %s", server_name)
                         restored_count += 1

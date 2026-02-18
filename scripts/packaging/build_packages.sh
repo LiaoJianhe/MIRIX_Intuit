@@ -108,7 +108,7 @@ cp mirix/__init__.py mirix/__init__.py.backup
 # Update version in mirix/__init__.py
 sed -i.tmp "s/^__version__ = .*/__version__ = \"${VERSION}\"/" mirix/__init__.py
 rm -f mirix/__init__.py.tmp
-echo -e "${GREEN}✓ Updated mirix/__init__.py to version ${VERSION}${NC}"
+echo -e "${GREEN}Updated mirix/__init__.py to version ${VERSION}${NC}"
 
 # Backup pyproject.toml (before we move it later)
 cp pyproject.toml pyproject.toml.backup
@@ -116,7 +116,7 @@ cp pyproject.toml pyproject.toml.backup
 # Update version in pyproject.toml
 sed -i.tmp "s/^version = .*/version = \"${VERSION}\"/" pyproject.toml
 rm -f pyproject.toml.tmp
-echo -e "${GREEN}✓ Updated pyproject.toml to version ${VERSION}${NC}"
+echo -e "${GREEN}Updated pyproject.toml to version ${VERSION}${NC}"
 echo ""
 
 # Clean previous builds
@@ -129,14 +129,14 @@ rm -rf dist/
 rm -rf *.egg-info
 rm -rf "${CLIENT_EGG_INFO}.egg-info"
 rm -rf "${SERVER_EGG_INFO}.egg-info"
-echo -e "${GREEN}✓ Cleaned${NC}"
+echo -e "${GREEN}Cleaned${NC}"
 echo ""
 
 # Temporarily rename pyproject.toml to prevent it from overriding setup scripts
 echo -e "${BLUE}[2/6] Temporarily moving pyproject.toml...${NC}"
 if [ -f "pyproject.toml" ]; then
     mv pyproject.toml pyproject.toml.tmp.hidden
-    echo -e "${GREEN}✓ Moved pyproject.toml${NC}"
+    echo -e "${GREEN}Moved pyproject.toml${NC}"
 else
     echo -e "${BLUE}  pyproject.toml already moved${NC}"
 fi
@@ -145,19 +145,19 @@ echo ""
 # Install build dependencies
 echo -e "${BLUE}[3/6] Installing build dependencies...${NC}"
 pip install --upgrade setuptools wheel twine
-echo -e "${GREEN}✓ Build tools ready${NC}"
+echo -e "${GREEN}Build tools ready${NC}"
 echo ""
 
 # Build client package
 echo -e "${BLUE}[4/6] Building ${CLIENT_PKG_NAME} package...${NC}"
 python scripts/packaging/setup_client.py --package-name "${CLIENT_PKG_NAME}" --version "${VERSION}" sdist bdist_wheel
 if [ $? -eq 0 ]; then
-    echo -e "${GREEN}✓ Client package built successfully${NC}"
+    echo -e "${GREEN}Client package built successfully${NC}"
     # Convert package name to underscore format for file matching
     CLIENT_FILE_NAME=$(echo "${CLIENT_PKG_NAME}" | tr '-' '_')
     echo -e "   Version: ${GREEN}${VERSION}${NC}"
 else
-    echo -e "${RED}✗ Client package build failed${NC}"
+    echo -e "${RED}Client package build failed${NC}"
     exit 1
 fi
 echo ""
@@ -166,12 +166,12 @@ echo ""
 echo -e "${BLUE}[5/6] Building ${SERVER_PKG_NAME} package...${NC}"
 python scripts/packaging/setup_server.py --package-name "${SERVER_PKG_NAME}" --version "${VERSION}" sdist bdist_wheel
 if [ $? -eq 0 ]; then
-    echo -e "${GREEN}✓ Server package built successfully${NC}"
+    echo -e "${GREEN}Server package built successfully${NC}"
     # Convert package name to underscore format for file matching
     SERVER_FILE_NAME=$(echo "${SERVER_PKG_NAME}" | tr '-' '_')
     echo -e "   Version: ${GREEN}${VERSION}${NC}"
 else
-    echo -e "${RED}✗ Server package build failed${NC}"
+    echo -e "${RED}Server package build failed${NC}"
     exit 1
 fi
 echo ""
@@ -188,7 +188,7 @@ echo -e "Server Package (${SERVER_PKG_NAME}):"
 ls -lh dist/${SERVER_FILE_NAME}-* 2>/dev/null | awk '{print "  " $9 " (" $5 ")"}'
 echo ""
 echo -e "${BLUE}=================================================${NC}"
-echo -e "${GREEN}✓ All packages built successfully!${NC}"
+echo -e "${GREEN}All packages built successfully!${NC}"
 echo ""
 echo "To install locally:"
 echo -e "  ${BLUE}pip install dist/${CLIENT_FILE_NAME}-${VERSION}-py3-none-any.whl${NC}"

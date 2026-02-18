@@ -103,85 +103,85 @@ def clean_cache() -> List[Tuple[str, int]]:
     print(f"{Colors.YELLOW}Cleaning __pycache__ directories...{Colors.NC}")
     count = remove_directories(project_root, "__pycache__")
     results.append(("__pycache__ directories", count))
-    print(f"{Colors.GREEN}✓ Removed {count} __pycache__ directories{Colors.NC}")
+    print(f"{Colors.GREEN}Removed {count} __pycache__ directories{Colors.NC}")
 
     # 2. Remove .pyc files
     print(f"{Colors.YELLOW}Cleaning .pyc files...{Colors.NC}")
     count = remove_files(project_root, "*.pyc")
     results.append((".pyc files", count))
-    print(f"{Colors.GREEN}✓ Removed {count} .pyc files{Colors.NC}")
+    print(f"{Colors.GREEN}Removed {count} .pyc files{Colors.NC}")
 
     # 3. Remove .pyo files
     print(f"{Colors.YELLOW}Cleaning .pyo files...{Colors.NC}")
     count = remove_files(project_root, "*.pyo")
     results.append((".pyo files", count))
-    print(f"{Colors.GREEN}✓ Removed {count} .pyo files{Colors.NC}")
+    print(f"{Colors.GREEN}Removed {count} .pyo files{Colors.NC}")
 
     # 4. Remove .pytest_cache directories
     print(f"{Colors.YELLOW}Cleaning .pytest_cache directories...{Colors.NC}")
     count = remove_directories(project_root, ".pytest_cache")
     results.append((".pytest_cache directories", count))
-    print(f"{Colors.GREEN}✓ Removed {count} .pytest_cache directories{Colors.NC}")
+    print(f"{Colors.GREEN}Removed {count} .pytest_cache directories{Colors.NC}")
 
     # 5. Remove .mypy_cache directories
     print(f"{Colors.YELLOW}Cleaning .mypy_cache directories...{Colors.NC}")
     count = remove_directories(project_root, ".mypy_cache")
     results.append((".mypy_cache directories", count))
-    print(f"{Colors.GREEN}✓ Removed {count} .mypy_cache directories{Colors.NC}")
+    print(f"{Colors.GREEN}Removed {count} .mypy_cache directories{Colors.NC}")
 
     # 6. Remove .coverage files
     print(f"{Colors.YELLOW}Cleaning .coverage files...{Colors.NC}")
     count = remove_files(project_root, ".coverage")
     results.append((".coverage files", count))
-    print(f"{Colors.GREEN}✓ Removed {count} .coverage files{Colors.NC}")
+    print(f"{Colors.GREEN}Removed {count} .coverage files{Colors.NC}")
 
     # 7. Remove .coverage.* files
     print(f"{Colors.YELLOW}Cleaning .coverage.* files...{Colors.NC}")
     count = remove_files(project_root, ".coverage.*")
     results.append((".coverage.* files", count))
-    print(f"{Colors.GREEN}✓ Removed {count} .coverage.* files{Colors.NC}")
+    print(f"{Colors.GREEN}Removed {count} .coverage.* files{Colors.NC}")
 
     # 8. Remove htmlcov directories
     print(f"{Colors.YELLOW}Cleaning htmlcov directories...{Colors.NC}")
     count = remove_directories(project_root, "htmlcov")
     results.append(("htmlcov directories", count))
-    print(f"{Colors.GREEN}✓ Removed {count} htmlcov directories{Colors.NC}")
+    print(f"{Colors.GREEN}Removed {count} htmlcov directories{Colors.NC}")
 
     # 9. Remove .eggs directories
     print(f"{Colors.YELLOW}Cleaning .eggs directories...{Colors.NC}")
     count = remove_directories(project_root, ".eggs")
     results.append((".eggs directories", count))
-    print(f"{Colors.GREEN}✓ Removed {count} .eggs directories{Colors.NC}")
+    print(f"{Colors.GREEN}Removed {count} .eggs directories{Colors.NC}")
 
     # 10. Remove *.egg-info directories
     print(f"{Colors.YELLOW}Cleaning *.egg-info directories...{Colors.NC}")
     count = remove_directories(project_root, "*.egg-info")
     results.append(("*.egg-info directories", count))
-    print(f"{Colors.GREEN}✓ Removed {count} *.egg-info directories{Colors.NC}")
+    print(f"{Colors.GREEN}Removed {count} *.egg-info directories{Colors.NC}")
 
     # 11. Remove build directories
     print(f"{Colors.YELLOW}Cleaning build directories...{Colors.NC}")
     count = remove_directories(project_root, "build")
     results.append(("build directories", count))
-    print(f"{Colors.GREEN}✓ Removed {count} build directories{Colors.NC}")
+    print(f"{Colors.GREEN}Removed {count} build directories{Colors.NC}")
 
     # 12. Remove dist directories
     print(f"{Colors.YELLOW}Cleaning dist directories...{Colors.NC}")
     count = remove_directories(project_root, "dist")
     results.append(("dist directories", count))
-    print(f"{Colors.GREEN}✓ Removed {count} dist directories{Colors.NC}")
+    print(f"{Colors.GREEN}Removed {count} dist directories{Colors.NC}")
 
     # 13. Remove .ruff_cache directories
     print(f"{Colors.YELLOW}Cleaning .ruff_cache directories...{Colors.NC}")
     count = remove_directories(project_root, ".ruff_cache")
     results.append((".ruff_cache directories", count))
-    print(f"{Colors.GREEN}✓ Removed {count} .ruff_cache directories{Colors.NC}")
+    print(f"{Colors.GREEN}Removed {count} .ruff_cache directories{Colors.NC}")
 
     # 14. Remove .ipynb_checkpoints directories
     print(f"{Colors.YELLOW}Cleaning .ipynb_checkpoints directories...{Colors.NC}")
     count = remove_directories(project_root, ".ipynb_checkpoints")
     results.append((".ipynb_checkpoints directories", count))
-    print(f"{Colors.GREEN}✓ Removed {count} .ipynb_checkpoints directories{Colors.NC}")
+    print(f"{Colors.GREEN}Removed {count} .ipynb_checkpoints directories{Colors.NC}")
 
     return results
 
@@ -190,7 +190,7 @@ def print_summary(results: List[Tuple[str, int]]):
     """Print cleanup summary."""
     print()
     print(f"{Colors.GREEN}={'=' * 40}{Colors.NC}")
-    print(f"{Colors.GREEN}✓ Python cache cleanup complete!{Colors.NC}")
+    print(f"{Colors.GREEN}Python cache cleanup complete!{Colors.NC}")
     print(f"{Colors.GREEN}={'=' * 40}{Colors.NC}")
     print()
 
@@ -200,9 +200,9 @@ def print_summary(results: List[Tuple[str, int]]):
     print("Cache types cleaned:")
     for description, count in results:
         if count > 0:
-            print(f"  {Colors.GREEN}✓{Colors.NC} {description}: {count}")
+            print(f"  {Colors.GREEN}{description}: {count}")
         else:
-            print(f"  • {description}: 0")
+            print(f"  {description}: 0")
     print()
 
 

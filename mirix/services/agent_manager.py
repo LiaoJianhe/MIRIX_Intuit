@@ -1,3 +1,4 @@
+import asyncio
 import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -26,13 +27,7 @@ from mirix.orm import Block as BlockModel
 from mirix.orm import Tool as ToolModel
 from mirix.orm.errors import NoResultFound
 from mirix.schemas.agent import AgentState as PydanticAgentState
-from mirix.schemas.agent import (
-    AgentType,
-    CreateAgent,
-    CreateMetaAgent,
-    UpdateAgent,
-    UpdateMetaAgent,
-)
+from mirix.schemas.agent import AgentType, CreateAgent, CreateMetaAgent, UpdateAgent, UpdateMetaAgent
 from mirix.schemas.block import Block
 from mirix.schemas.block import Block as PydanticBlock
 from mirix.schemas.client import Client as PydanticClient
@@ -179,7 +174,6 @@ class AgentManager:
         self,
         meta_agent_create: CreateMetaAgent,
         actor: PydanticClient,
-        user_id: Optional[str] = None,  # NEW: user_id for block creation
     ) -> Dict[str, PydanticAgentState]:
         """
         Create a meta agent by first creating a meta_memory_agent as the parent,
@@ -189,7 +183,6 @@ class AgentManager:
         Args:
             meta_agent_create: CreateMetaAgent schema with configuration for all sub-agents
             actor: Client performing the action (for audit trail)
-            user_id: Optional user_id for block creation (uses default user if not provided)
 
         Returns:
             Dict[str, PydanticAgentState]: Dictionary mapping agent names to their agent states,
@@ -199,30 +192,16 @@ class AgentManager:
         if not meta_agent_create.llm_config or not meta_agent_create.embedding_config:
             raise ValueError("llm_config and embedding_config are required")
 
-        # NEW: Get or create organization-specific default user for block templates
+        # Get organization's default user to serve as the template for block seeding
         user_manager = UserManager()
-
-        if user_id:
-            # Specific user_id provided - use it
-            try:
-                user = user_manager.get_user_by_id(user_id)
-            except Exception as e:
-                logger.warning(
-                    "Failed to load user with id=%s, falling back to org default user: %s",
-                    user_id,
-                    e,
-                )
-                # Fall back to organization's default user (not global admin)
-                user = user_manager.get_or_create_org_default_user(org_id=actor.organization_id)
-        else:
-            # No user_id provided - use organization's default template user
-            # This user will serve as the template for copying blocks to new users
-            user = user_manager.get_or_create_org_default_user(org_id=actor.organization_id)
-            logger.debug(
-                "Using organization default user %s for block templates in org %s",
-                user.id,
-                actor.organization_id,
-            )
+        assert actor.organization_id is not None
+        assert actor.write_scope is not None
+        default_user = user_manager.get_or_create_org_default_user(org_id=actor.organization_id)
+        logger.debug(
+            "Using organization default user %s for block templates in org %s",
+            default_user.id,
+            actor.organization_id,
+        )
 
         # Ensure base tools are available in the database for this organization
         self.tool_manager.upsert_base_tools(actor=actor)
@@ -330,31 +309,27 @@ class AgentManager:
             created_agents[agent_name] = agent_state
             logger.debug(f"Created sub-agent: {agent_name} with id: {agent_state.id}, parent_id: {meta_agent_state.id}")
 
-            # FIX: Process agent-specific initialization (e.g., blocks for core_memory_agent)
-            # This handles any agent configuration provided in the meta_agent creation request
+            # Seed template blocks for this client's scope (e.g., blocks for core_memory_agent).
+            # These are created for the org's default user with the client's write_scope.
+            # When a real user first interacts via this scope, get_blocks() lazy-copies
+            # these templates to create the user's own blocks for that scope.
+            # Clients sharing the same write_scope share the same template blocks.
             if "blocks" in agent_config:
-                # Create memory blocks for this agent (typically core_memory_agent)
                 memory_block_configs = agent_config["blocks"]
-                for block in memory_block_configs:
-                    self.block_manager.create_or_update_block(
-                        block=Block(
-                            value=block["value"],
-                            limit=block.get("limit", CORE_MEMORY_BLOCK_CHAR_LIMIT),
-                            label=block["label"],
-                        ),
+                for block_cfg in memory_block_configs:
+                    self.block_manager.seed_template_block_for_actor_scope_if_necessary(
+                        label=block_cfg["label"],
+                        value=block_cfg["value"],
+                        limit=block_cfg.get("limit", CORE_MEMORY_BLOCK_CHAR_LIMIT),
                         actor=actor,
-                        agent_id=agent_state.id,  # Use child agent's ID, not parent's
-                        user=user,  # Pass user for block creation
+                        default_user=default_user,
                     )
                 logger.debug(
-                    f"Created {len(memory_block_configs)} memory blocks for {agent_name} (agent_id: {agent_state.id})"
+                    "Seeded %d template blocks for scope=%s, agent=%s",
+                    len(memory_block_configs),
+                    actor.write_scope,
+                    agent_name,
                 )
-
-                # Ensure blocks are committed to database before proceeding
-                # This is critical for template block copying to work correctly
-                logger.debug(f"Flushing database session to ensure blocks are committed for agent {agent_state.id}")
-                with self.block_manager.session_maker() as session:
-                    session.commit()  # Explicit commit to ensure blocks are visible to other sessions
 
             # Future: Add handling for other agent-specific configs here if needed
             # E.g., if 'initial_data' in agent_config: ...
@@ -381,7 +356,7 @@ class AgentManager:
             PydanticAgentState: The updated meta agent state with children
         """
         # Get the existing meta agent
-        meta_agent_state = self.get_agent_by_id(agent_id=meta_agent_id, actor=actor)
+        meta_agent_state = self._sync_get_agent_by_id(agent_id=meta_agent_id, actor=actor)
 
         # Verify this is actually a meta_memory_agent
         if meta_agent_state.agent_type != AgentType.meta_memory_agent:
@@ -428,7 +403,7 @@ class AgentManager:
                 agent_update=UpdateAgent(**meta_agent_update_fields),
                 actor=actor,
             )
-            meta_agent_state = self.get_agent_by_id(agent_id=meta_agent_id, actor=actor)
+            meta_agent_state = self._sync_get_agent_by_id(agent_id=meta_agent_id, actor=actor)
 
         # Update meta agent's system prompt if provided (separate call needed for rebuild_system_prompt)
         if meta_agent_update.system_prompts and "meta_memory_agent" in meta_agent_update.system_prompts:
@@ -437,10 +412,10 @@ class AgentManager:
                 system_prompt=meta_agent_update.system_prompts["meta_memory_agent"],
                 actor=actor,
             )
-            meta_agent_state = self.get_agent_by_id(agent_id=meta_agent_id, actor=actor)
+            meta_agent_state = self._sync_get_agent_by_id(agent_id=meta_agent_id, actor=actor)
 
         # Get existing sub-agents
-        existing_children = self.list_agents(actor=actor, parent_id=meta_agent_id)
+        existing_children = self._sync_list_agents(actor=actor, parent_id=meta_agent_id)
         existing_agent_names = set()
         existing_agents_by_name = {}
 
@@ -560,8 +535,8 @@ class AgentManager:
                     )
 
         # Refresh the meta agent state with updated children
-        meta_agent_state = self.get_agent_by_id(agent_id=meta_agent_id, actor=actor)
-        updated_children = self.list_agents(actor=actor, parent_id=meta_agent_id)
+        meta_agent_state = self._sync_get_agent_by_id(agent_id=meta_agent_id, actor=actor)
+        updated_children = self._sync_list_agents(actor=actor, parent_id=meta_agent_id)
         meta_agent_state.children = updated_children
 
         return meta_agent_state
@@ -572,7 +547,7 @@ class AgentManager:
         actor: PydanticClient,
         system_prompt: Optional[str] = None,
     ):
-        agent_state = self.get_agent_by_id(agent_id=agent_id, actor=actor)
+        agent_state = self._sync_get_agent_by_id(agent_id=agent_id, actor=actor)
 
         # update the system prompt
         if system_prompt is not None:
@@ -745,19 +720,33 @@ class AgentManager:
             _process_relationship(session, new_agent, "tools", ToolModel, tool_ids, replace=True)
             new_agent.create_with_redis(session, actor=actor)  # Auto-caches to Redis
 
-            # Invalidate parent cache if this is a child agent
+            # Invalidate parent cache if this is a child agent (async from sync context)
             if parent_id:
-                self._invalidate_parent_cache_for_child(new_agent.id, parent_id)
+                import asyncio
+
+                from mirix.database.sync_bridge import get_event_loop
+
+                loop = get_event_loop()
+                if loop:
+                    asyncio.run_coroutine_threadsafe(
+                        self._invalidate_parent_cache_for_child(new_agent.id, parent_id), loop
+                    ).result(timeout=5)
 
             # Convert to PydanticAgentState and return
             return new_agent.to_pydantic()
 
     @enforce_types
     def update_agent(self, agent_id: str, agent_update: UpdateAgent, actor: PydanticClient) -> PydanticAgentState:
-        # Get current state BEFORE update to detect changes
+        # Get current state BEFORE update to detect changes (async from sync context)
         old_agent_state = None
         if agent_update.system:
-            old_agent_state = self.get_agent_by_id(agent_id=agent_id, actor=actor)
+            from mirix.database.sync_bridge import get_event_loop
+
+            loop = get_event_loop()
+            if loop:
+                old_agent_state = asyncio.run_coroutine_threadsafe(
+                    self.get_agent_by_id(agent_id=agent_id, actor=actor), loop
+                ).result(timeout=10)
 
         # Update agent (including system field in database)
         agent_state = self._update_agent(agent_id=agent_id, agent_update=agent_update, actor=actor)
@@ -822,7 +811,7 @@ class AgentManager:
     ) -> PydanticAgentState:
         """Add a single MCP tool to an agent."""
         # First get the current agent state
-        agent_state = self.get_agent_by_id(agent_id=agent_id, actor=actor)
+        agent_state = self._sync_get_agent_by_id(agent_id=agent_id, actor=actor)
         current_mcp_tools = agent_state.mcp_tools or []
 
         # Add the new MCP tool if not already present
@@ -887,16 +876,26 @@ class AgentManager:
             # Commit and refresh the agent, update Redis cache
             agent.update_with_redis(session, actor=actor)  # Updates Redis cache
 
-            # Invalidate parent caches if parent_id changed or agent has a parent
-            if old_parent_id:
-                self._invalidate_parent_cache_for_child(agent_id, old_parent_id)
-            if agent.parent_id and agent.parent_id != old_parent_id:
-                self._invalidate_parent_cache_for_child(agent_id, agent.parent_id)
+            # Invalidate parent caches if parent_id changed or agent has a parent (async from sync context)
+            import asyncio
+
+            from mirix.database.sync_bridge import get_event_loop
+
+            loop = get_event_loop()
+            if loop:
+                if old_parent_id:
+                    asyncio.run_coroutine_threadsafe(
+                        self._invalidate_parent_cache_for_child(agent_id, old_parent_id), loop
+                    ).result(timeout=5)
+                if agent.parent_id and agent.parent_id != old_parent_id:
+                    asyncio.run_coroutine_threadsafe(
+                        self._invalidate_parent_cache_for_child(agent_id, agent.parent_id), loop
+                    ).result(timeout=5)
 
             # Convert to PydanticAgentState and return
             return agent.to_pydantic()
 
-    def _invalidate_parent_cache_for_child(self, child_agent_id: str, parent_id: Optional[str] = None) -> None:
+    async def _invalidate_parent_cache_for_child(self, child_agent_id: str, parent_id: Optional[str] = None) -> None:
         """
         Invalidate parent agent cache when a child agent is created/updated/deleted.
 
@@ -905,26 +904,19 @@ class AgentManager:
             parent_id: Optional parent_id if known, otherwise will look up from reverse mapping
         """
         try:
-            from mirix.database.redis_client import get_redis_client
+            from mirix.database.cache_provider import acache_delete_string, acache_get_string, get_cache_provider
 
-            redis_client = get_redis_client()
-
-            if not redis_client:
-                return
+            cache_provider = get_cache_provider()
 
             # If parent_id not provided, try to get it from reverse mapping
-            if not parent_id:
-                reverse_key = f"{redis_client.AGENT_PREFIX}{child_agent_id}:parent"
-                parent_id_bytes = redis_client.client.get(reverse_key)
-                if parent_id_bytes:
-                    parent_id = (
-                        parent_id_bytes.decode("utf-8") if isinstance(parent_id_bytes, bytes) else parent_id_bytes
-                    )
+            if not parent_id and cache_provider:
+                reverse_key = f"{cache_provider.AGENT_PREFIX}{child_agent_id}:parent"
+                parent_id = await acache_get_string(reverse_key)
 
-            # Invalidate parent agent cache
-            if parent_id:
-                parent_key = f"{redis_client.AGENT_PREFIX}{parent_id}"
-                redis_client.delete(parent_key)
+            # Invalidate parent agent cache via cache provider
+            if parent_id and cache_provider:
+                parent_key = f"{cache_provider.AGENT_PREFIX}{parent_id}"
+                cache_provider.delete(parent_key)
                 logger.debug(
                     "Invalidated parent agent %s cache due to child %s change",
                     parent_id,
@@ -932,17 +924,17 @@ class AgentManager:
                 )
 
                 # Clean up reverse mapping if this is a deletion
-                reverse_key = f"{redis_client.AGENT_PREFIX}{child_agent_id}:parent"
-                redis_client.delete(reverse_key)
+                reverse_key = f"{cache_provider.AGENT_PREFIX}{child_agent_id}:parent"
+                await acache_delete_string(reverse_key)
 
         except Exception as e:
             # Log but don't fail the operation if cache invalidation fails
             logger.warning("Failed to invalidate parent cache for child %s: %s", child_agent_id, e)
 
-    def _reconstruct_children_from_cache(
+    async def _reconstruct_children_from_cache(
         self,
         agent_states: List[PydanticAgentState],
-        session: Session,
+        session: Optional[Session],
         actor: PydanticClient,
     ) -> dict:
         """
@@ -959,25 +951,31 @@ class AgentManager:
         """
         import json
 
-        from mirix.database.redis_client import get_redis_client
-        from mirix.schemas.block import Block as PydanticBlock
-        from mirix.schemas.memory import Memory as PydanticMemory
+        from mirix.database.cache_provider import acache_get_hash, get_cache_provider
         from mirix.schemas.tool import Tool as PydanticTool
 
         children_by_parent = {}
         parent_ids = [agent.id for agent in agent_states]
 
         try:
-            redis_client = get_redis_client()
-            if not redis_client:
-                # Redis not available, fall back to PostgreSQL
-                return self._get_children_from_db(parent_ids, session, actor)
+            cache_provider = get_cache_provider()
+            if not cache_provider:
+                return await asyncio.to_thread(self._get_children_from_db, parent_ids, None, actor)
 
-            # Step 1: Fetch parent agents from Redis to get children_ids
-            pipe = redis_client.client.pipeline()
+            agent_prefix = cache_provider.AGENT_PREFIX
+            tool_prefix = cache_provider.TOOL_PREFIX
+
+            async def get_agent_hash(key: str):
+                return await acache_get_hash(key)
+
+            async def get_tool_hash(key: str):
+                return await acache_get_hash(key)
+
+            # Step 1: Fetch parent agents to get children_ids
+            parent_results = []
             for parent_id in parent_ids:
-                pipe.hgetall(f"{redis_client.AGENT_PREFIX}{parent_id}")
-            parent_results = pipe.execute()
+                parent_data = await get_agent_hash(f"{agent_prefix}{parent_id}")
+                parent_results.append(parent_data)
 
             # Extract all children IDs
             all_children_ids = []
@@ -992,14 +990,13 @@ class AgentManager:
                     all_children_ids.extend(children_ids)
 
             if not all_children_ids:
-                # No children IDs found, return empty
                 return children_by_parent
 
-            # Step 2: Fetch all child agents from Redis using pipeline
-            pipe = redis_client.client.pipeline()
+            # Step 2: Fetch all child agents
+            child_results = []
             for child_id in all_children_ids:
-                pipe.hgetall(f"{redis_client.AGENT_PREFIX}{child_id}")
-            child_results = pipe.execute()
+                child_data = await get_agent_hash(f"{agent_prefix}{child_id}")
+                child_results.append(child_data)
 
             # Build mapping of child_id -> reconstructed child agent
             children_cache = {}
@@ -1043,7 +1040,7 @@ class AgentManager:
                         else child_data["mcp_tools"]
                     )
 
-                # Reconstruct tools from Redis
+                # Reconstruct tools from cache
                 tools = []
                 if "tool_ids" in child_data and child_data["tool_ids"]:
                     tool_ids = (
@@ -1051,13 +1048,8 @@ class AgentManager:
                         if isinstance(child_data["tool_ids"], (str, bytes))
                         else child_data["tool_ids"]
                     )
-
-                    tool_pipe = redis_client.client.pipeline()
                     for tool_id in tool_ids:
-                        tool_pipe.hgetall(f"{redis_client.TOOL_PREFIX}{tool_id}")
-                    tool_results = tool_pipe.execute()
-
-                    for tool_data in tool_results:
+                        tool_data = await get_tool_hash(f"{tool_prefix}{tool_id}")
                         if tool_data:
                             if "json_schema" in tool_data and isinstance(tool_data["json_schema"], (str, bytes)):
                                 tool_data["json_schema"] = json.loads(tool_data["json_schema"])
@@ -1067,37 +1059,10 @@ class AgentManager:
 
                 child_data["tools"] = tools
                 child_data.pop("tool_ids", None)
-
-                # Reconstruct memory from blocks
-                blocks = []
-                prompt_template = ""
-
-                if "memory_block_ids" in child_data and child_data["memory_block_ids"]:
-                    block_ids = (
-                        json.loads(child_data["memory_block_ids"])
-                        if isinstance(child_data["memory_block_ids"], (str, bytes))
-                        else child_data["memory_block_ids"]
-                    )
-                    prompt_template = child_data.get("memory_prompt_template", "")
-
-                    block_pipe = redis_client.client.pipeline()
-                    for block_id in block_ids:
-                        block_pipe.hgetall(f"{redis_client.BLOCK_PREFIX}{block_id}")
-                    block_results = block_pipe.execute()
-
-                    for block_data in block_results:
-                        if block_data:
-                            # Normalize block data: ensure 'value' is never None (use empty string instead)
-                            if "value" not in block_data or block_data["value"] is None:
-                                block_data["value"] = ""
-                            blocks.append(PydanticBlock(**block_data))
-
-                # Always create a Memory object (even if empty) - never None
-                memory = PydanticMemory(blocks=blocks, prompt_template=prompt_template)
-
-                child_data["memory"] = memory
                 child_data.pop("memory_block_ids", None)
                 child_data.pop("memory_prompt_template", None)
+                for legacy_key in ("memory",):
+                    child_data.pop(legacy_key, None)
 
                 # Children don't need their own children reconstructed (1-level depth only)
                 child_data["children"] = None
@@ -1111,7 +1076,7 @@ class AgentManager:
                     "Some children not found in Redis cache (%s missing), falling back to PostgreSQL",
                     len(missing_child_ids),
                 )
-                return self._get_children_from_db(parent_ids, session, actor)
+                return await asyncio.to_thread(self._get_children_from_db, parent_ids, None, actor)
 
             # Step 3: Group children by parent_id
             for parent_id, children_ids in parent_to_children_ids.items():
@@ -1128,25 +1093,38 @@ class AgentManager:
         except Exception as e:
             # Log error and fall back to PostgreSQL
             logger.warning("Failed to reconstruct children from Redis cache: %s", e)
-            return self._get_children_from_db(parent_ids, session, actor)
+            return await asyncio.to_thread(self._get_children_from_db, parent_ids, None, actor)
 
-    def _get_children_from_db(self, parent_ids: List[str], session: Session, actor: PydanticClient) -> dict:
+    def _get_children_from_db(
+        self,
+        parent_ids: List[str],
+        session: Optional[Session],
+        actor: PydanticClient,
+    ) -> dict:
         """
         Fallback method to get children from PostgreSQL with client-level filtering.
 
         Args:
             parent_ids: List of parent agent IDs
-            session: Database session
+            session: Database session (if None, creates one)
             actor: Client performing the operation (for client-level isolation)
 
         Returns:
             Dictionary mapping parent_id -> list of child agents
         """
-        # Query all agents for this client (triggers client-level filtering via apply_access_predicate)
-        children = AgentModel.list(
-            db_session=session,
-            actor=actor,  # Triggers client-level filtering (organization_id + _created_by_id)
-        )
+
+        def _query(sess: Session):
+            children = AgentModel.list(
+                db_session=sess,
+                actor=actor,
+            )
+            return [agent for agent in children if getattr(agent, "parent_id", None) in parent_ids]
+
+        if session is not None:
+            children = _query(session)
+        else:
+            with self.session_maker() as sess:
+                children = _query(sess)
 
         # Filter children by parent_id and group them
         children_by_parent = {}
@@ -1162,7 +1140,9 @@ class AgentManager:
         )
         return children_by_parent
 
-    def _get_children_from_redis(self, parent_id: str, actor: PydanticClient) -> Optional[List[PydanticAgentState]]:
+    async def _get_children_from_redis(
+        self, parent_id: str, actor: PydanticClient
+    ) -> Optional[List[PydanticAgentState]]:
         """
         Fetch children from Redis cache using parent's children_ids.
 
@@ -1176,15 +1156,15 @@ class AgentManager:
         try:
             import json
 
-            from mirix.database.redis_client import get_redis_client
+            from mirix.database.cache_provider import acache_get_hash, get_cache_provider
 
-            redis_client = get_redis_client()
-            if not redis_client:
+            cache_provider = get_cache_provider()
+            if not cache_provider:
                 return None
 
             # Get parent's cache to retrieve children_ids
-            parent_key = f"{redis_client.AGENT_PREFIX}{parent_id}"
-            parent_data = redis_client.get_hash(parent_key)
+            parent_key = f"{cache_provider.AGENT_PREFIX}{parent_id}"
+            parent_data = await acache_get_hash(parent_key)
 
             if not parent_data or "children_ids" not in parent_data:
                 # Parent not in cache or doesn't have children_ids
@@ -1204,7 +1184,7 @@ class AgentManager:
             children = []
             for child_id in children_ids:
                 try:
-                    child = self.get_agent_by_id(child_id, actor)
+                    child = await self.get_agent_by_id(child_id, actor)
                     children.append(child)
                 except NoResultFound:
                     # Child not found - cache inconsistency
@@ -1227,7 +1207,7 @@ class AgentManager:
             logger.warning("Failed to get children from Redis for parent %s: %s", parent_id, e)
             return None
 
-    def _cache_children_ids_for_parents(self, agent_states: List[PydanticAgentState]) -> None:
+    async def _cache_children_ids_for_parents(self, agent_states: List[PydanticAgentState]) -> None:
         """
         Cache children_ids for parent agents that have children populated.
         This enables future list_agents(parent_id=X) calls to use Redis cache.
@@ -1238,27 +1218,29 @@ class AgentManager:
         try:
             import json
 
-            from mirix.database.redis_client import get_redis_client
+            from mirix.database.cache_provider import acache_set_string, get_cache_provider
             from mirix.settings import settings
 
-            redis_client = get_redis_client()
-            if not redis_client:
+            cache_provider = get_cache_provider()
+            if not cache_provider:
                 return
 
             for agent_state in agent_states:
                 if agent_state.children:
-                    # Extract children IDs
                     children_ids = [child.id for child in agent_state.children]
 
-                    # Update parent's cache with children_ids
-                    parent_key = f"{redis_client.AGENT_PREFIX}{agent_state.id}"
-                    redis_client.client.hset(parent_key, "children_ids", json.dumps(children_ids))
+                    # Update parent's cache: get existing hash, merge children_ids, set_hash
+                    parent_key = f"{cache_provider.AGENT_PREFIX}{agent_state.id}"
+                    existing = cache_provider.get_hash(parent_key) or {}
+                    existing["children_ids"] = json.dumps(children_ids)
+                    cache_provider.set_hash(parent_key, existing, ttl=settings.redis_ttl_agents)
 
                     # Maintain reverse mapping for cache invalidation
                     for child_id in children_ids:
-                        reverse_key = f"{redis_client.AGENT_PREFIX}{child_id}:parent"
-                        redis_client.client.set(reverse_key, agent_state.id)
-                        redis_client.client.expire(reverse_key, settings.redis_ttl_agents)
+                        reverse_key = f"{cache_provider.AGENT_PREFIX}{child_id}:parent"
+                        await acache_set_string(
+                            reverse_key, agent_state.id, ttl=settings.redis_ttl_agents
+                        )
 
             logger.debug(
                 "Cached children_ids for %s parent agents",
@@ -1268,8 +1250,33 @@ class AgentManager:
             # Log but don't fail if caching fails
             logger.warning("Failed to cache children_ids for parent agents: %s", e)
 
+    def _list_agents_db(
+        self,
+        actor: PydanticClient,
+        match_all_tags: bool,
+        cursor: Optional[str],
+        limit: Optional[int],
+        query_text: Optional[str],
+        parent_id: Optional[str],
+        user: Optional[PydanticUser],
+        kwargs: dict,
+    ) -> List[PydanticAgentState]:
+        """Sync DB path for list_agents (run in thread): list agents and convert to Pydantic."""
+        with self.session_maker() as session:
+            agents = AgentModel.list(
+                db_session=session,
+                actor=actor,
+                match_all_tags=match_all_tags,
+                cursor=cursor,
+                limit=limit,
+                query_text=query_text,
+                parent_id=parent_id,
+                **kwargs,
+            )
+            return [agent.to_pydantic() for agent in agents]
+
     @enforce_types
-    def list_agents(
+    async def list_agents(
         self,
         actor: PydanticClient,
         match_all_tags: bool = False,
@@ -1290,54 +1297,43 @@ class AgentManager:
         """
         # Optimization: Use Redis cache for list_agents(parent_id=X)
         if parent_id is not None:
-            cached_children = self._get_children_from_redis(parent_id, actor)
+            cached_children = await self._get_children_from_redis(parent_id, actor)
             if cached_children is not None:
                 logger.debug("Redis cache HIT for children of parent %s", parent_id)
                 return cached_children
-            # Cache miss - fall through to PostgreSQL query
             logger.debug(
                 "Redis cache MISS for children of parent %s, querying PostgreSQL",
                 parent_id,
             )
 
-        with self.session_maker() as session:
-            # Get agents filtered by parent_id (None for top-level agents, or specific parent_id)
-            # Actor triggers apply_access_predicate which filters by both organization_id and _created_by_id (client isolation)
-            agents = AgentModel.list(
-                db_session=session,
-                actor=actor,  # Triggers client-level filtering via apply_access_predicate
-                match_all_tags=match_all_tags,
-                cursor=cursor,
-                limit=limit,
-                query_text=query_text,
-                parent_id=parent_id,
-                **kwargs,
-            )
+        agent_states = await asyncio.to_thread(
+            self._list_agents_db,
+            actor,
+            match_all_tags,
+            cursor,
+            limit,
+            query_text,
+            parent_id,
+            user,
+            kwargs,
+        )
 
-            # Convert to Pydantic
-            agent_states = [agent.to_pydantic() for agent in agents]
-
-            # If there are no agents, return early
-            if not agent_states:
-                return agent_states
-
-            # Only populate children if we're listing top-level agents (parent_id is None)
-            if parent_id is None:
-                children_by_parent = self._reconstruct_children_from_cache(agent_states, session, actor)
-
-                # Assign children to their parent agents
-                for agent_state in agent_states:
-                    agent_state.children = children_by_parent.get(agent_state.id, [])
-
-                # Cache children_ids for future list_agents(parent_id=X) calls
-                self._cache_children_ids_for_parents(agent_states)
-
+        if not agent_states:
             return agent_states
 
+        # Populate children (Redis cache first, then DB fallback)
+        if parent_id is None:
+            children_by_parent = await self._reconstruct_children_from_cache(agent_states, None, actor)
+            for agent_state in agent_states:
+                agent_state.children = children_by_parent.get(agent_state.id, [])
+            await self._cache_children_ids_for_parents(agent_states)
+
+        return agent_states
+
     def _reconstruct_agent_from_cache(
-        self, cached_data, agent_id, actor, redis_client, cache_provider
+        self, cached_data, agent_id, actor, cache_provider
     ) -> Optional[PydanticAgentState]:
-        """Reconstruct a full agent from cached hash data + Redis pipeline lookups.
+        """Reconstruct a full agent from cached hash data and cache provider lookups.
 
         Extracted from get_agent_by_id for reuse by aget_agent_by_id.
         """
@@ -1352,19 +1348,16 @@ class AgentManager:
             if field in cached_data and isinstance(cached_data[field], str):
                 cached_data[field] = json.loads(cached_data[field])
 
-        # Retrieve tools from Redis using pipeline
+        # Retrieve tools from cache using cache provider
         tools = []
-        if "tool_ids" in cached_data and cached_data["tool_ids"]:
+        if "tool_ids" in cached_data and cached_data["tool_ids"] and cache_provider:
             tool_ids = (
                 json.loads(cached_data["tool_ids"])
                 if isinstance(cached_data["tool_ids"], str)
                 else cached_data["tool_ids"]
             )
-            pipe = redis_client.client.pipeline()
             for tool_id in tool_ids:
-                pipe.hgetall(f"{redis_client.TOOL_PREFIX}{tool_id}")
-            tool_results = pipe.execute()
-            for tool_data in tool_results:
+                tool_data = cache_provider.get_hash(f"{cache_provider.TOOL_PREFIX}{tool_id}")
                 if tool_data:
                     if "json_schema" in tool_data and isinstance(tool_data["json_schema"], str):
                         tool_data["json_schema"] = json.loads(tool_data["json_schema"])
@@ -1375,30 +1368,35 @@ class AgentManager:
         cached_data["tools"] = tools
         cached_data.pop("tool_ids", None)
 
-        # Reconstruct memory from block IDs
+        # Reconstruct memory from block IDs using cache provider
         blocks = []
         prompt_template = ""
-        if "memory_block_ids" in cached_data and cached_data["memory_block_ids"]:
+        if "memory_block_ids" in cached_data and cached_data["memory_block_ids"] and cache_provider:
             block_ids = (
                 json.loads(cached_data["memory_block_ids"])
                 if isinstance(cached_data["memory_block_ids"], str)
                 else cached_data["memory_block_ids"]
             )
             prompt_template = cached_data.get("memory_prompt_template", "")
-            pipe = redis_client.client.pipeline()
             for block_id in block_ids:
-                pipe.hgetall(f"{redis_client.BLOCK_PREFIX}{block_id}")
-            block_results = pipe.execute()
-            for block_data in block_results:
+                block_data = cache_provider.get_hash(f"{cache_provider.BLOCK_PREFIX}{block_id}")
                 if block_data:
                     if "value" not in block_data or block_data["value"] is None:
                         block_data["value"] = ""
+                    # PR 54 scoped core memory: ensure filter_tags is dict when from cache
+                    if "filter_tags" in block_data and isinstance(block_data["filter_tags"], str):
+                        block_data["filter_tags"] = (
+                            json.loads(block_data["filter_tags"])
+                            if block_data["filter_tags"]
+                            else None
+                        )
                     blocks.append(PydanticBlock(**block_data))
 
-        memory = PydanticMemory(blocks=blocks, prompt_template=prompt_template)
-        cached_data["memory"] = memory
+        # AgentState has no "memory" field (extra='forbid'); store only block IDs in cache.
+        # Children are loaded separately when needed (list_agents with parent_id).
         cached_data.pop("memory_block_ids", None)
         cached_data.pop("memory_prompt_template", None)
+        cached_data.pop("children_ids", None)
 
         agent_state = PydanticAgentState(**cached_data)
 
@@ -1410,22 +1408,31 @@ class AgentManager:
 
         return agent_state
 
-    def _serialize_agent_for_cache(self, pydantic_agent, agent_id, cache_provider, redis_client) -> Dict[str, Any]:
+    async def _serialize_agent_for_cache(
+        self, pydantic_agent, agent_id, cache_provider
+    ) -> Dict[str, Any]:
         """Serialize agent to cache-ready dict with JSON-encoded nested fields.
 
-        Extracted from get_agent_by_id for reuse by aget_agent_by_id.
-        Returns the dict to pass to cache_provider.set_hash / acache_set_hash.
-        Also writes tool hashes and reverse-key mappings to Redis as a side effect.
+        Returns the dict to pass to cache_provider.set_hash. Also writes tool
+        hashes and reverse-key mappings via cache_provider.
         """
         import json
 
+        from mirix.database.cache_provider import acache_get_string, acache_set_string
         from mirix.settings import settings
 
         data = pydantic_agent.model_dump(mode="json")
 
-        for field in ("message_ids", "llm_config", "embedding_config", "tool_rules", "mcp_tools"):
-            if field in data and data[field]:
-                data[field] = json.dumps(data[field])
+        if "message_ids" in data and data["message_ids"]:
+            data["message_ids"] = json.dumps(data["message_ids"])
+        if "llm_config" in data and data["llm_config"]:
+            data["llm_config"] = json.dumps(data["llm_config"])
+        if "embedding_config" in data and data["embedding_config"]:
+            data["embedding_config"] = json.dumps(data["embedding_config"])
+        if "tool_rules" in data and data["tool_rules"]:
+            data["tool_rules"] = json.dumps(data["tool_rules"])
+        if "mcp_tools" in data and data["mcp_tools"]:
+            data["mcp_tools"] = json.dumps(data["mcp_tools"])
 
         if "tools" in data and data["tools"]:
             tool_ids = [tool["id"] for tool in data["tools"]]
@@ -1443,52 +1450,55 @@ class AgentManager:
             memory_obj = data["memory"]
             if isinstance(memory_obj, dict) and "blocks" in memory_obj:
                 block_ids = [
-                    block["id"] if isinstance(block, dict) else block.id for block in memory_obj["blocks"]
+                    block["id"] if isinstance(block, dict) else getattr(block, "id", None)
+                    for block in memory_obj["blocks"]
                 ]
+                block_ids = [bid for bid in block_ids if bid is not None]
                 data["memory_block_ids"] = json.dumps(block_ids)
                 data["memory_prompt_template"] = memory_obj.get("prompt_template", "")
-                if redis_client:
-                    for block_id in block_ids:
-                        reverse_key = f"{redis_client.BLOCK_PREFIX}{block_id}:agents"
-                        redis_client.client.sadd(reverse_key, agent_id)
-                        redis_client.client.expire(reverse_key, settings.redis_ttl_agents)
+                for block_id in block_ids:
+                    reverse_key = f"{cache_provider.BLOCK_PREFIX}{block_id}:agents"
+                    existing = await acache_get_string(reverse_key)
+                    agent_ids = json.loads(existing) if existing else []
+                    if agent_id not in agent_ids:
+                        agent_ids.append(agent_id)
+                    await acache_set_string(
+                        reverse_key, json.dumps(agent_ids), ttl=settings.redis_ttl_agents
+                    )
+            data.pop("memory", None)
 
         if "children" in data and data["children"]:
-            children_ids = [
-                child["id"] if isinstance(child, dict) else child.id for child in data["children"]
-            ]
+            children_ids = [child["id"] if isinstance(child, dict) else child.id for child in data["children"]]
             data["children_ids"] = json.dumps(children_ids)
-            if redis_client:
-                for child_id in children_ids:
-                    reverse_key = f"{redis_client.AGENT_PREFIX}{child_id}:parent"
-                    redis_client.client.set(reverse_key, agent_id)
-                    redis_client.client.expire(reverse_key, settings.redis_ttl_agents)
+            for child_id in children_ids:
+                reverse_key = f"{cache_provider.AGENT_PREFIX}{child_id}:parent"
+                await acache_set_string(
+                    reverse_key, agent_id, ttl=settings.redis_ttl_agents
+                )
 
         data.pop("tools", None)
-        data.pop("memory", None)
         data.pop("children", None)
-
         return data
 
     @enforce_types
-    def get_agent_by_id(
-        self, agent_id: str, actor: PydanticClient, use_cache: bool = True
-    ) -> PydanticAgentState:
-        """Fetch an agent by its ID (with cache and Redis pipeline for tools/blocks)."""
-        from mirix.database.cache_provider import get_cache_provider
-        from mirix.database.redis_client import get_redis_client
+    async def get_agent_by_id(self, agent_id: str, actor: PydanticClient, use_cache: bool = True) -> PydanticAgentState:
+        """Fetch an agent by its ID (with cache for tools/blocks)."""
+        from mirix.database.cache_provider import acache_get_hash, get_cache_provider
 
         cache_provider = get_cache_provider() if use_cache else None
-        redis_client = get_redis_client()
 
         try:
             if cache_provider:
                 cache_key = f"{cache_provider.AGENT_PREFIX}{agent_id}"
-                cached_data = cache_provider.get_hash(cache_key)
-                if cached_data and redis_client:
+                cached_data = await acache_get_hash(cache_key)
+                if cached_data:
                     logger.debug("Cache HIT for agent %s", agent_id)
-                    agent_state = self._reconstruct_agent_from_cache(
-                        cached_data, agent_id, actor, redis_client, cache_provider
+                    agent_state = await asyncio.to_thread(
+                        self._reconstruct_agent_from_cache,
+                        cached_data,
+                        agent_id,
+                        actor,
+                        cache_provider,
                     )
                     if agent_state is not None:
                         return agent_state
@@ -1496,29 +1506,51 @@ class AgentManager:
             logger.warning("Cache read failed for agent %s: %s", agent_id, e)
 
         # Cache MISS or no cache - fetch from PostgreSQL with client filtering
-        with self.session_maker() as session:
-            agent = AgentModel.read(
-                db_session=session,
-                identifier=agent_id,
-                actor=actor,
+        def _read_from_db():
+            with self.session_maker() as session:
+                agent = AgentModel.read(
+                    db_session=session,
+                    identifier=agent_id,
+                    actor=actor,
+                )
+                return agent.to_pydantic()
+
+        pydantic_agent = await asyncio.to_thread(_read_from_db)
+
+        # Populate cache for next time
+        try:
+            if cache_provider:
+                from mirix.database.cache_provider import acache_set_hash
+                from mirix.settings import settings
+
+                data = await self._serialize_agent_for_cache(pydantic_agent, agent_id, cache_provider)
+                agent_cache_key = f"{cache_provider.AGENT_PREFIX}{agent_id}"
+                await acache_set_hash(agent_cache_key, data, ttl=settings.redis_ttl_agents)
+                logger.debug("Populated cache for agent %s with tools", agent_id)
+        except Exception as e:
+            logger.warning("Failed to populate cache for agent %s: %s", agent_id, e)
+
+        return pydantic_agent
+
+    def _sync_get_agent_by_id(self, agent_id: str, actor: PydanticClient, use_cache: bool = True) -> PydanticAgentState:
+        """Sync wrapper for get_agent_by_id (for use from sync callers)."""
+        from mirix.database.sync_bridge import get_event_loop
+
+        loop = get_event_loop()
+        if loop:
+            return asyncio.run_coroutine_threadsafe(self.get_agent_by_id(agent_id, actor, use_cache), loop).result(
+                timeout=10
             )
-            pydantic_agent = agent.to_pydantic()
+        raise RuntimeError("No event loop available for sync get_agent_by_id")
 
-            # Populate cache for next time
-            try:
-                if cache_provider:
-                    from mirix.settings import settings
+    def _sync_list_agents(self, *args, **kwargs) -> List[PydanticAgentState]:
+        """Sync wrapper for list_agents (for use from sync callers)."""
+        from mirix.database.sync_bridge import get_event_loop
 
-                    data = self._serialize_agent_for_cache(
-                        pydantic_agent, agent_id, cache_provider, redis_client
-                    )
-                    agent_cache_key = f"{cache_provider.AGENT_PREFIX}{agent_id}"
-                    cache_provider.set_hash(agent_cache_key, data, ttl=settings.redis_ttl_agents)
-                    logger.debug("Populated cache for agent %s with tools", agent_id)
-            except Exception as e:
-                logger.warning("Failed to populate cache for agent %s: %s", agent_id, e)
-
-            return pydantic_agent
+        loop = get_event_loop()
+        if loop:
+            return asyncio.run_coroutine_threadsafe(self.list_agents(*args, **kwargs), loop).result(timeout=30)
+        raise RuntimeError("No event loop available for sync list_agents")
 
     async def aget_agent_by_id(self, agent_id: str, actor: PydanticClient) -> PydanticAgentState:
         """Async version of get_agent_by_id.
@@ -1530,44 +1562,40 @@ class AgentManager:
         """
         import asyncio
 
-        from mirix.database.cache_provider import (
-            acache_get_hash,
-            acache_set_hash,
-            get_cache_provider,
-        )
-        from mirix.database.redis_client import get_redis_client
+        from mirix.database.cache_provider import acache_get_hash, acache_set_hash, get_cache_provider
 
         cache_provider = get_cache_provider()
-        redis_client = get_redis_client()
 
         # 1. Try async cache read
         try:
             if cache_provider:
                 cache_key = f"{cache_provider.AGENT_PREFIX}{agent_id}"
                 cached_data = await acache_get_hash(cache_key)
-                if cached_data and redis_client:
+                if cached_data:
                     agent = await asyncio.to_thread(
                         self._reconstruct_agent_from_cache,
-                        cached_data, agent_id, actor, redis_client, cache_provider,
+                        cached_data,
+                        agent_id,
+                        actor,
+                        cache_provider,
                     )
                     if agent is not None:
                         return agent
         except Exception as e:
             logger.warning("Cache read failed for agent %s: %s", agent_id, e)
 
-        # 2. DB fallback in thread
-        pydantic_agent = await asyncio.to_thread(
-            self.get_agent_by_id, agent_id, actor, False
-        )
+        # 2. DB fallback (get_agent_by_id with use_cache=False is async)
+        pydantic_agent = await self.get_agent_by_id(agent_id, actor, use_cache=False)
 
         # 3. Populate cache asynchronously
         if pydantic_agent and cache_provider:
             try:
                 from mirix.settings import settings
 
-                data = await asyncio.to_thread(
-                    self._serialize_agent_for_cache,
-                    pydantic_agent, agent_id, cache_provider, redis_client,
+                data = await self._serialize_agent_for_cache(
+                    pydantic_agent,
+                    agent_id,
+                    cache_provider,
                 )
                 agent_cache_key = f"{cache_provider.AGENT_PREFIX}{agent_id}"
                 await acache_set_hash(agent_cache_key, data, ttl=settings.redis_ttl_agents)
@@ -1622,9 +1650,17 @@ class AgentManager:
 
             agent.hard_delete(session)
 
-            # Invalidate parent cache if this was a child agent
+            # Invalidate parent cache if this was a child agent (async from sync context)
             if parent_id:
-                self._invalidate_parent_cache_for_child(agent_id, parent_id)
+                import asyncio
+
+                from mirix.database.sync_bridge import get_event_loop
+
+                loop = get_event_loop()
+                if loop:
+                    asyncio.run_coroutine_threadsafe(
+                        self._invalidate_parent_cache_for_child(agent_id, parent_id), loop
+                    ).result(timeout=5)
 
     # ======================================================================================================================
     # In Context Messages Management
@@ -1638,7 +1674,7 @@ class AgentManager:
     # def get_in_context_messages(
     #     self, agent_id: str, actor: PydanticClient
     # ) -> List[PydanticMessage]:
-    #     message_ids = self.get_agent_by_id(agent_id=agent_id, actor=actor).message_ids
+    #     message_ids = self._sync_get_agent_by_id(agent_id=agent_id, actor=actor).message_ids
     #     messages = self.message_manager.get_messages_by_ids(
     #         message_ids=message_ids, actor=actor
     #     )
@@ -1666,7 +1702,7 @@ class AgentManager:
 
     @enforce_types
     def get_system_message(self, agent_id: str, actor: PydanticClient) -> PydanticMessage:
-        agent_state = self.get_agent_by_id(agent_id=agent_id, actor=actor)
+        agent_state = self._sync_get_agent_by_id(agent_id=agent_id, actor=actor)
         message_ids = agent_state.message_ids
 
         # Handle empty message_ids (e.g., after deletion)
@@ -1681,7 +1717,7 @@ class AgentManager:
     ) -> PydanticAgentState:
         """Rebuld the system prompt, put the system_prompt at the first position in the list of messages."""
 
-        agent_state = self.get_agent_by_id(agent_id=agent_id, actor=actor)
+        agent_state = self._sync_get_agent_by_id(agent_id=agent_id, actor=actor)
         # Swap the system message out (only if there is a diff)
         message = PydanticMessage.dict_to_message(
             agent_id=agent_id,
@@ -1720,7 +1756,7 @@ class AgentManager:
             actor: The Client performing the operation.
             user_id: The user whose messages to trim. If None, trims all non-system messages.
         """
-        message_ids = self.get_agent_by_id(agent_id=agent_id, actor=actor).message_ids
+        message_ids = self._sync_get_agent_by_id(agent_id=agent_id, actor=actor).message_ids
         system_message_id = message_ids[0]
         message_ids = message_ids[1:]
 
@@ -1756,7 +1792,7 @@ class AgentManager:
             actor: The Client performing the operation.
             user_id: The user whose messages to remove. If None, removes all non-system messages.
         """
-        message_ids = self.get_agent_by_id(agent_id=agent_id, actor=actor).message_ids
+        message_ids = self._sync_get_agent_by_id(agent_id=agent_id, actor=actor).message_ids
         system_message_id = message_ids[0]  # 0 is system message
 
         # Keep system message and only filter out messages belonging to the specified user
@@ -1776,7 +1812,7 @@ class AgentManager:
         actor: PydanticClient,
         user_id: Optional[str] = None,
     ) -> PydanticAgentState:
-        message_ids = self.get_agent_by_id(agent_id=agent_id, actor=actor).message_ids
+        message_ids = self._sync_get_agent_by_id(agent_id=agent_id, actor=actor).message_ids
         new_messages = self.message_manager.create_many_messages(messages, actor=actor, user_id=user_id)
         message_ids = [message_ids[0]] + [m.id for m in new_messages] + message_ids[1:]
         return self.set_in_context_messages(agent_id=agent_id, message_ids=message_ids, actor=actor)
@@ -1790,7 +1826,7 @@ class AgentManager:
         user_id: Optional[str] = None,
     ) -> PydanticAgentState:
         messages = self.message_manager.create_many_messages(messages, actor=actor, user_id=user_id)
-        message_ids = self.get_agent_by_id(agent_id=agent_id, actor=actor).message_ids or []
+        message_ids = self._sync_get_agent_by_id(agent_id=agent_id, actor=actor).message_ids or []
         message_ids += [m.id for m in messages]
         return self.set_in_context_messages(agent_id=agent_id, message_ids=message_ids, actor=actor)
 

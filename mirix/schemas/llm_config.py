@@ -25,7 +25,7 @@ class LLMConfig(BaseModel):
         azure_deployment (str, optional): The Azure deployment name for the model.
     """
 
-    # TODO: 🤮 don't default to a vendor! bug city!
+    # TODO: don't default to a vendor! bug city!
     model: str = Field(..., description="LLM model name. ")
     model_endpoint_type: Literal[
         "openai",

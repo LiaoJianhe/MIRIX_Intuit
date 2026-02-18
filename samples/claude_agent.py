@@ -117,7 +117,7 @@ async def run_agent():
                 user_input = input("User: ").strip()
 
                 if user_input.lower() in ["exit", "quit", "bye"]:
-                    print("👋 Goodbye!")
+                    print("Goodbye!")
                     break
 
                 if not user_input:
@@ -126,7 +126,7 @@ async def run_agent():
                 # Rebuild system prompt every REINIT_INTERVAL turns (expensive operation)
                 if turns_since_reinit >= REINIT_INTERVAL:
                     print(
-                        f"\n🔄 Rebuilding system prompt with latest Mirix memory (turn {turn_count})...",
+                        f"\nRebuilding system prompt with latest Mirix memory (turn {turn_count})...",
                         flush=True,
                     )
                     combined_conversation = ""
@@ -177,7 +177,7 @@ async def run_agent():
 
                 # Update memory at intervals
                 if turn_count % MEMORY_UPDATE_INTERVAL == 0:
-                    print(f"\n💾 Updating memory (turn {turn_count})...", flush=True)
+                    print(f"\nUpdating memory (turn {turn_count})...", flush=True)
 
                     # Combine recent conversations for Mirix
                     combined_conversation = ""
@@ -193,14 +193,14 @@ async def run_agent():
                         )
                     )
                     print(
-                        f"💾 Memory update started in background. System prompt will be refreshed in {REINIT_INTERVAL - turns_since_reinit} turns.\n"
+                        f"Memory update started in background. System prompt will be refreshed in {REINIT_INTERVAL - turns_since_reinit} turns.\n"
                     )
 
             except KeyboardInterrupt:
-                print("\n👋 Goodbye!")
+                print("\nGoodbye!")
                 break
             except Exception as e:
-                print(f"❌ Error: {e}")
+                print(f"Error: {e}")
                 import traceback
 
                 traceback.print_exc()

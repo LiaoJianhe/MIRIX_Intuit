@@ -16,6 +16,11 @@ import requests
 from mirix.client import MirixClient
 from mirix.schemas.agent import AgentState
 
+# Mark all tests as integration tests (require a running server)
+pytestmark = [
+    pytest.mark.integration,
+]
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -48,7 +53,7 @@ def check_server():
     try:
         response = requests.get(f"{BASE_URL}/health", timeout=5)
         response.raise_for_status()
-        logger.info("✓ Server is running at %s", BASE_URL)
+        logger.info("Server is running at %s", BASE_URL)
         return True
     except requests.exceptions.RequestException as e:
         pytest.skip(f"Server not available at {BASE_URL}: {e}")
@@ -69,7 +74,7 @@ def client_a(check_server, api_key_factory):
         client_scope="test",
         debug=False,
     )
-    logger.info("✓ Client A initialized: %s", TEST_CLIENT_A_ID)
+    logger.info("Client A initialized: %s", TEST_CLIENT_A_ID)
 
     # Create user A
     try:
@@ -77,7 +82,7 @@ def client_a(check_server, api_key_factory):
             user_id=TEST_USER_A_ID,
             user_name="Test User A",
         )
-        logger.info("✓ User A ready: %s", returned_user_id)
+        logger.info("User A ready: %s", returned_user_id)
     except Exception as e:
         logger.error("Failed to create user A: %s", e)
         raise
@@ -85,7 +90,7 @@ def client_a(check_server, api_key_factory):
     # Initialize meta agent for client A
     try:
         meta_agent = client.initialize_meta_agent(config_path=str(CONFIG_PATH), update_agents=True)
-        logger.info("✓ Meta agent A initialized: %s", meta_agent.id)
+        logger.info("Meta agent A initialized: %s", meta_agent.id)
     except Exception as e:
         logger.error("Failed to initialize meta agent A: %s", e)
         raise
@@ -114,7 +119,7 @@ def client_b(check_server, api_key_factory):
         client_scope="test",
         debug=False,
     )
-    logger.info("✓ Client B initialized: %s", TEST_CLIENT_B_ID)
+    logger.info("Client B initialized: %s", TEST_CLIENT_B_ID)
 
     # Create user B
     try:
@@ -122,7 +127,7 @@ def client_b(check_server, api_key_factory):
             user_id=TEST_USER_B_ID,
             user_name="Test User B",
         )
-        logger.info("✓ User B ready: %s", returned_user_id)
+        logger.info("User B ready: %s", returned_user_id)
     except Exception as e:
         logger.error("Failed to create user B: %s", e)
         raise
@@ -130,7 +135,7 @@ def client_b(check_server, api_key_factory):
     # Initialize meta agent for client B
     try:
         meta_agent = client.initialize_meta_agent(config_path=str(CONFIG_PATH), update_agents=True)
-        logger.info("✓ Meta agent B initialized: %s", meta_agent.id)
+        logger.info("Meta agent B initialized: %s", meta_agent.id)
     except Exception as e:
         logger.error("Failed to initialize meta agent B: %s", e)
         raise
@@ -192,8 +197,8 @@ def test_each_client_has_own_meta_agent(client_a, client_b, meta_agent_a, meta_a
     assert meta_agent_a.organization_id == TEST_ORG_ID, "Meta agent A should be in the test organization"
     assert meta_agent_b.organization_id == TEST_ORG_ID, "Meta agent B should be in the test organization"
 
-    logger.info("✅ Each client has their own distinct meta agent")
-    print("✅ Each client has their own distinct meta agent")
+    logger.info("Each client has their own distinct meta agent")
+    print("Each client has their own distinct meta agent")
 
 
 def test_list_agents_returns_only_client_agents(client_a, client_b, meta_agent_a, meta_agent_b):
@@ -233,9 +238,9 @@ def test_list_agents_returns_only_client_agents(client_a, client_b, meta_agent_a
     agent_ids_b = [a.id for a in agents_b]
     assert meta_agent_a.id not in agent_ids_b, "Client B should not see client A's meta agent"
 
-    print(f"✅ Client A sees {len(agents_a)} agents (all from client A)")
-    print(f"✅ Client B sees {len(agents_b)} agents (all from client B)")
-    print("✅ Complete agent isolation verified")
+    print(f"Client A sees {len(agents_a)} agents (all from client A)")
+    print(f"Client B sees {len(agents_b)} agents (all from client B)")
+    print("Complete agent isolation verified")
 
 
 def test_get_agent_by_id_enforces_client_ownership(client_a, client_b, meta_agent_a, meta_agent_b):
@@ -251,12 +256,12 @@ def test_get_agent_by_id_enforces_client_ownership(client_a, client_b, meta_agen
     # Client A can get its own meta agent
     agent_a = client_a.get_agent(meta_agent_a.id)
     assert agent_a.id == meta_agent_a.id, "Client A should be able to get its own meta agent"
-    print(f"✅ Client A successfully retrieved its own agent: {agent_a.id}")
+    print(f"Client A successfully retrieved its own agent: {agent_a.id}")
 
     # Client B can get its own meta agent
     agent_b = client_b.get_agent(meta_agent_b.id)
     assert agent_b.id == meta_agent_b.id, "Client B should be able to get its own meta agent"
-    print(f"✅ Client B successfully retrieved its own agent: {agent_b.id}")
+    print(f"Client B successfully retrieved its own agent: {agent_b.id}")
 
     # Client B tries to access client A's agent - should fail
     with pytest.raises(Exception) as exc_info:
@@ -266,7 +271,7 @@ def test_get_agent_by_id_enforces_client_ownership(client_a, client_b, meta_agen
     assert (
         "not found" in error_message or "404" in error_message
     ), f"Expected 404/not found error, got: {exc_info.value}"
-    print(f"✅ Client B correctly denied access to client A's agent (404)")
+    print(f"Client B correctly denied access to client A's agent (404)")
 
     # Client A tries to access client B's agent - should fail
     with pytest.raises(Exception) as exc_info:
@@ -276,9 +281,9 @@ def test_get_agent_by_id_enforces_client_ownership(client_a, client_b, meta_agen
     assert (
         "not found" in error_message or "404" in error_message
     ), f"Expected 404/not found error, got: {exc_info.value}"
-    print(f"✅ Client A correctly denied access to client B's agent (404)")
+    print(f"Client A correctly denied access to client B's agent (404)")
 
-    print("✅ Client ownership enforcement verified")
+    print("Client ownership enforcement verified")
 
 
 def test_child_agents_filtered_by_client(client_a, client_b, meta_agent_a, meta_agent_b):
@@ -305,39 +310,39 @@ def test_child_agents_filtered_by_client(client_a, client_b, meta_agent_a, meta_
     # Verify client A's meta agent has children
     # If children field is empty, it might be due to async timing - log but don't fail immediately
     if not meta_a.children or len(meta_a.children) == 0:
-        logger.warning("⚠️  Client A's meta agent has no children in the response")
+        logger.warning("Client A's meta agent has no children in the response")
         logger.warning("This may be due to async agent creation timing")
         # Try listing agents again to see if children appear
         agents_a_retry = client_a.list_agents()
         meta_a_retry = next((a for a in agents_a_retry if a.agent_type == "meta_memory_agent"), None)
         if meta_a_retry and meta_a_retry.children:
             meta_a = meta_a_retry
-            logger.info("✅ Found children on retry")
+            logger.info("Found children on retry")
 
     # Note: Children may not be populated immediately, which is acceptable for this test
     # The key test is that each client sees only their own agents
     if meta_a.children and len(meta_a.children) > 0:
-        print(f"✅ Client A's meta agent has {len(meta_a.children)} sub-agents")
+        print(f"Client A's meta agent has {len(meta_a.children)} sub-agents")
     else:
-        print(f"ℹ️  Client A's meta agent children not yet populated (async timing)")
+        print(f"Client A's meta agent children not yet populated (async timing)")
 
     # Verify client B's meta agent has children
     # If children field is empty, it might be due to async timing - log but don't fail immediately
     if not meta_b.children or len(meta_b.children) == 0:
-        logger.warning("⚠️  Client B's meta agent has no children in the response")
+        logger.warning("Client B's meta agent has no children in the response")
         logger.warning("This may be due to async agent creation timing")
         # Try listing agents again to see if children appear
         agents_b_retry = client_b.list_agents()
         meta_b_retry = next((a for a in agents_b_retry if a.agent_type == "meta_memory_agent"), None)
         if meta_b_retry and meta_b_retry.children:
             meta_b = meta_b_retry
-            logger.info("✅ Found children on retry")
+            logger.info("Found children on retry")
 
     # Note: Children may not be populated immediately, which is acceptable for this test
     if meta_b.children and len(meta_b.children) > 0:
-        print(f"✅ Client B's meta agent has {len(meta_b.children)} sub-agents")
+        print(f"Client B's meta agent has {len(meta_b.children)} sub-agents")
     else:
-        print(f"ℹ️  Client B's meta agent children not yet populated (async timing)")
+        print(f"Client B's meta agent children not yet populated (async timing)")
 
     # Verify all of client A's children are created by client A (if children exist)
     if meta_a.children:
@@ -345,7 +350,7 @@ def test_child_agents_filtered_by_client(client_a, client_b, meta_agent_a, meta_
             assert (
                 child.created_by_id == TEST_CLIENT_A_ID
             ), f"Child agent {child.id} should be created by client A, got: {child.created_by_id}"
-        print(f"✅ All {len(meta_a.children)} sub-agents of client A are created by client A")
+        print(f"All {len(meta_a.children)} sub-agents of client A are created by client A")
 
     # Verify all of client B's children are created by client B (if children exist)
     if meta_b.children:
@@ -353,7 +358,7 @@ def test_child_agents_filtered_by_client(client_a, client_b, meta_agent_a, meta_
             assert (
                 child.created_by_id == TEST_CLIENT_B_ID
             ), f"Child agent {child.id} should be created by client B, got: {child.created_by_id}"
-        print(f"✅ All {len(meta_b.children)} sub-agents of client B are created by client B")
+        print(f"All {len(meta_b.children)} sub-agents of client B are created by client B")
 
     # Verify no overlap in child agent IDs (if both have children)
     if meta_a.children and meta_b.children:
@@ -361,9 +366,9 @@ def test_child_agents_filtered_by_client(client_a, client_b, meta_agent_a, meta_
         child_ids_b = {c.id for c in meta_b.children}
         overlap = child_ids_a & child_ids_b
         assert len(overlap) == 0, f"Client A and B should have no overlapping child agents, found: {overlap}"
-        print("✅ No child agent overlap between clients")
+        print("No child agent overlap between clients")
 
-    print("✅ Child agent isolation verified")
+    print("Child agent isolation verified")
 
 
 def test_memory_apis_use_correct_client_agents(client_a, client_b, meta_agent_a, meta_agent_b):
@@ -382,7 +387,7 @@ def test_memory_apis_use_correct_client_agents(client_a, client_b, meta_agent_a,
     try:
         result_a = client_a.add(user_id=TEST_USER_A_ID, messages=messages_a)
         # The client automatically uses its own meta agent
-        print(f"✅ Client A successfully added memory using its meta agent")
+        print(f"Client A successfully added memory using its meta agent")
     except Exception as e:
         pytest.fail(f"Client A failed to add memory: {e}")
 
@@ -392,7 +397,7 @@ def test_memory_apis_use_correct_client_agents(client_a, client_b, meta_agent_a,
     try:
         result_b = client_b.add(user_id=TEST_USER_B_ID, messages=messages_b)
         # The client automatically uses its own meta agent
-        print(f"✅ Client B successfully added memory using its meta agent")
+        print(f"Client B successfully added memory using its meta agent")
     except Exception as e:
         pytest.fail(f"Client B failed to add memory: {e}")
 
@@ -403,19 +408,19 @@ def test_memory_apis_use_correct_client_agents(client_a, client_b, meta_agent_a,
     try:
         memories_a = client_a.retrieve_memory_with_topic(user_id=TEST_USER_A_ID, topic="Python")
         # If retrieval succeeds, it used the correct client's agents
-        print(f"✅ Client A successfully retrieved memories using its agents")
+        print(f"Client A successfully retrieved memories using its agents")
     except Exception as e:
         # Some errors are acceptable (e.g., no memories found yet)
-        print(f"ℹ️  Client A memory retrieval: {e}")
+        print(f"Client A memory retrieval: {e}")
 
     # Try to retrieve memories for client B
     try:
         memories_b = client_b.retrieve_memory_with_topic(user_id=TEST_USER_B_ID, topic="Java")
         # If retrieval succeeds, it used the correct client's agents
-        print(f"✅ Client B successfully retrieved memories using its agents")
+        print(f"Client B successfully retrieved memories using its agents")
     except Exception as e:
         # Some errors are acceptable (e.g., no memories found yet)
-        print(f"ℹ️  Client B memory retrieval: {e}")
+        print(f"Client B memory retrieval: {e}")
 
     # Note: In the current design, clients automatically use their own meta agent
     # There is no way to specify a different agent_id in the add() method
@@ -425,10 +430,10 @@ def test_memory_apis_use_correct_client_agents(client_a, client_b, meta_agent_a,
     # Actual behavior: Each client automatically uses its own meta agent (enforced by design)
     # This is MORE SECURE than allowing agent_id as a parameter
 
-    print(f"ℹ️  Agent isolation is enforced by design: each client automatically uses its own meta agent")
-    print(f"✅ Client B can only use its own agents (no way to specify client A's agent)")
+    print(f"Agent isolation is enforced by design: each client automatically uses its own meta agent")
+    print(f"Client B can only use its own agents (no way to specify client A's agent)")
 
-    print("✅ Memory API client isolation verified")
+    print("Memory API client isolation verified")
 
 
 def test_redis_cache_respects_client_isolation(client_a, client_b, meta_agent_a, meta_agent_b):
@@ -443,22 +448,22 @@ def test_redis_cache_respects_client_isolation(client_a, client_b, meta_agent_a,
     # Client A gets its agent (first call - may cache in Redis)
     agent_a_1 = client_a.get_agent(meta_agent_a.id)
     assert agent_a_1.id == meta_agent_a.id
-    print(f"✅ Client A retrieved agent {meta_agent_a.id} (1st call - potential cache)")
+    print(f"Client A retrieved agent {meta_agent_a.id} (1st call - potential cache)")
 
     # Client A gets its agent again (second call - likely from Redis cache)
     agent_a_2 = client_a.get_agent(meta_agent_a.id)
     assert agent_a_2.id == meta_agent_a.id
-    print(f"✅ Client A retrieved agent {meta_agent_a.id} (2nd call - likely cached)")
+    print(f"Client A retrieved agent {meta_agent_a.id} (2nd call - likely cached)")
 
     # Client B gets its agent (first call - may cache in Redis)
     agent_b_1 = client_b.get_agent(meta_agent_b.id)
     assert agent_b_1.id == meta_agent_b.id
-    print(f"✅ Client B retrieved agent {meta_agent_b.id} (1st call - potential cache)")
+    print(f"Client B retrieved agent {meta_agent_b.id} (1st call - potential cache)")
 
     # Client B gets its agent again (second call - likely from Redis cache)
     agent_b_2 = client_b.get_agent(meta_agent_b.id)
     assert agent_b_2.id == meta_agent_b.id
-    print(f"✅ Client B retrieved agent {meta_agent_b.id} (2nd call - likely cached)")
+    print(f"Client B retrieved agent {meta_agent_b.id} (2nd call - likely cached)")
 
     # Now verify that even if client A's agent is cached in Redis,
     # client B still cannot access it
@@ -469,7 +474,7 @@ def test_redis_cache_respects_client_isolation(client_a, client_b, meta_agent_a,
     assert (
         "not found" in error_message or "404" in error_message
     ), f"Expected 404/not found error, got: {exc_info.value}"
-    print(f"✅ Client B denied access to cached agent from client A")
+    print(f"Client B denied access to cached agent from client A")
 
     # Verify client A cannot access client B's cached agent
     with pytest.raises(Exception) as exc_info:
@@ -479,9 +484,9 @@ def test_redis_cache_respects_client_isolation(client_a, client_b, meta_agent_a,
     assert (
         "not found" in error_message or "404" in error_message
     ), f"Expected 404/not found error, got: {exc_info.value}"
-    print(f"✅ Client A denied access to cached agent from client B")
+    print(f"Client A denied access to cached agent from client B")
 
-    print("✅ Redis cache client isolation verified")
+    print("Redis cache client isolation verified")
 
 
 def test_initialization_creates_separate_hierarchies(client_a, client_b):
@@ -505,7 +510,7 @@ def test_initialization_creates_separate_hierarchies(client_a, client_b):
     assert len(top_level_a) == 1, f"Client A should have exactly 1 top-level agent, got {len(top_level_a)}"
     assert len(top_level_b) == 1, f"Client B should have exactly 1 top-level agent, got {len(top_level_b)}"
 
-    print(f"✅ Each client has exactly 1 top-level agent (meta agent)")
+    print(f"Each client has exactly 1 top-level agent (meta agent)")
 
     # Get child agents for each
     meta_a = top_level_a[0]
@@ -519,7 +524,7 @@ def test_initialization_creates_separate_hierarchies(client_a, client_b):
             f"Client A and B should have similar agent structures. "
             f"A: {len(meta_a.children)}, B: {len(meta_b.children)}"
         )
-        print(f"✅ Similar agent structures: A={len(meta_a.children)}, B={len(meta_b.children)} sub-agents")
+        print(f"Similar agent structures: A={len(meta_a.children)}, B={len(meta_b.children)} sub-agents")
 
     # Verify complete isolation - no shared agent IDs
     all_ids_a = {a.id for a in agents_a}
@@ -527,8 +532,8 @@ def test_initialization_creates_separate_hierarchies(client_a, client_b):
     overlap = all_ids_a & all_ids_b
     assert len(overlap) == 0, f"Clients should have no shared agent IDs, found {len(overlap)} overlapping"
 
-    print(f"✅ Complete hierarchy isolation: A has {len(agents_a)} agents, B has {len(agents_b)} agents, 0 overlap")
-    print("✅ Separate agent hierarchies verified")
+    print(f"Complete hierarchy isolation: A has {len(agents_a)} agents, B has {len(agents_b)} agents, 0 overlap")
+    print("Separate agent hierarchies verified")
 
 
 if __name__ == "__main__":

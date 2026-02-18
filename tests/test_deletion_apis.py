@@ -22,6 +22,11 @@ import requests
 
 from mirix.client import MirixClient
 
+# Mark all tests as integration tests (require a running server)
+pytestmark = [
+    pytest.mark.integration,
+]
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -50,7 +55,7 @@ def check_server():
     try:
         response = requests.get(f"{BASE_URL}/health", timeout=5)
         response.raise_for_status()
-        logger.info("✓ Server is running at %s", BASE_URL)
+        logger.info("Server is running at %s", BASE_URL)
         return True
     except requests.exceptions.RequestException as e:
         pytest.skip(f"Server not available at {BASE_URL}: {e}")
@@ -83,7 +88,7 @@ def client(check_server, api_key_factory):
 
         # Verify they match
         if returned_user_id != TEST_USER_ID:
-            logger.warning("⚠️  Returned user_id (%s) differs from requested (%s)", returned_user_id, TEST_USER_ID)
+            logger.warning("Returned user_id (%s) differs from requested (%s)", returned_user_id, TEST_USER_ID)
     except Exception as e:
         logger.error("Failed to create/get user: %s", e)
         import traceback
@@ -94,7 +99,7 @@ def client(check_server, api_key_factory):
     # Initialize meta agent
     try:
         client.initialize_meta_agent(config_path=str(CONFIG_PATH), update_agents=True)
-        logger.info("✓ Meta agent initialized")
+        logger.info("Meta agent initialized")
 
         # Add a test memory to trigger sub-agent creation
         init_result = client.add(
@@ -102,9 +107,9 @@ def client(check_server, api_key_factory):
             messages=[{"role": "user", "content": [{"type": "text", "text": "Test initialization message"}]}],
             chaining=True,
         )
-        logger.info("✓ Initialization memory added: %s", init_result)
+        logger.info("Initialization memory added: %s", init_result)
         time.sleep(5)  # Wait for processing
-        logger.info("✓ Sub-agents created")
+        logger.info("Sub-agents created")
     except Exception as e:
         logger.error("Failed to initialize meta agent: %s", e)
         raise
@@ -183,16 +188,16 @@ def add_test_memories(client: MirixClient, user_id: str, batch_label: str):
                 chaining=True,
                 filter_tags={"batch": batch_label, "test": "deletion"},
             )
-            logger.info("  ✓ Added %s memory - Result: %s", memory["type"], result)
+            logger.info("  Added %s memory - Result: %s", memory["type"], result)
         except Exception as e:
-            logger.error("  ✗ Failed to add %s memory: %s", memory["type"], e)
+            logger.error("  Failed to add %s memory: %s", memory["type"], e)
             import traceback
 
             traceback.print_exc()
             raise
 
     # Wait for async processing (give enough time for classification)
-    logger.info("⏱️  Waiting 30 seconds for async memory processing...")
+    logger.info("Waiting 30 seconds for async memory processing...")
     time.sleep(30)
 
     # Check if any memories were actually stored
@@ -200,20 +205,20 @@ def add_test_memories(client: MirixClient, user_id: str, batch_label: str):
     from mirix.server.server import db_context
 
     # Note: Cannot check queue worker status from test process - it runs in server process
-    logger.info("⏱️  Checking if memories were stored in database...")
+    logger.info("Checking if memories were stored in database...")
 
     with db_context() as session:
         message_count = session.query(MessageModel).filter(MessageModel.user_id == user_id).count()
-        logger.info("✓ Messages in database after batch %s: %d", batch_label, message_count)
+        logger.info("Messages in database after batch %s: %d", batch_label, message_count)
 
         if message_count == 0:
-            logger.error("❌ No messages found for user %s after adding memories!", user_id)
+            logger.error("No messages found for user %s after adding memories!", user_id)
             logger.error("This likely means:")
             logger.error("  1. The queue worker is not running (check above)")
             logger.error("  2. The user_id doesn't match")
             logger.error("  3. Memory addition is failing silently in the worker")
 
-    logger.info("✓ All memories added for batch: %s", batch_label)
+    logger.info("All memories added for batch: %s", batch_label)
 
 
 def count_memories_via_api(user_id: str, log_details: bool = False) -> dict:
@@ -267,8 +272,8 @@ def test_1_create_client_and_add_memories(client):
     logger.info("=" * 80)
 
     # Client is already created in fixture
-    logger.info("✓ Client exists: %s", TEST_CLIENT_ID)
-    logger.info("✓ User exists: %s", TEST_USER_ID)
+    logger.info("Client exists: %s", TEST_CLIENT_ID)
+    logger.info("User exists: %s", TEST_USER_ID)
 
     # Verify user exists in database before adding memories
     from mirix.orm.user import User as UserModel
@@ -278,10 +283,10 @@ def test_1_create_client_and_add_memories(client):
         user = session.query(UserModel).filter(UserModel.id == TEST_USER_ID).first()
         if user:
             logger.info(
-                "✓ User verified in database: id=%s, name=%s, is_deleted=%s", user.id, user.name, user.is_deleted
+                "User verified in database: id=%s, name=%s, is_deleted=%s", user.id, user.name, user.is_deleted
             )
         else:
-            logger.error("✗ User NOT found in database with id=%s", TEST_USER_ID)
+            logger.error("User NOT found in database with id=%s", TEST_USER_ID)
             pytest.fail(f"User {TEST_USER_ID} does not exist in database")
 
     # Add initial memories
@@ -300,16 +305,16 @@ def test_1_create_client_and_add_memories(client):
     ), f"At least one memory type should exist. Got: episodic={counts['episodic']}, semantic={counts['semantic']}"
 
     if counts["episodic"] == 0:
-        logger.warning("⚠️  No episodic memories created - classification may have failed")
+        logger.warning("No episodic memories created - classification may have failed")
     if counts["semantic"] == 0:
-        logger.warning("⚠️  No semantic memories created - classification may have failed")
+        logger.warning("No semantic memories created - classification may have failed")
     if counts["messages"] == 0:
-        logger.info("ℹ️  Messages are cached in Redis only, not persisted to PostgreSQL")
+        logger.info("Messages are cached in Redis only, not persisted to PostgreSQL")
 
     # At least one of the memory types should be created
     assert counts["episodic"] > 0 or counts["semantic"] > 0, "At least episodic or semantic memories should be created"
 
-    logger.info("✓ TEST 1 & 2 PASSED")
+    logger.info("TEST 1 & 2 PASSED")
 
 
 def test_3_delete_user_memories(client):
@@ -347,7 +352,7 @@ def test_3_delete_user_memories(client):
     response = requests.get(f"{BASE_URL}/users/{TEST_USER_ID}")
     assert response.status_code == 200, "User should still exist"
 
-    logger.info("✓ TEST 3 PASSED: User memories deleted, user preserved")
+    logger.info("TEST 3 PASSED: User memories deleted, user preserved")
 
 
 def test_4_add_new_memories_after_user_deletion(client):
@@ -371,7 +376,7 @@ def test_4_add_new_memories_after_user_deletion(client):
     ), f"At least one memory type should exist. Got: episodic={counts['episodic']}, semantic={counts['semantic']}"
     # Note: Messages are cached in Redis only, not in PostgreSQL
 
-    logger.info("✓ TEST 4 PASSED")
+    logger.info("TEST 4 PASSED")
 
 
 def test_5_delete_client_memories(client):
@@ -404,20 +409,21 @@ def test_5_delete_client_memories(client):
     assert counts_after["semantic"] == 0, "Semantic memories should be deleted"
     # Note: Messages are cached in Redis only, not in PostgreSQL, so we don't check them
 
-    # Verify client still exists by making an API-key-authenticated call
-    # (GET /clients/{id} requires admin JWT, so we use the search endpoint instead)
-    response = requests.get(
-        f"{BASE_URL}/memory/search",
-        params={"user_id": TEST_USER_ID, "query": "test", "limit": 1},
-        headers={"X-Client-ID": TEST_CLIENT_ID, "X-Org-ID": TEST_ORG_ID},
-    )
-    assert response.status_code == 200, "Client should still exist (search should work)"
+    # Verify client still exists
+    # (GET /clients/{id} requires JWT admin auth, so we check the DB directly)
+    from mirix.orm.client import Client as ClientModel
+    from mirix.server.server import db_context
+
+    with db_context() as session:
+        client_obj = session.query(ClientModel).filter(ClientModel.id == TEST_CLIENT_ID).first()
+        assert client_obj is not None, "Client should still exist"
+        logger.info("Client verified in database: id=%s, is_deleted=%s", client_obj.id, client_obj.is_deleted)
 
     # Verify user still exists
     response = requests.get(f"{BASE_URL}/users/{TEST_USER_ID}")
     assert response.status_code == 200, "User should still exist"
 
-    logger.info("✓ TEST 5 PASSED: Client memories deleted, client and user preserved")
+    logger.info("TEST 5 PASSED: Client memories deleted, client and user preserved")
 
 
 def test_6_add_memory_after_client_deletion(client):
@@ -441,7 +447,7 @@ def test_6_add_memory_after_client_deletion(client):
     ), f"At least one memory type should exist. Got: episodic={counts['episodic']}, semantic={counts['semantic']}"
     # Note: Messages are cached in Redis only, not in PostgreSQL
 
-    logger.info("✓ TEST 6 PASSED")
+    logger.info("TEST 6 PASSED")
 
 
 def test_7_soft_delete_user(client):
@@ -455,13 +461,13 @@ def test_7_soft_delete_user(client):
         response = requests.get(f"{BASE_URL}/users/{TEST_USER_ID}")
         if response.status_code == 200:
             user_data = response.json()
-            logger.info("✓ User exists: %s (is_deleted=%s)", TEST_USER_ID, user_data.get("is_deleted"))
+            logger.info("User exists: %s (is_deleted=%s)", TEST_USER_ID, user_data.get("is_deleted"))
         else:
-            logger.error("❌ User does not exist! Status: %d", response.status_code)
+            logger.error("User does not exist! Status: %d", response.status_code)
             logger.error("Response: %s", response.text)
             pytest.fail(f"User {TEST_USER_ID} does not exist before deletion test")
     except Exception as e:
-        logger.error("❌ Failed to check user existence: %s", e)
+        logger.error("Failed to check user existence: %s", e)
         pytest.fail(f"Cannot verify user {TEST_USER_ID} exists: {e}")
 
     # Check initial count
@@ -473,7 +479,7 @@ def test_7_soft_delete_user(client):
     # Soft delete user via API
     response = requests.delete(f"{BASE_URL}/users/{TEST_USER_ID}")
     if response.status_code != 200:
-        logger.error("❌ Delete failed! Status: %d", response.status_code)
+        logger.error("Delete failed! Status: %d", response.status_code)
         logger.error("Response: %s", response.text)
     response.raise_for_status()
     result = response.json()
@@ -490,16 +496,16 @@ def test_7_soft_delete_user(client):
         user = session.query(UserModel).filter(UserModel.id == TEST_USER_ID).first()
         assert user is not None, "User should still exist in database"
         assert user.is_deleted is True, "User should be marked as deleted"
-        logger.info("✓ User is soft deleted (is_deleted=True)")
+        logger.info("User is soft deleted (is_deleted=True)")
 
         # Check memories are soft deleted
         episodic_memories = session.query(EpisodicEvent).filter(EpisodicEvent.user_id == TEST_USER_ID).all()
         assert len(episodic_memories) > 0, "Episodic memories should still exist in database"
         for memory in episodic_memories:
             assert memory.is_deleted is True, "Memory should be marked as deleted"
-        logger.info("✓ Memories are soft deleted (is_deleted=True)")
+        logger.info("Memories are soft deleted (is_deleted=True)")
 
-    logger.info("✓ TEST 7 PASSED: User and memories soft deleted (data preserved in DB)")
+    logger.info("TEST 7 PASSED: User and memories soft deleted (data preserved in DB)")
 
 
 def test_8_soft_delete_client(client):
@@ -525,16 +531,16 @@ def test_8_soft_delete_client(client):
         client_obj = session.query(ClientModel).filter(ClientModel.id == TEST_CLIENT_ID).first()
         assert client_obj is not None, "Client should still exist in database"
         assert client_obj.is_deleted is True, "Client should be marked as deleted"
-        logger.info("✓ Client is soft deleted (is_deleted=True)")
+        logger.info("Client is soft deleted (is_deleted=True)")
 
         # Check agents are soft deleted
         agents = session.query(AgentModel).filter(AgentModel._created_by_id == TEST_CLIENT_ID).all()
         if agents:
             for agent in agents:
                 assert agent.is_deleted is True, "Agent should be marked as deleted"
-            logger.info("✓ Agents are soft deleted (is_deleted=True)")
+            logger.info("Agents are soft deleted (is_deleted=True)")
 
-    logger.info("✓ TEST 8 PASSED: Client and associated data soft deleted")
+    logger.info("TEST 8 PASSED: Client and associated data soft deleted")
 
 
 def test_9_summary():
@@ -542,16 +548,16 @@ def test_9_summary():
     logger.info("\n" + "=" * 80)
     logger.info("TEST SUMMARY")
     logger.info("=" * 80)
-    logger.info("✅ All 8 deletion API tests passed!")
+    logger.info("All 8 deletion API tests passed!")
     logger.info("\nTests completed:")
-    logger.info("  1. ✓ Create client")
-    logger.info("  2. ✓ Add initial memories for user")
-    logger.info("  3. ✓ Delete user memories (hard delete)")
-    logger.info("  4. ✓ Add new memories for same user")
-    logger.info("  5. ✓ Delete client memories (hard delete)")
-    logger.info("  6. ✓ Add memory after client memory deletion")
-    logger.info("  7. ✓ Soft delete user")
-    logger.info("  8. ✓ Soft delete client")
+    logger.info("  1. Create client")
+    logger.info("  2. Add initial memories for user")
+    logger.info("  3. Delete user memories (hard delete)")
+    logger.info("  4. Add new memories for same user")
+    logger.info("  5. Delete client memories (hard delete)")
+    logger.info("  6. Add memory after client memory deletion")
+    logger.info("  7. Soft delete user")
+    logger.info("  8. Soft delete client")
     logger.info("\nDeletion API coverage:")
     logger.info("  - DELETE /users/{user_id}/memories - Hard delete user memories")
     logger.info("  - DELETE /clients/{client_id}/memories - Hard delete client memories")

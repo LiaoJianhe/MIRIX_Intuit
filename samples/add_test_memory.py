@@ -52,9 +52,9 @@ def test_core_memory(client: MirixClient, user_id: str, filter_tags: Optional[di
             filter_tags=filter_tags,
             occurred_at="2025-11-16T10:30:00",
         )
-        logger.info("✅ Core memory added successfully: %s", result.get("success", False))
+        logger.info("Core memory added successfully: %s", result.get("success", False))
     except Exception as e:  # pylint: disable=broad-except
-        logger.error("❌ Failed to add core memory: %s", e)
+        logger.error("Failed to add core memory: %s", e)
         import traceback
 
         traceback.print_exc()
@@ -95,9 +95,9 @@ def test_episodic_memory(client: MirixClient, user_id: str, filter_tags: Optiona
             filter_tags=filter_tags,
             occurred_at="2025-11-16T10:30:00",
         )
-        logger.info("✅ Episodic memory added successfully: %s", result.get("success", False))
+        logger.info("Episodic memory added successfully: %s", result.get("success", False))
     except Exception as e:  # pylint: disable=broad-except
-        logger.error("❌ Failed to add episodic memory: %s", e)
+        logger.error("Failed to add episodic memory: %s", e)
         import traceback
 
         traceback.print_exc()
@@ -135,9 +135,9 @@ def test_procedural_memory(client: MirixClient, user_id: str, filter_tags: Optio
             filter_tags=filter_tags,
             occurred_at="2025-11-16T10:30:00",
         )
-        logger.info("✅ Procedural memory added successfully: %s", result.get("success", False))
+        logger.info("Procedural memory added successfully: %s", result.get("success", False))
     except Exception as e:  # pylint: disable=broad-except
-        logger.error("❌ Failed to add procedural memory: %s", e)
+        logger.error("Failed to add procedural memory: %s", e)
         import traceback
 
         traceback.print_exc()
@@ -175,9 +175,9 @@ def test_semantic_memory(client: MirixClient, user_id: str, filter_tags: Optiona
             filter_tags=filter_tags,
             occurred_at="2025-11-16T10:30:00",
         )
-        logger.info("✅ Semantic memory added successfully: %s", result.get("success", False))
+        logger.info("Semantic memory added successfully: %s", result.get("success", False))
     except Exception as e:  # pylint: disable=broad-except
-        logger.error("❌ Failed to add semantic memory: %s", e)
+        logger.error("Failed to add semantic memory: %s", e)
         import traceback
 
         traceback.print_exc()
@@ -261,9 +261,9 @@ Total estimated cost: $150K
             filter_tags=filter_tags,
             occurred_at="2025-11-16T10:30:00",
         )
-        logger.info("✅ Resource memory added successfully: %s", result.get("success", False))
+        logger.info("Resource memory added successfully: %s", result.get("success", False))
     except Exception as e:  # pylint: disable=broad-except
-        logger.error("❌ Failed to add resource memory: %s", e)
+        logger.error("Failed to add resource memory: %s", e)
         import traceback
 
         traceback.print_exc()
@@ -311,9 +311,9 @@ def test_knowledge_vault(client: MirixClient, user_id: str, filter_tags: Optiona
             filter_tags=filter_tags,
             occurred_at="2025-11-16T10:30:00",
         )
-        logger.info("✅ Knowledge vault memory added successfully: %s", result.get("success", False))
+        logger.info("Knowledge vault memory added successfully: %s", result.get("success", False))
     except Exception as e:  # pylint: disable=broad-except
-        logger.error("❌ Failed to add knowledge vault memory: %s", e)
+        logger.error("Failed to add knowledge vault memory: %s", e)
         import traceback
 
         traceback.print_exc()
@@ -339,13 +339,13 @@ def main():
         org_id=org_id,
         debug=False,  # Reduce noise in output
     )
-    logger.info("✓ Client initialized: %s", client_id)
+    logger.info("Client initialized: %s", client_id)
 
     # Create or get user (ensures user exists in backend database)
     logger.info("Creating/getting user: %s", user_id)
     try:
         user_id = client.create_or_get_user(user_id=user_id, user_name="Demo User", org_id=org_id)
-        logger.info("✓ User ready: %s", user_id)
+        logger.info("User ready: %s", user_id)
     except Exception as e:  # pylint: disable=broad-except
         logger.error("Failed to create/get user: %s", e)
         sys.exit(1)
@@ -396,7 +396,7 @@ def main():
     logger.info("\n%s", "=" * 80)
     logger.info("TEST SUMMARY")
     logger.info("%s", "=" * 80)
-    logger.info("✅ All memory additions completed successfully!")
+    logger.info("All memory additions completed successfully!")
     logger.info("\nMemories Added:")
     logger.info("  - Core Memory: User profile (name, role, interests)")
     logger.info("  - Episodic Memory: Team meeting event")

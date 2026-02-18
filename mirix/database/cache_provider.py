@@ -13,6 +13,13 @@ Expected sync methods (duck typing - existing, unchanged):
     - get_json(key: str) -> Optional[Dict[str, Any]]
     - set_json(key: str, data: Dict[str, Any], ttl: Optional[int] = None) -> bool
 
+Extended sync methods (duck typing):
+    - delete_many(keys: List[str]) -> int
+    - update_hash_field(key: str, field: str, value: str) -> bool
+    - set_string(key: str, value: str, ttl: Optional[int] = None) -> bool
+    - get_string(key: str) -> Optional[str]
+    - delete_string(key: str) -> bool
+
 Optional async methods (providers MAY implement for zero-thread async I/O):
     - aget(key: str) -> Optional[Dict[str, Any]]
     - aset(key: str, data: Dict[str, Any], ttl: Optional[int] = None) -> bool
@@ -21,22 +28,37 @@ Optional async methods (providers MAY implement for zero-thread async I/O):
     - aset_hash(key: str, data: Dict[str, Any], ttl: Optional[int] = None) -> bool
     - aget_json(key: str) -> Optional[Dict[str, Any]]
     - aset_json(key: str, data: Dict[str, Any], ttl: Optional[int] = None) -> bool
+    - adelete_many(keys: List[str]) -> int
+    - aupdate_hash_field(key: str, field: str, value: str) -> bool
+    - aset_string(key: str, value: str, ttl: Optional[int] = None) -> bool
+    - aget_string(key: str) -> Optional[str]
+    - adelete_string(key: str) -> bool
 
 Async dispatch helpers (acache_get, acache_set_hash, etc.):
     If the active provider has async methods -> call them directly (zero threads).
     If not -> fall back to asyncio.to_thread() around the sync method.
-    This makes RedisCacheProvider (sync-only) work without any changes.
+    RedisCacheProvider implements async methods, so Redis uses the direct async path.
 
 Key prefix constants (all providers should define these):
     BLOCK_PREFIX, MESSAGE_PREFIX, EPISODIC_PREFIX, SEMANTIC_PREFIX,
     PROCEDURAL_PREFIX, RESOURCE_PREFIX, KNOWLEDGE_PREFIX, RAW_MEMORY_PREFIX,
     ORGANIZATION_PREFIX, USER_PREFIX, CLIENT_PREFIX, AGENT_PREFIX, TOOL_PREFIX
 
+Search provider: For vector/text/recency search, use mirix.database.search_provider
+(get_search_provider(), register_search_provider). When Redis is enabled, both
+cache and search providers are registered; managers use get_cache_provider() for
+key-value operations and get_search_provider() for search, with DB fallback when
+no provider is registered.
+
 Usage:
     # In external project
     from mirix.database.cache_provider import register_cache_provider
     cache_provider = MyCustomCacheProvider(config)
     register_cache_provider("my_cache", cache_provider)
+
+    # If you use sync server paths (queue worker, load_agent, etc.), call from
+    # async startup: mirix.database.sync_bridge.set_event_loop_for_sync_bridge()
+    # so sync wrappers (_sync_get_agent_by_id, _sync_list_*, etc.) have a loop.
 
     # In Mirix service managers (sync)
     from mirix.database.cache_provider import get_cache_provider
@@ -50,15 +72,18 @@ Usage:
 """
 
 import asyncio
-from typing import Any, Dict, Optional
+import threading
+from typing import Any, Dict, List, Optional
 
 from mirix.log import get_logger
 
 logger = get_logger(__name__)
 
-# Global cache provider registry (simple dictionary)
+# Registry: protected by _registry_lock for writes; _active_provider is read lock-free
+_registry_lock = threading.Lock()
 _cache_providers: Dict[str, Any] = {}
 _active_provider_name: Optional[str] = None
+_active_provider: Optional[Any] = None  # Single reference for lock-free get_cache_provider()
 
 
 def register_cache_provider(name: str, provider: Any) -> None:
@@ -72,10 +97,12 @@ def register_cache_provider(name: str, provider: Any) -> None:
         name: Provider identifier (e.g., "redis", "ips_cache").
         provider: Provider instance implementing the cache interface.
     """
-    global _cache_providers, _active_provider_name
+    global _active_provider_name, _active_provider
 
-    _cache_providers[name] = provider
-    _active_provider_name = name
+    with _registry_lock:
+        _cache_providers[name] = provider
+        _active_provider_name = name
+        _active_provider = provider
     logger.info("Registered cache provider: %s", name)
 
 
@@ -83,14 +110,13 @@ def get_cache_provider() -> Optional[Any]:
     """
     Get the active cache provider.
 
-    Returns None if no provider is registered (graceful fallback to PostgreSQL).
+    Lock-free read of the active provider reference. Returns None if no
+    provider is registered (graceful fallback to PostgreSQL).
 
     Returns:
         Cache provider instance or None.
     """
-    if _active_provider_name and _active_provider_name in _cache_providers:
-        return _cache_providers[_active_provider_name]
-    return None
+    return _active_provider
 
 
 def unregister_cache_provider(name: str) -> None:
@@ -100,13 +126,15 @@ def unregister_cache_provider(name: str) -> None:
     Args:
         name: Provider identifier.
     """
-    global _cache_providers, _active_provider_name
+    global _active_provider_name, _active_provider
 
-    if name in _cache_providers:
-        del _cache_providers[name]
-        if _active_provider_name == name:
-            _active_provider_name = None
-        logger.info("Unregistered cache provider: %s", name)
+    with _registry_lock:
+        if name in _cache_providers:
+            del _cache_providers[name]
+            if _active_provider_name == name:
+                _active_provider_name = None
+                _active_provider = None
+            logger.info("Unregistered cache provider: %s", name)
 
 
 def get_registered_providers() -> Dict[str, Any]:
@@ -116,7 +144,8 @@ def get_registered_providers() -> Dict[str, Any]:
     Returns:
         Dictionary of provider_name -> provider_instance.
     """
-    return dict(_cache_providers)
+    with _registry_lock:
+        return dict(_cache_providers)
 
 
 # ── Async dispatch ──────────────────────────────────────────────────
@@ -127,9 +156,8 @@ async def _acache_dispatch(method: str, *args, **kwargs) -> Any:
     Generic async dispatch for any cache provider method.
 
     Checks whether the active provider exposes an async variant (a-prefixed).
-    If yes -> await it directly (zero threads, ideal for IPS Cache).
-    If no  -> fall back to asyncio.to_thread() around the sync method
-             (works for RedisCacheProvider without any changes).
+    If yes -> await it directly (zero threads; RedisCacheProvider and IPS Cache).
+    If no  -> fall back to asyncio.to_thread() around the sync method.
     """
     provider = get_cache_provider()
     if provider is None:
@@ -184,3 +212,33 @@ async def acache_set_json(
 ) -> bool:
     """Async set_json."""
     return await _acache_dispatch("set_json", key, data, ttl) or False
+
+
+async def acache_delete_many(keys: List[str]) -> int:
+    """Async batch delete; returns count of keys deleted."""
+    result = await _acache_dispatch("delete_many", keys)
+    return result if isinstance(result, int) else 0
+
+
+async def acache_update_hash_field(
+    key: str, field: str, value: str
+) -> bool:
+    """Async partial hash update (e.g. hset key field value)."""
+    return await _acache_dispatch("update_hash_field", key, field, value) or False
+
+
+async def acache_set_string(
+    key: str, value: str, ttl: Optional[int] = None
+) -> bool:
+    """Async set string key with optional TTL."""
+    return await _acache_dispatch("set_string", key, value, ttl) or False
+
+
+async def acache_get_string(key: str) -> Optional[str]:
+    """Async get string key."""
+    return await _acache_dispatch("get_string", key)
+
+
+async def acache_delete_string(key: str) -> bool:
+    """Async delete string key."""
+    return await _acache_dispatch("delete_string", key) or False

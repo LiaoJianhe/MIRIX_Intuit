@@ -51,12 +51,12 @@ def main():
         config_path=str(config_path),
         update_agents=False,
     )
-    logger.info("✅ Meta agent initialized")
+    logger.info("Meta agent initialized")
 
     # 3. Ensure user exists
     logger.info(f"Creating/getting user: {user_id}")
     user_id = client.create_or_get_user(user_id=user_id, user_name="Alice")
-    logger.info(f"✅ User ready: {user_id}")
+    logger.info(f"User ready: {user_id}")
 
     # 4. Retrieve memories using conversation context
     logger.info("\nRetrieving memories for user...")
@@ -71,10 +71,10 @@ def main():
         )
 
         if not memories.get("success"):
-            logger.error("❌ Failed to retrieve memories")
+            logger.error("Failed to retrieve memories")
             return
 
-        logger.info("✅ Retrieved memories successfully\n")
+        logger.info("Retrieved memories successfully\n")
 
         # 5. Display summary
         memory_data = memories.get("memories", {})
@@ -97,7 +97,7 @@ def main():
                 continue
 
             print(f"\n{'─' * 80}")
-            print(f"📋 {memory_type.upper()} MEMORY (Total: {data['total_count']})")
+            print(f"{memory_type.upper()} MEMORY (Total: {data['total_count']})")
             print(f"{'─' * 80}")
 
             # Get items (handle different structures)
@@ -146,10 +146,10 @@ def main():
                     print(f"      Tags: {item.get('filter_tags')}")
 
         print("\n" + "=" * 80)
-        logger.info("✅ Memory visualization complete")
+        logger.info("Memory visualization complete")
 
     except Exception as e:
-        logger.error(f"❌ Error retrieving memories: {e}")
+        logger.error(f"Error retrieving memories: {e}")
         import traceback
 
         traceback.print_exc()

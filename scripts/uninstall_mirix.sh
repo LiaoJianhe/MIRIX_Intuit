@@ -1,6 +1,6 @@
 #!/bin/bash
 
-echo "🗑️  Completely removing MIRIX from macOS..."
+echo "Completely removing MIRIX from macOS..."
 
 # Remove the main application
 echo "Removing application bundle..."
@@ -41,5 +41,5 @@ echo "Removing Electron caches..."
 rm -rf ~/Library/Caches/Electron
 rm -rf ~/Library/Application\ Support/Electron
 
-echo "✅ MIRIX has been completely removed from your system!"
+echo "MIRIX has been completely removed from your system!"
 echo "You may want to restart your Mac to clear any remaining system caches." 

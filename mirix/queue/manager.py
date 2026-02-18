@@ -98,14 +98,14 @@ class QueueManager:
 
         if self._num_workers > 1 and isinstance(self._queue, PartitionedMemoryQueue):
             # Multiple workers with partitioned queue
-            logger.info("👷 Creating %d background workers (partitioned)...", self._num_workers)
+            logger.info("Creating %d background workers (partitioned)...", self._num_workers)
             for partition_id in range(self._num_workers):
                 worker = QueueWorker(self._queue, server=self._server, partition_id=partition_id)
                 self._workers.append(worker)
                 logger.debug("Worker %d created", partition_id)
         else:
             # Single worker (default behavior)
-            logger.info("👷 Creating single background worker...")
+            logger.info("Creating single background worker...")
             worker = QueueWorker(self._queue, server=self._server)
             self._workers.append(worker)
             logger.debug("Worker created")

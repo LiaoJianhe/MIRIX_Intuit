@@ -113,7 +113,7 @@ elapsed=0
 
 while [ $elapsed -lt $timeout ]; do
     if check_health "db"; then
-        echo -e "${GREEN}✓ Database ready${NC}"
+        echo -e "${GREEN}Database ready${NC}"
         break
     fi
     sleep 1
@@ -124,6 +124,24 @@ if [ $elapsed -eq $timeout ]; then
     echo -e "${RED}Error: Database failed to start${NC}"
     $COMPOSE_CMD -f "$COMPOSE_FILE" logs test_db | tail -20
     exit 1
+fi
+
+# Wait for Redis to be healthy
+echo -e "${YELLOW}Waiting for Redis...${NC}"
+timeout=30
+elapsed=0
+
+while [ $elapsed -lt $timeout ]; do
+    if check_health "redis"; then
+        echo -e "${GREEN}Redis ready${NC}"
+        break
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+done
+
+if [ $elapsed -eq $timeout ]; then
+    echo -e "${YELLOW}Warning: Redis may not be ready, Redis tests may be skipped${NC}"
 fi
 
 # Set test environment variables
@@ -144,7 +162,9 @@ if [ "$START_SERVER" = true ]; then
         exit 1
     fi
     
-    # Start server container
+    # Force rebuild server container without cache to pick up all code changes
+    # This ensures the container always runs the latest code (ORM models, schemas, etc.)
+    $COMPOSE_CMD -f "$COMPOSE_FILE" build --no-cache test_server
     $COMPOSE_CMD -f "$COMPOSE_FILE" up -d test_server
     
     # Wait for server health check
@@ -155,7 +175,7 @@ if [ "$START_SERVER" = true ]; then
     while [ $elapsed -lt $timeout ]; do
         # Check container health status
         if check_health "server"; then
-            echo -e "${GREEN}✓ Server ready${NC}"
+            echo -e "${GREEN}Server ready${NC}"
             break
         fi
         
@@ -176,7 +196,7 @@ if [ "$START_SERVER" = true ]; then
         
         # Try HTTP health check
         if command -v curl &> /dev/null && curl -f -s http://localhost:$SERVER_PORT/health > /dev/null 2>&1; then
-            echo -e "${GREEN}✓ Server ready${NC}"
+            echo -e "${GREEN}Server ready${NC}"
             break
         fi
         
@@ -208,7 +228,11 @@ else
 fi
 
 if [ ${#PYTEST_ARGS[@]} -eq 0 ]; then
-    $PYTEST_CMD tests/ -v
+    if [ "$START_SERVER" = true ]; then
+        $PYTEST_CMD tests/ -v
+    else
+        $PYTEST_CMD tests/ -v -m "not integration"
+    fi
 else
     $PYTEST_CMD "${PYTEST_ARGS[@]}"
 fi

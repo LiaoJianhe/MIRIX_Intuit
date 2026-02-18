@@ -35,10 +35,10 @@ def print_memories(memories):
     """
     # Debug: Show temporal filtering info
     if memories.get("temporal_expression"):
-        print(f"  🕐 Temporal expression detected: '{memories.get('temporal_expression')}'")
+        print(f"  Temporal expression detected: '{memories.get('temporal_expression')}'")
     if memories.get("date_range"):
         date_range = memories.get("date_range")
-        print(f"  📅 Date range applied:")
+        print(f"  Date range applied:")
         print(f"     Start: {date_range.get('start')}")
         print(f"     End: {date_range.get('end')}")
 
@@ -71,7 +71,7 @@ def print_memories(memories):
 
                 # Debug: If still no items but total_count > 0, log the issue
                 if not items and data.get("total_count", 0) > 0:
-                    print(f"  ⚠️  DEBUG: No items found despite total_count={data['total_count']}")
+                    print(f"  DEBUG: No items found despite total_count={data['total_count']}")
                     print(f"      Available keys in data: {list(data.keys())}")
                     if data.keys():
                         for key in data.keys():
@@ -334,7 +334,7 @@ def test_search_all_users(client):
             converted_memories = convert_search_results_to_memory_format(results)
 
             # Print header with user context
-            print("  🔍 Results from multiple users (filtered by client scope):")
+            print("  Results from multiple users (filtered by client scope):")
             print()
 
             print_memories(converted_memories)

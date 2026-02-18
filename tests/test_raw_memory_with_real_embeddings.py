@@ -16,8 +16,11 @@ Usage:
     poetry run python tests/test_raw_memory_with_real_embeddings.py
 """
 
+import asyncio
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 
 # Add project root to path
@@ -47,6 +50,34 @@ from mirix.services.raw_memory_manager import RawMemoryManager
 from mirix.services.user_manager import UserManager
 
 
+def _start_sync_bridge_event_loop():
+    """Start an event loop in a background thread for sync_bridge (_sync_get_agent_by_id, etc.)."""
+    loop = asyncio.new_event_loop()
+
+    def run():
+        loop.run_forever()
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    time.sleep(0.05)
+
+    from mirix.database import sync_bridge
+
+    sync_bridge._event_loop = loop
+    sync_bridge._event_loop_thread_id = t.ident
+    return loop
+
+
+def _stop_sync_bridge_event_loop(loop):
+    """Stop the sync_bridge event loop and clear references."""
+    from mirix.database import sync_bridge
+
+    if loop and loop.is_running():
+        loop.call_soon_threadsafe(loop.stop)
+    sync_bridge._event_loop = None
+    sync_bridge._event_loop_thread_id = None
+
+
 def main():
     """Create a raw memory with real Gemini embeddings."""
 
@@ -68,138 +99,141 @@ def main():
         print("          Embeddings will NOT be generated even with agent_state")
         print("          Set MIRIX_BUILD_EMBEDDINGS_FOR_MEMORY=true to enable")
 
-    # Initialize managers
-    org_mgr = OrganizationManager()
-    client_mgr = ClientManager()
-    user_mgr = UserManager()
-    agent_mgr = AgentManager()
-    raw_memory_mgr = RawMemoryManager()
-
-    # Create organization
-    org_id = "test-org-embeddings"
+    # Start event loop for sync_bridge (required by create_agent -> _sync_get_agent_by_id)
+    bridge_loop = _start_sync_bridge_event_loop()
     try:
-        org = org_mgr.get_organization_by_id(org_id)
-        print(f"[OK] Using existing organization: {org_id}")
-    except Exception:
-        org = org_mgr.create_organization(PydanticOrganization(id=org_id, name="Test Organization for Embeddings"))
-        print(f"[OK] Created organization: {org_id}")
+        org_mgr = OrganizationManager()
+        client_mgr = ClientManager()
+        user_mgr = UserManager()
+        agent_mgr = AgentManager()
+        raw_memory_mgr = RawMemoryManager()
 
-    # Create client
-    client_id = "test-client-embeddings"
-    try:
-        client = client_mgr.get_client_by_id(client_id)
-        print(f"[OK] Using existing client: {client_id}")
-    except Exception:
-        client = client_mgr.create_client(
-            PydanticClient(
-                id=client_id,
-                organization_id=org_id,
-                name="Test Client for Embeddings",
-                scope="read_write",
+        # Create organization
+        org_id = "test-org-embeddings"
+        try:
+            org = org_mgr.get_organization_by_id(org_id)
+            print(f"[OK] Using existing organization: {org_id}")
+        except Exception:
+            org = org_mgr.create_organization(PydanticOrganization(id=org_id, name="Test Organization for Embeddings"))
+            print(f"[OK] Created organization: {org_id}")
+
+        # Create client
+        client_id = "test-client-embeddings"
+        try:
+            client = client_mgr.get_client_by_id(client_id)
+            print(f"[OK] Using existing client: {client_id}")
+        except Exception:
+            client = client_mgr.create_client(
+                PydanticClient(
+                    id=client_id,
+                    organization_id=org_id,
+                    name="Test Client for Embeddings",
+                    write_scope="test",
+                    read_scopes=["test"],
+                )
             )
-        )
-        print(f"[OK] Created client: {client_id}")
+            print(f"[OK] Created client: {client_id}")
 
-    # Create user
-    user_id = "test-user-embeddings"
-    try:
-        user = user_mgr.get_user_by_id(user_id)
-        print(f"[OK] Using existing user: {user_id}")
-    except Exception:
-        user = user_mgr.create_user(
-            PydanticUser(
-                id=user_id,
-                organization_id=org_id,
-                name="Test User for Embeddings",
-                timezone="UTC",
+        # Create user
+        user_id = "test-user-embeddings"
+        try:
+            user = user_mgr.get_user_by_id(user_id)
+            print(f"[OK] Using existing user: {user_id}")
+        except Exception:
+            user = user_mgr.create_user(
+                PydanticUser(
+                    id=user_id,
+                    organization_id=org_id,
+                    name="Test User for Embeddings",
+                    timezone="UTC",
+                )
             )
-        )
-        print(f"[OK] Created user: {user_id}")
+            print(f"[OK] Created user: {user_id}")
 
-    # Create agent with Gemini embedding config
-    agent_id = "test-agent-gemini-embeddings"
-    try:
-        agent = agent_mgr.get_agent_by_id(agent_id, actor=client)
-        print(f"[OK] Using existing agent: {agent_id}")
-    except Exception:
-        # Load config from mirix_gemini.yaml (same pattern as test_memory_server.py)
-        from pathlib import Path
+        # Create agent with Gemini embedding config
+        agent_id = "test-agent-gemini-embeddings"
+        try:
+            agent = asyncio.run(agent_mgr.get_agent_by_id(agent_id, actor=client))
+            print(f"[OK] Using existing agent: {agent_id}")
+        except Exception:
+            # Load config from mirix_gemini.yaml (same pattern as test_memory_server.py)
+            import yaml
 
-        import yaml
+            config_path = Path("mirix/configs/examples/mirix_gemini.yaml")
+            with open(config_path, "r") as f:
+                config = yaml.safe_load(f)
 
-        config_path = Path("mirix/configs/examples/mirix_gemini.yaml")
-        with open(config_path, "r") as f:
-            config = yaml.safe_load(f)
+            agent = agent_mgr.create_agent(
+                CreateAgent(
+                    name="Test Agent Gemini Embeddings",
+                    description="Test agent with real Gemini embeddings from mirix_gemini.yaml",
+                    llm_config=LLMConfig(**config["llm_config"]),
+                    embedding_config=EmbeddingConfig(**config["embedding_config"]),
+                ),
+                actor=client,
+            )
+            print(f"[OK] Created agent: {agent.id}")
 
-        agent = agent_mgr.create_agent(
-            CreateAgent(
-                name="Test Agent Gemini Embeddings",
-                description="Test agent with real Gemini embeddings from mirix_gemini.yaml",
-                llm_config=LLMConfig(**config["llm_config"]),
-                embedding_config=EmbeddingConfig(**config["embedding_config"]),
-            ),
-            actor=client,
-        )
-        print(f"[OK] Created agent: {agent.id}")
-
-    # Create raw memory WITH agent_state (to generate embeddings)
-    print("\n[INFO] Creating raw memory with embeddings...")
-    memory_data = RawMemoryItemCreate(
-        context="This is a test raw memory for verifying that embeddings are "
-        "properly generated and saved to the PostgreSQL database using "
-        "Google's Gemini text-embedding-004 model. The embedding should "
-        "be a 768-dimensional vector.",
-        filter_tags={
-            "scope": "CARE",
-            "test_type": "real_embeddings",
-            "model": "gemini",
-        },
-        user_id=user.id,
-        organization_id=org.id,
-    )
-
-    try:
-        created_memory = raw_memory_mgr.create_raw_memory(
-            raw_memory=memory_data,
-            actor=client,
-            agent_state=agent,  # Pass agent_state to generate embeddings
-            client_id=client.id,
+        # Create raw memory WITH agent_state (to generate embeddings)
+        print("\n[INFO] Creating raw memory with embeddings...")
+        memory_data = RawMemoryItemCreate(
+            context="This is a test raw memory for verifying that embeddings are "
+            "properly generated and saved to the PostgreSQL database using "
+            "Google's Gemini text-embedding-004 model. The embedding should "
+            "be a 768-dimensional vector.",
+            filter_tags={
+                "scope": "CARE",
+                "test_type": "real_embeddings",
+                "model": "gemini",
+            },
             user_id=user.id,
-            use_cache=False,
+            organization_id=org.id,
         )
 
-        print(f"[SUCCESS] Raw memory created successfully!")
-        print(f"          ID: {created_memory.id}")
-        print(f"          Context: {created_memory.context[:80]}...")
-        print(f"          Has embedding: {created_memory.context_embedding is not None}")
+        try:
+            created_memory = raw_memory_mgr.create_raw_memory(
+                raw_memory=memory_data,
+                actor=client,
+                agent_state=agent,  # Pass agent_state to generate embeddings
+                client_id=client.id,
+                user_id=user.id,
+                use_cache=False,
+            )
 
-        if created_memory.context_embedding:
-            print(f"          Embedding dimension: {len(created_memory.context_embedding)}")
-            print(f"          Embedding config model: {created_memory.embedding_config.embedding_model}")
-            print(f"          First 5 embedding values: {created_memory.context_embedding[:5]}")
-            print(f"\n[SUCCESS] Embeddings are saved to the database!")
-            print(f"\nYou can verify in PostgreSQL:")
-            print(f"   SELECT id, context, embedding_config, ")
-            print(f"          array_length(context_embedding, 1) as embedding_dim")
-            print(f"   FROM raw_memory WHERE id = '{created_memory.id}';")
-        else:
-            print(f"\n[WARNING] No embeddings were generated!")
-            print(f"          This might be due to:")
-            print(f"          - BUILD_EMBEDDINGS_FOR_MEMORY is disabled")
-            print(f"          - Google API key is invalid")
-            print(f"          - Network connectivity issues")
+            print(f"[SUCCESS] Raw memory created successfully!")
+            print(f"          ID: {created_memory.id}")
+            print(f"          Context: {created_memory.context[:80]}...")
+            print(f"          Has embedding: {created_memory.context_embedding is not None}")
 
-        # Cleanup (optional - comment out to keep the record)
-        # raw_memory_mgr.delete_raw_memory(created_memory.id, client)
-        # print(f"\n[INFO] Cleaned up test memory")
+            if created_memory.context_embedding:
+                print(f"          Embedding dimension: {len(created_memory.context_embedding)}")
+                print(f"          Embedding config model: {created_memory.embedding_config.embedding_model}")
+                print(f"          First 5 embedding values: {created_memory.context_embedding[:5]}")
+                print(f"\n[SUCCESS] Embeddings are saved to the database!")
+                print(f"\nYou can verify in PostgreSQL:")
+                print(f"   SELECT id, context, embedding_config, ")
+                print(f"          array_length(context_embedding, 1) as embedding_dim")
+                print(f"   FROM raw_memory WHERE id = '{created_memory.id}';")
+            else:
+                print(f"\n[WARNING] No embeddings were generated!")
+                print(f"          This might be due to:")
+                print(f"          - BUILD_EMBEDDINGS_FOR_MEMORY is disabled")
+                print(f"          - Google API key is invalid")
+                print(f"          - Network connectivity issues")
 
-    except Exception as e:
-        print(f"\n[ERROR] Error creating raw memory with embeddings:")
-        print(f"        {type(e).__name__}: {e}")
-        import traceback
+            # Cleanup (optional - comment out to keep the record)
+            # raw_memory_mgr.delete_raw_memory(created_memory.id, client)
+            # print(f"\n[INFO] Cleaned up test memory")
 
-        traceback.print_exc()
-        sys.exit(1)
+        except Exception as e:
+            print(f"\n[ERROR] Error creating raw memory with embeddings:")
+            print(f"        {type(e).__name__}: {e}")
+            import traceback
+
+            traceback.print_exc()
+            sys.exit(1)
+    finally:
+        _stop_sync_bridge_event_loop(bridge_loop)
 
 
 if __name__ == "__main__":

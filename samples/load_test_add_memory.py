@@ -244,9 +244,9 @@ def run_load_test(client: MirixClient, messages: List[Tuple[str, str, str, Dict[
     for user_id in unique_users:
         try:
             client.create_or_get_user(user_id=user_id, user_name=f"Load Test User {user_id}", org_id=org_id)
-            logger.info("  ✓ User ready: %s", user_id)
+            logger.info("  User ready: %s", user_id)
         except Exception as e:  # pylint: disable=broad-except
-            logger.error("  ✗ Failed to create user %s: %s", user_id, e)
+            logger.error("  Failed to create user %s: %s", user_id, e)
 
     logger.info("=" * 80)
     logger.info("STARTING LOAD TEST")
@@ -439,13 +439,13 @@ def main():
         org_id=org_id,
         debug=False,
     )
-    logger.info("✓ Client initialized")
+    logger.info("Client initialized")
 
     # Initialize meta agent
     logger.info("Initializing meta agent from %s", config_path)
     try:
         client.initialize_meta_agent(config_path=str(config_path), update_agents=False)
-        logger.info("✓ Meta agent initialized")
+        logger.info("Meta agent initialized")
     except Exception as e:  # pylint: disable=broad-except
         logger.error("Failed to initialize meta agent: %s", e)
         sys.exit(1)

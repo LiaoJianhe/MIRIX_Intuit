@@ -1,6 +1,10 @@
 # How Cache Providers Work
 
-This document describes how Mirix behaves under three configurations: **no cache provider**, **Redis** (sync provider), and an **async cache provider** (e.g. a future IPS Cache implementation). The code paths are the same; only the presence and type of the registered provider change.
+This document describes how Mirix behaves under **no cache provider**, **Redis** (sync + async), a **sync-only provider**, and an **async cache provider** (e.g. a future IPS Cache implementation). The code paths are the same; only the presence and type of the registered provider change.
+
+**Dependency order:** Cache provider logic (including async dispatch in PR 55) applies **on top of** the entity and access model from PR 52 (1 user per org), PR 53 (multi-scope clients), and PR 54 (scoped core memory). Cached entity shapes (User, Client, Block, Agent, Message, etc.) and key prefixes are defined by those PRs; PR 55 only adds async I/O paths (`acache_*`, `async_cache_read`) that use the same keys and data shapes.
+
+**Sync bridge and search provider:** The **sync bridge** (`mirix.database.sync_bridge`) holds the application event loop and thread so sync callers (ORM, queue worker) can run async cache code via `run_coroutine_threadsafe` without depending on Redis. Call `set_event_loop_for_sync_bridge()` from async startup and `clear_sync_bridge()` on shutdown. **Search provider** (`mirix.database.search_provider`) is a separate registry for vector/text/recency search; when Redis is enabled it registers both a cache provider and a search provider. Managers use `get_search_provider()` for list/search and fall back to DB when no provider is registered. The cache provider interface also includes **extended methods**: `delete_many`, `update_hash_field`, `set_string`, `get_string`, `delete_string` (and async `acache_*` variants) for batch deletes, soft deletes, and reverse-key mappings.
 
 ---
 
@@ -10,14 +14,12 @@ When no provider is registered, `get_cache_provider()` returns `None`. The syste
 
 ### 1.1 Registration
 
-Nothing is registered. Either Redis is disabled (`redis_enabled=False`), Redis failed to connect, or no other provider was registered. The global `_active_provider_name` stays `None`, and `get_cache_provider()` returns `None`.
+Nothing is registered. Either Redis is disabled (`redis_enabled=False`), Redis failed to connect, or no other provider was registered. The globals `_active_provider_name` and `_active_provider` stay `None`, and `get_cache_provider()` returns `None` via a single lock-free read:
 
 ```python
 # cache_provider.py
 def get_cache_provider() -> Optional[Any]:
-    if _active_provider_name and _active_provider_name in _cache_providers:
-        return _cache_providers[_active_provider_name]
-    return None
+    return _active_provider  # None when no provider registered
 ```
 
 ### 1.2 Sync path — managers
@@ -66,7 +68,7 @@ With no provider, the handler takes the `else` branch: **one `asyncio.to_thread(
 
 ## 2. Redis as Cache Provider
 
-When Redis is available, the server registers it as the active cache provider. Redis is **sync-only** (no `aget_hash`, `aset_hash`, etc.), so async calls use a thread pool.
+When Redis is available, the server registers it as the active cache provider. **RedisCacheProvider** implements both sync and async methods: sync for ORM and managers that run in threads, async for REST handlers so Redis I/O does not block the event loop.
 
 ### 2.1 Registration at startup
 
@@ -76,34 +78,25 @@ On server startup, `server.py` calls `initialize_redis_client()`. Inside `redis_
 # redis_client.py (inside initialize_redis_client())
 from mirix.database.cache_provider import register_cache_provider
 from mirix.database.redis_cache_provider import RedisCacheProvider
+from mirix.database.redis_search_provider import RedisSearchProvider
+from mirix.database.search_provider import register_search_provider
+from mirix.database.sync_bridge import set_event_loop_for_sync_bridge
 
-redis_provider = RedisCacheProvider(_redis_client)
-register_cache_provider("redis", redis_provider)
+set_event_loop_for_sync_bridge()
+redis_cache_provider = RedisCacheProvider(_redis_client)
+register_cache_provider("redis", redis_cache_provider)
+redis_search_provider = RedisSearchProvider(_redis_client)
+register_search_provider("redis", redis_search_provider)
 ```
 
-`register_cache_provider("redis", redis_provider)` stores the instance in `_cache_providers` and sets `_active_provider_name = "redis"`. `get_cache_provider()` then returns that `RedisCacheProvider` instance.
+`register_cache_provider("redis", redis_provider)` runs under `_registry_lock`: it stores the instance in `_cache_providers`, sets `_active_provider_name = "redis"`, and sets `_active_provider = provider`. `get_cache_provider()` performs a lock-free read of `_active_provider` and returns that `RedisCacheProvider` instance.
 
 ### 2.2 The adapter: RedisCacheProvider
 
-`RedisCacheProvider` wraps the existing `RedisMemoryClient` and implements only the **sync** cache interface:
+`RedisCacheProvider` wraps `RedisMemoryClient` and implements the full cache interface:
 
-- `get` / `set` / `delete`
-- `get_hash` / `set_hash`
-- `get_json` / `set_json`
-
-Each method delegates to `self.redis_client` and catches exceptions for graceful fallback:
-
-```python
-# redis_cache_provider.py
-def get_hash(self, key: str) -> Optional[Dict[str, Any]]:
-    try:
-        return self.redis_client.get_hash(key)
-    except Exception as e:
-        logger.warning("Redis get_hash failed for key %s: %s", key, e)
-        return None
-```
-
-There are **no** async methods (`aget_hash`, `aset_hash`, etc.).
+- **Sync** (for ORM and managers running in threads): `get`, `set`, `delete`, `get_hash`, `set_hash`, `get_json`, `set_json`, plus extended `delete_many`, `update_hash_field`, `set_string`, `get_string`, `delete_string`. Implemented via `_run_async()` using `asyncio.run_coroutine_threadsafe()` so the sync API works from non-async contexts.
+- **Async** (for REST handlers): `aget`, `aset`, `adelete`, `aget_hash`, `aset_hash`, `aget_json`, `aset_json`, plus `adelete_many`, `aupdate_hash_field`, `aset_string`, `aget_string`, `adelete_string`. These call `RedisMemoryClient`’s async methods directly, so no thread is used for Redis I/O on the async path.
 
 ### 2.3 Sync path — managers
 
@@ -118,7 +111,7 @@ Flow: **manager → RedisCacheProvider.get_hash() → RedisMemoryClient.get_hash
 
 ### 2.4 Async path — REST handlers and _acache_dispatch
 
-Async handlers use `async_cache_read()`, which uses the public helpers `acache_get_hash` / `acache_set_hash`. Those call `_acache_dispatch()`:
+Async handlers use `async_cache_read()`, which uses `acache_get_hash` / `acache_set_hash`. Those call `_acache_dispatch()`:
 
 ```python
 # cache_provider.py
@@ -127,14 +120,14 @@ async def _acache_dispatch(method: str, *args, **kwargs) -> Any:
     if provider is None:
         return None
     async_method = f"a{method}"   # e.g. "aget_hash"
-    if hasattr(provider, async_method):   # False for Redis
+    if hasattr(provider, async_method):   # True for RedisCacheProvider
         return await getattr(provider, async_method)(*args, **kwargs)
     return await asyncio.to_thread(
         getattr(provider, method), *args, **kwargs
     )
 ```
 
-Because `RedisCacheProvider` does not define `aget_hash`, `aset_hash`, etc., **every** async cache call goes through `asyncio.to_thread(provider.get_hash, ...)` (or the corresponding set/delete). So Redis I/O runs in a thread and does not block the event loop.
+Because `RedisCacheProvider` **does** define `aget_hash`, `aset_hash`, etc., async cache calls **await the provider’s async methods directly** (no `to_thread`). Redis I/O is non-blocking on the event loop.
 
 ### 2.5 Full async read path (e.g. GET /blocks/{id})
 
@@ -147,27 +140,26 @@ REST handler (async)
        │
        ├─ Step 1: await acache_get_hash(key)
        │    └─ _acache_dispatch("get_hash", key)
-       │         └─ hasattr(RedisCacheProvider, "aget_hash") → False
-       │         └─ asyncio.to_thread(provider.get_hash, key)   ← sync Redis in thread
+       │         └─ hasattr(RedisCacheProvider, "aget_hash") → True
+       │         └─ await provider.aget_hash(key)   ← async Redis, no thread
        │
        ├─ Cache HIT → deserialize and return
        │
        ├─ Cache MISS:
        │    └─ Step 2: asyncio.to_thread(db_fn)
        │         └─ manager.get_block_by_id(..., use_cache=False)
-       │              └─ cache_provider = None (skipped)
-       │              └─ PostgreSQL only
+       │              └─ PostgreSQL only (sync DB in thread)
        │
        └─ Step 3: await acache_set_hash(key, data, ttl)
-            └─ asyncio.to_thread(provider.set_hash, key, data, ttl)
+            └─ await provider.aset_hash(key, data, ttl)   ← async Redis, no thread
 ```
 
 ### 2.6 Summary (Redis)
 
 | Path        | What happens                                                                 |
 |------------|-------------------------------------------------------------------------------|
-| Sync       | Manager uses `get_cache_provider()` → `RedisCacheProvider`; sync get/set to Redis; DB on miss and for write-back. |
-| Async REST | Handler uses `async_cache_read` → `acache_get_hash` / `acache_set_hash` → `_acache_dispatch` → `asyncio.to_thread(sync method)` so Redis runs in a thread. |
+| Sync       | Manager or ORM uses `get_cache_provider()` → `RedisCacheProvider`; sync get/set use `_run_async` (run_coroutine_threadsafe) so Redis runs on the event loop from a worker thread. |
+| Async REST | Handler uses `async_cache_read` → `acache_get_hash` / `acache_set_hash` → `_acache_dispatch` → `await provider.aget_hash` / `aset_hash` (direct async Redis, no thread). |
 
 ---
 
@@ -254,12 +246,109 @@ Only the DB fallback runs in a thread; all cache operations are awaited natively
 
 ---
 
+## 4. Search provider (separate from cache)
+
+The **search provider** is a separate registry from the cache provider. It is used for **vector similarity**, **full-text**, and **recency-sorted** search over memory and entity indexes. When Redis is enabled, the server registers both a cache provider (key-value read/write) and a search provider (query over indexes); when no search provider is registered, managers fall back to PostgreSQL for list/search.
+
+### 4.1 What the search provider does
+
+- **Cache provider** (`get_cache_provider()`): key-value operations — get/set/delete by key (e.g. `block:<id>`, `user:<id>`). Used for cache-aside reads and cache invalidation.
+- **Search provider** (`get_search_provider()`): query operations — search by recency, vector embedding, or text (BM25/string match). Used by memory managers (episodic, semantic, procedural, resource, knowledge vault) and any code that needs to list or search over many items.
+
+Managers that support search (e.g. `episodic_memory_manager.search_episodic_memory`) call `get_search_provider()`. If a provider is present and `use_cache=True`, they call its async search methods first; on miss or error they fall back to PostgreSQL.
+
+### 4.2 Registry and usage
+
+Registry lives in `mirix.database.search_provider`:
+
+- **register_search_provider(name, provider)** — register a provider; the last registered one is active.
+- **get_search_provider()** — returns the active provider instance or `None`.
+- **unregister_search_provider(name)** — remove a provider (e.g. on shutdown).
+
+When Redis is used, both providers are registered in `redis_client.py` after the client and indexes are created:
+
+```python
+# redis_client.py (inside initialize_redis_client())
+redis_cache_provider = RedisCacheProvider(_redis_client)
+register_cache_provider("redis", redis_cache_provider)
+redis_search_provider = RedisSearchProvider(_redis_client)
+register_search_provider("redis", redis_search_provider)
+```
+
+With Redis, the **same backing store** is used for both: the cache provider writes keys (e.g. `episodic:<id>`), and Redis indexes those keys; the search provider runs queries against those indexes. So no separate “indexing” step is needed for Redis — writing via the cache populates the search indexes.
+
+### 4.3 Search provider interface (duck typing)
+
+A search provider implements the following **async** methods and a static helper. No base class is required.
+
+| Method | Purpose |
+|--------|--------|
+| `search_recent(index_name, limit, user_id, organization_id, sort_by, return_fields, filter_tags, start_date, end_date)` | Recency-sorted list (e.g. by `created_at_ts` or `occurred_at_ts`). |
+| `search_vector(index_name, embedding, vector_field, limit, ...)` | Vector similarity search (e.g. KNN on embedding). |
+| `search_text(index_name, query, search_fields, limit, ...)` | Full-text search (BM25/string match). |
+| `search_recent_by_org(index_name, limit, organization_id, ...)` | Recency by organization (admin/list views). |
+| `search_vector_by_org(index_name, embedding, vector_field, limit, organization_id, ...)` | Vector search by org. |
+| `search_text_by_org(index_name, query_text, search_field, search_method, limit, organization_id, ...)` | Text search by org. |
+| `clean_search_fields(items: List[Dict]) -> List[Dict]` | Strip backend-specific fields so results can be passed to Pydantic models. |
+
+The provider must also expose **index name constants** so callers can pass the correct index (e.g. `search_provider.EPISODIC_INDEX`). For Redis these are: `BLOCK_INDEX`, `MESSAGE_INDEX`, `EPISODIC_INDEX`, `SEMANTIC_INDEX`, `PROCEDURAL_INDEX`, `RESOURCE_INDEX`, `KNOWLEDGE_INDEX`, `ORGANIZATION_INDEX`, `USER_INDEX`, `AGENT_INDEX`, `TOOL_INDEX`. See `mirix.database.redis_search_provider.RedisSearchProvider` for the exact signatures and default index names.
+
+### 4.4 How to register and use a new search provider
+
+1. **Implement the interface** in your own class (duck typing):
+   - Implement all of the async methods above with the same semantics (filters, limits, return shape).
+   - Implement `clean_search_fields(items)` so that returned dicts match what the managers expect (e.g. strip `id`/internal fields added by your backend).
+   - Define the same index name constants (or a subset) that managers use (e.g. `EPISODIC_INDEX`, `SEMANTIC_INDEX`, …).
+
+2. **Ensure the search backend is populated.** With Redis, cache writes (via the cache provider) automatically populate the indexes. For another backend (e.g. Elasticsearch, IPS Search):
+   - Either index documents when your app writes to the cache or DB (e.g. in the same code paths that today write to Redis), or
+   - Run a separate sync job from DB/cache into your search store. Managers do not call the search provider to index; they only call it to search.
+
+3. **Register at startup** (after your backend/client is ready):
+
+   ```python
+   from mirix.database.search_provider import register_search_provider
+
+   my_search_provider = MySearchProvider(config)  # your client/index setup
+   register_search_provider("my_search", my_search_provider)
+   ```
+
+4. **Unregister on shutdown** (optional but recommended):
+
+   ```python
+   from mirix.database.search_provider import unregister_search_provider
+   unregister_search_provider("my_search")
+   ```
+
+No changes are required in managers or REST handlers: they already call `get_search_provider()` and, if non-`None`, use the active provider’s search methods and index constants. Registering a new provider and making it the last registered one is enough for it to be used.
+
+---
+
+## Cache content and PR 52 / 53 / 54
+
+The **data** stored in the cache (entity fields, key prefixes, and serialization) comes from the models and managers updated in:
+
+- **PR 52 (1 user per org):** User and Message (and related) are organization- and user-scoped; cache entries use `organization_id`, `user_id`, `created_by_id` where applicable. Agent cache does not pass `memory` or `children_ids` into `AgentState` (schema has no such fields).
+- **PR 53 (multi-scope clients):** Client cache includes `read_scopes` (list) and `write_scope`; manager deserializes `read_scopes` from string when reading from cache.
+- **PR 54 (scoped core memory):** Block cache includes `filter_tags` (scope); managers and agent reconstruction deserialize `filter_tags` from string when reading from cache.
+
+**PR 55 (Async Cache Provider)** does not change these shapes or keys. It only adds:
+
+- Optional async methods on the provider (`aget_hash`, `aset_hash`, etc.).
+- `_acache_dispatch` and `acache_*` in `cache_provider.py` to call async methods when present, else `asyncio.to_thread(sync_method)`.
+- `async_cache_read` in `cache_layer.py` for REST handlers to do cache-aside with async I/O when the provider supports it.
+
+Same cache keys, same payloads; only the I/O path (async vs sync) changes.
+
+---
+
 ## Comparison
 
 | Scenario        | get_cache_provider() | Sync manager path        | Async cache path (REST)                    |
 |----------------|----------------------|--------------------------|-------------------------------------------|
 | No provider    | `None`               | DB only                  | Handler skips cache; to_thread(manager) → DB only |
-| Redis          | `RedisCacheProvider` | Sync Redis get/set + DB | to_thread(provider.get_hash/set_hash) + to_thread(db_fn) |
+| Redis          | `RedisCacheProvider` | Sync Redis get/set + DB | await provider.aget_hash/aset_hash + to_thread(db_fn) |
+| Sync-only      | e.g. `MySyncCacheProvider` | Sync get/set on provider + DB | to_thread(provider.get_hash/set_hash) + to_thread(db_fn) |
 | Async provider | e.g. `MyAsyncCacheProvider` | Sync get/set on provider + DB | await provider.aget_hash/aset_hash + to_thread(db_fn) |
 
-The same REST and manager code supports all three cases; only the registered provider and whether it implements async methods change the behavior.
+The same REST and manager code supports all cases; only the registered provider and whether it implements async methods change the behavior. A **sync-only** provider (sync methods only, no `aget_*`/`aset_*`) is supported: async callers use `_acache_dispatch`, which falls back to `asyncio.to_thread(sync_method)` when the async variant is missing.

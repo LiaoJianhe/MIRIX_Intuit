@@ -79,7 +79,7 @@ def format_memories_for_prompt(memories: dict) -> str:
 
     formatted_parts = []
 
-    # ✅ FIX: Format core memory first (most important - contains user's name and persona)
+    # Format core memory first (most important - contains user's name and persona)
     if "core" in memories["memories"] and memories["memories"]["core"].get("items"):
         formatted_parts.append("\n=== CORE MEMORY ===")
         for block in memories["memories"]["core"]["items"]:

@@ -55,7 +55,7 @@ async def run_agent():
                 user_input = input("User: ").strip()
 
                 if user_input.lower() in ["exit", "quit", "bye"]:
-                    print("👋 Goodbye!")
+                    print("Goodbye!")
                     break
 
                 if not user_input:
@@ -70,10 +70,10 @@ async def run_agent():
                                 print(block.text, end="\n", flush=True)
 
             except KeyboardInterrupt:
-                print("\n👋 Goodbye!")
+                print("\nGoodbye!")
                 break
             except Exception as e:
-                print(f"❌ Error: {e}")
+                print(f"Error: {e}")
 
 
 if __name__ == "__main__":

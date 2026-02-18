@@ -90,8 +90,34 @@ async def initialize():
     """
     logger.info("Starting Mirix REST API server")
 
-    # Initialize SyncServer (singleton)
-    server = get_server()
+    # Store event loop for sync bridges (agent/memory managers) so they work
+    # with any registered cache provider, not only when Redis is enabled.
+    try:
+        from mirix.database.sync_bridge import set_event_loop_for_sync_bridge
+
+        set_event_loop_for_sync_bridge()
+    except Exception as e:
+        logger.warning("Could not set event loop for sync bridge: %s", e)
+
+    # Initialize Redis (async; also registers cache provider)
+    try:
+        from mirix.database.redis_client import initialize_redis_client
+
+        redis_client = await initialize_redis_client()
+        if redis_client:
+            logger.info("Redis integration enabled")
+        else:
+            logger.info("Redis integration disabled or unavailable")
+    except Exception as e:
+        logger.warning("Redis initialization failed: %s", e)
+        logger.info("System will continue without Redis caching")
+
+    # Initialize SyncServer (singleton) in a thread pool so sync cache calls
+    # run off the event-loop thread and do not deadlock the Redis sync bridge.
+    global _server
+    loop = asyncio.get_event_loop()
+    _server = await loop.run_in_executor(None, SyncServer)
+    server = _server
     logger.info("SyncServer initialized")
 
     # Initialize queue with server reference
@@ -105,6 +131,22 @@ async def cleanup():
     This function can be called by external applications to cleanup the server.
     """
     logger.info("Shutting down Mirix REST API server")
+
+    # Close Redis client and clear sync bridge
+    try:
+        from mirix.database.redis_client import close_redis_client
+
+        await close_redis_client()
+        logger.info("Redis client closed")
+    except Exception as e:
+        logger.warning("Error closing Redis client: %s", e)
+
+    try:
+        from mirix.database.sync_bridge import clear_sync_bridge
+
+        clear_sync_bridge()
+    except Exception as e:
+        logger.warning("Error clearing sync bridge: %s", e)
 
     # Flush LangFuse traces before shutdown
     try:
@@ -666,8 +708,7 @@ async def list_agents(
 
     tags_list = tags.split(",") if tags else None
 
-    return await asyncio.to_thread(
-        server.agent_manager.list_agents,
+    return await server.agent_manager.list_agents(
         actor=client,
         tags=tags_list,
         query_text=query_text,
@@ -740,7 +781,7 @@ async def create_agent(
 
     agent_state = await asyncio.to_thread(server.create_agent, CreateAgent(**create_params), actor=client)
 
-    return await server.agent_manager.aget_agent_by_id(agent_state.id, actor=client)
+    return await server.agent_manager.get_agent_by_id(agent_state.id, actor=client)
 
 
 @router.get("/agents/{agent_id}", response_model=AgentState)
@@ -757,7 +798,7 @@ async def get_agent(
     client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
 
     try:
-        return await server.agent_manager.aget_agent_by_id(agent_id, actor=client)
+        return await server.agent_manager.get_agent_by_id(agent_id, actor=client)
     except NoResultFound as e:
         raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found or not accessible")
 
@@ -854,16 +895,14 @@ async def update_agent_system_prompt_by_name(
     client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
 
     # List all top-level agents for this client
-    top_level_agents = await asyncio.to_thread(server.agent_manager.list_agents, actor=client, limit=1000)
+    top_level_agents = await server.agent_manager.list_agents(actor=client, limit=1000)
 
     # Also get sub-agents (children of meta agent)
     all_agents = list(top_level_agents)
     for agent in top_level_agents:
         if agent.name == "meta_memory_agent":
             # Get sub-agents
-            sub_agents = await asyncio.to_thread(
-                server.agent_manager.list_agents, actor=client, parent_id=agent.id, limit=1000
-            )
+            sub_agents = await server.agent_manager.list_agents(actor=client, parent_id=agent.id, limit=1000)
             all_agents.extend(sub_agents)
             break
 
@@ -1117,12 +1156,17 @@ async def list_blocks(
     x_client_id: Optional[str] = Header(None),
     x_org_id: Optional[str] = Header(None),
 ):
-    """List all blocks."""
+    """List all blocks (filtered by client's read_scopes)."""
     server = get_server()
     client_id, org_id = get_client_and_org(x_client_id, x_org_id)
-    client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
-    user = await asyncio.to_thread(server.user_manager.get_admin_user)
-    return await asyncio.to_thread(server.block_manager.get_blocks, user=user, label=label)
+    client = server.client_manager.get_client_by_id(client_id)
+    user = server.user_manager.get_admin_user()
+    return server.block_manager.get_blocks(
+        user=user,
+        label=label,
+        any_scopes=client.read_scopes,
+        auto_create_from_default=False,
+    )
 
 
 @router.get("/blocks/{block_id}", response_model=Block)
@@ -1423,7 +1467,7 @@ async def delete_user(user_id: str):
     server = get_server()
 
     try:
-        await asyncio.to_thread(server.user_manager.delete_user_by_id, user_id)
+        await server.user_manager.delete_user_by_id(user_id)
         return {"message": f"User {user_id} soft deleted successfully"}
     except Exception as e:
         error_msg = str(e)
@@ -1458,7 +1502,7 @@ async def delete_user_memories(user_id: str):
     server = get_server()
 
     try:
-        await asyncio.to_thread(server.user_manager.delete_memories_by_user_id, user_id)
+        await server.user_manager.delete_memories_by_user_id(user_id)
         return {
             "message": f"All memories for user {user_id} hard deleted successfully",
             "preserved": ["user"],
@@ -1514,7 +1558,8 @@ class CreateOrGetClientRequest(BaseModel):
     client_id: Optional[str] = None
     name: Optional[str] = None
     org_id: Optional[str] = None
-    scope: Optional[str] = "read_write"
+    write_scope: Optional[str] = None
+    read_scopes: List[str] = Field(default_factory=list)
     status: Optional[str] = "active"
 
 
@@ -1567,7 +1612,8 @@ async def create_or_get_client(
             name=request.name or client_id,
             organization_id=org_id,
             status=request.status or "active",
-            scope=request.scope or "read_write",
+            write_scope=request.write_scope,
+            read_scopes=request.read_scopes,
         ),
     )
     logger.info("Created new client: %s", client_id)
@@ -1672,7 +1718,7 @@ async def delete_client(client_id: str):
     server = get_server()
 
     try:
-        await asyncio.to_thread(server.client_manager.delete_client_by_id, client_id)
+        await server.client_manager.delete_client_by_id(client_id)
         return {"message": f"Client {client_id} soft deleted successfully"}
     except Exception as e:
         error_msg = str(e)
@@ -1712,7 +1758,7 @@ async def delete_client_memories(client_id: str):
     server = get_server()
 
     try:
-        await asyncio.to_thread(server.client_manager.delete_memories_by_client_id, client_id)
+        await server.client_manager.delete_memories_by_client_id(client_id)
         return {
             "message": f"All memories for client {client_id} hard deleted successfully",
             "preserved": ["client", "agents", "tools"],
@@ -1893,7 +1939,7 @@ class InitializeMetaAgentRequest(BaseModel):
     update_agents: Optional[bool] = False
 
 
-@router.post("/agents/meta/initialize", response_model=AgentState)
+@router.post("/agents/meta/initialize", response_model=Optional[AgentState])
 async def initialize_meta_agent(
     request: InitializeMetaAgentRequest,
     x_client_id: Optional[str] = Header(None),
@@ -1903,10 +1949,15 @@ async def initialize_meta_agent(
     Initialize a meta agent with configuration.
 
     This creates a meta memory agent that manages specialized memory agents.
+    Returns null if the client has no write_scope (read-only clients don't need agents).
     """
     server = get_server()
     client_id, org_id = get_client_and_org(x_client_id, x_org_id)
     client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
+
+    # Read-only clients (no write_scope) don't create agents — return null
+    if not client.write_scope:
+        return None
 
     # Extract config components
     config = request.config
@@ -1927,7 +1978,7 @@ async def initialize_meta_agent(
             create_params["system_prompts"] = meta_config["system_prompts"]
 
     # Check if meta agent already exists for this client
-    existing_meta_agents = await asyncio.to_thread(server.agent_manager.list_agents, actor=client, limit=1000)
+    existing_meta_agents = await server.agent_manager.list_agents(actor=client, limit=1000)
 
     assert len(existing_meta_agents) <= 1, "Only one meta agent can be created per client"
 
@@ -2012,7 +2063,7 @@ async def add_memory(
             )
 
     # Get the meta agent by ID
-    meta_agent = await server.agent_manager.aget_agent_by_id(request.meta_agent_id, actor=client)
+    meta_agent = await server.agent_manager.get_agent_by_id(request.meta_agent_id, actor=client)
 
     # If user_id is not provided, use the admin user for this client
     user_id = request.user_id
@@ -2060,8 +2111,11 @@ async def add_memory(
         # Create new filter_tags if not provided
         filter_tags = {}
 
-    # Add or update the "scope" key with the client's scope
-    filter_tags["scope"] = client.scope
+    # Add or update the "scope" key with the client's write_scope for memory creation
+    # Memories are written with the client's write_scope
+    if client.write_scope is None:
+        raise HTTPException(status_code=403, detail="Client has no write_scope - cannot create memories")
+    filter_tags["scope"] = client.write_scope
 
     # Queue for async processing instead of synchronous execution
     # Note: actor is Client for org-level access control
@@ -2331,28 +2385,37 @@ def retrieve_memories_by_keywords(
         logger.error("Error retrieving knowledge vault items: %s", e)
         memories["knowledge_vault"] = {"total_count": 0, "items": []}
 
-    # Get core memory blocks
+    # Get core memory blocks (filtered by client's read_scopes, grouped by scope)
     try:
         block_manager = server.block_manager
 
-        # Get all blocks for the user (these are the Human and Persona blocks)
-        # Note: blocks are user-scoped, not client-scoped
-        blocks = block_manager.get_blocks(user=user)
+        blocks = block_manager.get_blocks(
+            user=user,
+            any_scopes=client.read_scopes,
+            auto_create_from_default=False,
+        )
 
-        memories["core"] = {
-            "total_count": len(blocks),
-            "items": [
+        # Group blocks by scope
+        scopes_dict: Dict[str, list] = {}
+        for block in blocks:
+            scope = (block.filter_tags or {}).get("scope", "default")
+            if scope not in scopes_dict:
+                scopes_dict[scope] = []
+            scopes_dict[scope].append(
                 {
                     "id": block.id,
                     "label": block.label,
                     "value": block.value,
                 }
-                for block in blocks
-            ],
+            )
+
+        memories["core"] = {
+            "total_count": len(blocks),
+            "scopes": {scope: {"items": items} for scope, items in scopes_dict.items()},
         }
     except Exception as e:
         logger.error("Error retrieving core memory blocks: %s", e)
-        memories["core"] = {"total_count": 0, "items": []}
+        memories["core"] = {"total_count": 0, "scopes": {}}
 
     return memories
 
@@ -2381,7 +2444,7 @@ async def retrieve_memory_with_conversation(
         user_id = ClientAuthManager.get_admin_user_id_for_client(client.id)
         logger.debug("No user_id provided, using admin user: %s", user_id)
 
-    # Add client scope to filter_tags (create if not provided)
+    # Add client read_scopes to filter_tags for memory retrieval
     if request.filter_tags is not None:
         # Create a copy to avoid modifying the original request
         filter_tags = dict(request.filter_tags)
@@ -2389,11 +2452,11 @@ async def retrieve_memory_with_conversation(
         # Create new filter_tags if not provided
         filter_tags = {}
 
-    # Add or update the "scope" key with the client's scope
-    filter_tags["scope"] = client.scope
+    # Add read_scopes for filtering - memories are readable if scope IN client.read_scopes
+    filter_tags["read_scopes"] = client.read_scopes
 
     # Get all agents for this client (automatically filtered by client via apply_access_predicate)
-    all_agents = await asyncio.to_thread(server.agent_manager.list_agents, actor=client, limit=1000)
+    all_agents = await server.agent_manager.list_agents(actor=client, limit=1000)
 
     if not all_agents:
         return {
@@ -2567,16 +2630,16 @@ async def retrieve_memory_with_topic(
                 "memories": {},
             }
 
-    # Add client scope to filter_tags (create if not provided)
+    # Add client read_scopes to filter_tags for memory retrieval
     if parsed_filter_tags is None:
         # Create new filter_tags if not provided
         parsed_filter_tags = {}
 
-    # Add or update the "scope" key with the client's scope
-    parsed_filter_tags["scope"] = client.scope
+    # Add read_scopes for filtering - memories are readable if scope IN client.read_scopes
+    parsed_filter_tags["read_scopes"] = client.read_scopes
 
     # Get all agents for this client (automatically filtered by client via apply_access_predicate)
-    all_agents = await asyncio.to_thread(server.agent_manager.list_agents, actor=client, limit=1000)
+    all_agents = await server.agent_manager.list_agents(actor=client, limit=1000)
 
     if not all_agents:
         return {
@@ -2708,16 +2771,8 @@ async def search_memory(
                 detail="Authentication required. Provide either Authorization (Bearer JWT) or X-API-Key header, or x-client-id and x-org-id headers.",
             )
 
-    # If user_id is not provided, use the admin user for this client
-    if not user_id:
-        from mirix.services.admin_user_manager import ClientAuthManager
-
-        user_id = ClientAuthManager.get_admin_user_id_for_client(client.id)
-        logger.debug("No user_id provided, using admin user: %s", user_id)
-
-    # Get all agents for this client (automatically filtered by client via apply_access_predicate)
-    all_agents = await asyncio.to_thread(server.agent_manager.list_agents, actor=client, limit=1000)
-
+    # Get all agents for this client (used for search config; required for all code paths)
+    all_agents = await server.agent_manager.list_agents(actor=client, limit=1000)
     if not all_agents:
         return {
             "success": False,
@@ -2726,16 +2781,34 @@ async def search_memory(
             "results": [],
             "count": 0,
         }
-
     agent_state = all_agents[0]
 
-    # Get timezone from user record (if exists)
+    # If user_id is not provided, use the admin user for this client
+    if not user_id:
+        from mirix.services.admin_user_manager import ClientAuthManager
+
+        user_id = ClientAuthManager.get_admin_user_id_for_client(client.id)
+        logger.debug("No user_id provided, using admin user: %s", user_id)
+
+    # Get timezone from user record (if exists). Fallback to admin user so search has valid user.organization_id.
     user = None
     try:
         user = await asyncio.to_thread(server.user_manager.get_user_by_id, user_id)
         timezone_str = user.timezone
-    except:
+    except Exception:
         timezone_str = "UTC"
+        try:
+            from mirix.services.admin_user_manager import ClientAuthManager
+
+            admin_id = ClientAuthManager.get_admin_user_id_for_client(client.id)
+            user = await asyncio.to_thread(server.user_manager.get_user_by_id, admin_id)
+        except Exception:
+            pass
+    if user is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"User {user_id} not found and could not resolve fallback user for memory search.",
+        )
 
     # Parse filter_tags from JSON string to dict
     parsed_filter_tags = None
@@ -2751,12 +2824,12 @@ async def search_memory(
                 "count": 0,
             }
 
-    # Add client scope to filter_tags (create if not provided)
+    # Add client read_scopes to filter_tags for memory retrieval
     if parsed_filter_tags is None:
         parsed_filter_tags = {}
 
-    # Add or update the "scope" key with the client's scope
-    parsed_filter_tags["scope"] = client.scope
+    # Add read_scopes for filtering - memories are readable if scope IN client.read_scopes
+    parsed_filter_tags["read_scopes"] = client.read_scopes
 
     # Parse temporal filtering parameters
     parsed_start_date: Optional[datetime] = None
@@ -2810,13 +2883,10 @@ async def search_memory(
 
     # If searching all memory types, run searches concurrently for better performance
     if memory_type == "all":
-        import asyncio
-
         # Define async wrappers for each manager call
         async def search_episodic():
             try:
-                memories = await asyncio.to_thread(
-                    server.episodic_memory_manager.list_episodic_memory,
+                memories = await server.episodic_memory_manager.list_episodic_memory(
                     agent_state=agent_state,
                     user=user,
                     query=query,
@@ -2848,8 +2918,7 @@ async def search_memory(
 
         async def search_resource():
             try:
-                memories = await asyncio.to_thread(
-                    server.resource_memory_manager.list_resources,
+                memories = await server.resource_memory_manager.list_resources(
                     agent_state=agent_state,
                     user=user,
                     query=query,
@@ -2882,8 +2951,7 @@ async def search_memory(
 
         async def search_procedural():
             try:
-                memories = await asyncio.to_thread(
-                    server.procedural_memory_manager.list_procedures,
+                memories = await server.procedural_memory_manager.list_procedures(
                     agent_state=agent_state,
                     user=user,
                     query=query,
@@ -2911,8 +2979,7 @@ async def search_memory(
 
         async def search_knowledge():
             try:
-                memories = await asyncio.to_thread(
-                    server.knowledge_vault_manager.list_knowledge,
+                memories = await server.knowledge_vault_manager.list_knowledge(
                     agent_state=agent_state,
                     user=user,
                     query=query,
@@ -2942,8 +3009,7 @@ async def search_memory(
 
         async def search_semantic():
             try:
-                memories = await asyncio.to_thread(
-                    server.semantic_memory_manager.list_semantic_items,
+                memories = await server.semantic_memory_manager.list_semantic_items(
                     agent_state=agent_state,
                     user=user,
                     query=query,
@@ -2984,7 +3050,7 @@ async def search_memory(
     # Single memory type searches (run serially as before)
     elif memory_type == "episodic":
         try:
-            episodic_memories = server.episodic_memory_manager.list_episodic_memory(
+            episodic_memories = await server.episodic_memory_manager.list_episodic_memory(
                 agent_state=agent_state,
                 user=user,
                 query=query,
@@ -3018,7 +3084,7 @@ async def search_memory(
     # Search resource memories
     elif memory_type == "resource":
         try:
-            resource_memories = server.resource_memory_manager.list_resources(
+            resource_memories = await server.resource_memory_manager.list_resources(
                 agent_state=agent_state,
                 user=user,
                 query=query,
@@ -3053,7 +3119,7 @@ async def search_memory(
     # Search procedural memories
     elif memory_type == "procedural":
         try:
-            procedural_memories = server.procedural_memory_manager.list_procedures(
+            procedural_memories = await server.procedural_memory_manager.list_procedures(
                 agent_state=agent_state,
                 user=user,
                 query=query,
@@ -3083,7 +3149,7 @@ async def search_memory(
     # Search knowledge vault
     elif memory_type == "knowledge_vault":
         try:
-            knowledge_vault_memories = server.knowledge_vault_manager.list_knowledge(
+            knowledge_vault_memories = await server.knowledge_vault_manager.list_knowledge(
                 agent_state=agent_state,
                 user=user,
                 query=query,
@@ -3115,7 +3181,7 @@ async def search_memory(
     # Search semantic memories
     elif memory_type == "semantic":
         try:
-            semantic_memories = server.semantic_memory_manager.list_semantic_items(
+            semantic_memories = await server.semantic_memory_manager.list_semantic_items(
                 agent_state=agent_state,
                 user=user,
                 query=query,
@@ -3237,15 +3303,15 @@ async def search_memory_all_users(
     else:
         filter_tags_dict = {}
 
-    # Add client scope to filter_tags (same pattern as retrieve_with_conversation)
-    # This filters memories where memory.filter_tags["scope"] == client.scope
-    filter_tags_dict["scope"] = client.scope
+    # Add client read_scopes to filter_tags for memory retrieval
+    # This filters memories where memory.filter_tags["scope"] IN client.read_scopes
+    filter_tags_dict["read_scopes"] = client.read_scopes
 
     logger.info(
-        "Cross-user search: client=%s, org=%s, client_scope=%s, filter_tags=%s, similarity_threshold=%s",
+        "Cross-user search: client=%s, org=%s, read_scopes=%s, filter_tags=%s, similarity_threshold=%s",
         effective_client_id,
         effective_org_id,
-        client.scope,
+        client.read_scopes,
         filter_tags_dict,
         similarity_threshold,
     )
@@ -3273,7 +3339,7 @@ async def search_memory_all_users(
             logger.warning("Invalid end_date format: %s", e)
 
     # Get agents for this client
-    all_agents = await asyncio.to_thread(server.agent_manager.list_agents, actor=client, limit=1000)
+    all_agents = await server.agent_manager.list_agents(actor=client, limit=1000)
     if not all_agents:
         return {
             "success": False,
@@ -3318,8 +3384,7 @@ async def search_memory_all_users(
         # Define async wrappers for each manager call
         async def search_episodic():
             try:
-                memories = await asyncio.to_thread(
-                    server.episodic_memory_manager.list_episodic_memory_by_org,
+                memories = await server.episodic_memory_manager.list_episodic_memory_by_org(
                     agent_state=agent_state,
                     organization_id=effective_org_id,
                     query=query,
@@ -3352,12 +3417,11 @@ async def search_memory_all_users(
 
         async def search_resource():
             try:
-                memories = await asyncio.to_thread(
-                    server.resource_memory_manager.list_resources_by_org,
+                memories = await server.resource_memory_manager.list_resources_by_org(
                     agent_state=agent_state,
                     organization_id=effective_org_id,
                     query=query,
-                    embedded_text=(embedded_text if search_method == "embedding" and query else None),
+                    embedded_text=(embedded_text_padded if search_method == "embedding" and query else None),
                     search_field=(
                         search_field
                         if search_field != "null"
@@ -3387,12 +3451,11 @@ async def search_memory_all_users(
 
         async def search_procedural():
             try:
-                memories = await asyncio.to_thread(
-                    server.procedural_memory_manager.list_procedures_by_org,
+                memories = await server.procedural_memory_manager.list_procedures_by_org(
                     agent_state=agent_state,
                     organization_id=effective_org_id,
                     query=query,
-                    embedded_text=(embedded_text if search_method == "embedding" and query else None),
+                    embedded_text=(embedded_text_padded if search_method == "embedding" and query else None),
                     search_field=search_field if search_field != "null" else "summary",
                     search_method=search_method,
                     limit=limit,
@@ -3417,12 +3480,11 @@ async def search_memory_all_users(
 
         async def search_knowledge():
             try:
-                memories = await asyncio.to_thread(
-                    server.knowledge_vault_manager.list_knowledge_by_org,
+                memories = await server.knowledge_vault_manager.list_knowledge_by_org(
                     agent_state=agent_state,
                     organization_id=effective_org_id,
                     query=query,
-                    embedded_text=(embedded_text if search_method == "embedding" and query else None),
+                    embedded_text=(embedded_text_padded if search_method == "embedding" and query else None),
                     search_field=search_field if search_field != "null" else "caption",
                     search_method=search_method,
                     limit=limit,
@@ -3449,12 +3511,11 @@ async def search_memory_all_users(
 
         async def search_semantic():
             try:
-                memories = await asyncio.to_thread(
-                    server.semantic_memory_manager.list_semantic_items_by_org,
+                memories = await server.semantic_memory_manager.list_semantic_items_by_org(
                     agent_state=agent_state,
                     organization_id=effective_org_id,
                     query=query,
-                    embedded_text=(embedded_text if search_method == "embedding" and query else None),
+                    embedded_text=(embedded_text_padded if search_method == "embedding" and query else None),
                     search_field=search_field if search_field != "null" else "summary",
                     search_method=search_method,
                     limit=limit,
@@ -3492,7 +3553,7 @@ async def search_memory_all_users(
     # Single memory type searches (run serially as before)
     elif memory_type == "episodic":
         try:
-            episodic_memories = server.episodic_memory_manager.list_episodic_memory_by_org(
+            episodic_memories = await server.episodic_memory_manager.list_episodic_memory_by_org(
                 agent_state=agent_state,
                 organization_id=effective_org_id,
                 query=query,
@@ -3527,11 +3588,11 @@ async def search_memory_all_users(
     # Search resource memories across organization
     elif memory_type == "resource":
         try:
-            resource_memories = server.resource_memory_manager.list_resources_by_org(
+            resource_memories = await server.resource_memory_manager.list_resources_by_org(
                 agent_state=agent_state,
                 organization_id=effective_org_id,
                 query=query,
-                embedded_text=(embedded_text if search_method == "embedding" and query else None),
+                embedded_text=(embedded_text_padded if search_method == "embedding" and query else None),
                 search_field=(
                     search_field
                     if search_field != "null"
@@ -3563,11 +3624,11 @@ async def search_memory_all_users(
     # Search procedural memories across organization
     elif memory_type == "procedural":
         try:
-            procedural_memories = server.procedural_memory_manager.list_procedures_by_org(
+            procedural_memories = await server.procedural_memory_manager.list_procedures_by_org(
                 agent_state=agent_state,
                 organization_id=effective_org_id,
                 query=query,
-                embedded_text=(embedded_text if search_method == "embedding" and query else None),
+                embedded_text=(embedded_text_padded if search_method == "embedding" and query else None),
                 search_field=search_field if search_field != "null" else "summary",
                 search_method=search_method,
                 limit=limit,
@@ -3594,11 +3655,11 @@ async def search_memory_all_users(
     # Search knowledge vault across organization
     elif memory_type == "knowledge_vault":
         try:
-            knowledge_vault_memories = server.knowledge_vault_manager.list_knowledge_by_org(
+            knowledge_vault_memories = await server.knowledge_vault_manager.list_knowledge_by_org(
                 agent_state=agent_state,
                 organization_id=effective_org_id,
                 query=query,
-                embedded_text=(embedded_text if search_method == "embedding" and query else None),
+                embedded_text=(embedded_text_padded if search_method == "embedding" and query else None),
                 search_field=search_field if search_field != "null" else "caption",
                 search_method=search_method,
                 limit=limit,
@@ -3627,11 +3688,11 @@ async def search_memory_all_users(
     # Search semantic memories across organization
     elif memory_type == "semantic":
         try:
-            semantic_memories = server.semantic_memory_manager.list_semantic_items_by_org(
+            semantic_memories = await server.semantic_memory_manager.list_semantic_items_by_org(
                 agent_state=agent_state,
                 organization_id=effective_org_id,
                 query=query,
-                embedded_text=(embedded_text if search_method == "embedding" and query else None),
+                embedded_text=(embedded_text_padded if search_method == "embedding" and query else None),
                 search_field=search_field if search_field != "null" else "summary",
                 search_method=search_method,
                 limit=limit,
@@ -3674,7 +3735,7 @@ async def search_memory_all_users(
         "count": len(all_results),
         "client_id": effective_client_id,
         "organization_id": effective_org_id,
-        "client_scope": client.scope,
+        "read_scopes": client.read_scopes,
         "filter_tags": filter_tags_dict,
     }
 
@@ -3732,7 +3793,7 @@ async def list_memory_components(
     limit = max(1, min(limit, 200))  # guardrails
 
     # Need an agent state for memory manager configuration
-    agents = await asyncio.to_thread(server.agent_manager.list_agents, actor=client, limit=1)
+    agents = await server.agent_manager.list_agents(actor=client, limit=1)
     if not agents:
         raise HTTPException(status_code=404, detail="No agents found for this client")
     agent_state = agents[0]
@@ -3741,7 +3802,7 @@ async def list_memory_components(
     memories: Dict[str, Any] = {}
 
     if fetch_all or memory_type == "episodic":
-        episodic_items = server.episodic_memory_manager.list_episodic_memory(
+        episodic_items = await server.episodic_memory_manager.list_episodic_memory(
             agent_state=agent_state,
             user=user,
             limit=limit,
@@ -3765,7 +3826,7 @@ async def list_memory_components(
         }
 
     if fetch_all or memory_type == "semantic":
-        semantic_items = server.semantic_memory_manager.list_semantic_items(
+        semantic_items = await server.semantic_memory_manager.list_semantic_items(
             agent_state=agent_state,
             user=user,
             query="",
@@ -3791,7 +3852,7 @@ async def list_memory_components(
         }
 
     if fetch_all or memory_type == "procedural":
-        procedural_items = server.procedural_memory_manager.list_procedures(
+        procedural_items = await server.procedural_memory_manager.list_procedures(
             agent_state=agent_state,
             user=user,
             query="",
@@ -3816,7 +3877,7 @@ async def list_memory_components(
         }
 
     if fetch_all or memory_type == "resource":
-        resource_items = server.resource_memory_manager.list_resources(
+        resource_items = await server.resource_memory_manager.list_resources(
             agent_state=agent_state,
             user=user,
             query="",
@@ -3842,7 +3903,7 @@ async def list_memory_components(
         }
 
     if fetch_all or memory_type == "knowledge_vault":
-        knowledge_items = server.knowledge_vault_manager.list_knowledge(
+        knowledge_items = await server.knowledge_vault_manager.list_knowledge(
             agent_state=agent_state,
             user=user,
             query="",
@@ -3869,17 +3930,29 @@ async def list_memory_components(
         }
 
     if fetch_all or memory_type == "core":
-        blocks = server.block_manager.get_blocks(user=user)
-        memories["core"] = {
-            "total_count": len(blocks),
-            "items": [
+        blocks = server.block_manager.get_blocks(
+            user=user,
+            any_scopes=client.read_scopes,
+            auto_create_from_default=False,
+        )
+
+        # Group blocks by scope
+        scopes_dict: Dict[str, list] = {}
+        for block in blocks[:limit]:
+            scope = (block.filter_tags or {}).get("scope", "default")
+            if scope not in scopes_dict:
+                scopes_dict[scope] = []
+            scopes_dict[scope].append(
                 {
                     "id": block.id,
                     "label": block.label,
                     "value": block.value,
                 }
-                for block in blocks[:limit]
-            ],
+            )
+
+        memories["core"] = {
+            "total_count": len(blocks),
+            "scopes": {scope: {"items": items} for scope, items in scopes_dict.items()},
         }
 
     return {
@@ -4283,7 +4356,7 @@ async def create_raw_memory(
         raise HTTPException(status_code=401, detail="Client or client_id required")
 
     # Get agent_state for embedding generation (required)
-    agents = await asyncio.to_thread(server.agent_manager.list_agents, actor=client, limit=1)
+    agents = await server.agent_manager.list_agents(actor=client, limit=1)
     agent_state = agents[0] if agents else None
 
     if not agent_state:
@@ -4475,7 +4548,7 @@ async def update_raw_memory(
             raise HTTPException(status_code=404, detail=f"User {user_id} not found")
 
     # Get agent_state for embedding generation (required)
-    agents = await asyncio.to_thread(server.agent_manager.list_agents, actor=client, limit=1)
+    agents = await server.agent_manager.list_agents(actor=client, limit=1)
     agent_state = agents[0] if agents else None
 
     if not agent_state:
@@ -4631,9 +4704,10 @@ async def search_raw_memory(
         except NoResultFound:
             raise HTTPException(status_code=404, detail=f"User {user_id} not found")
 
-    # Process filter_tags: always set scope to client scope (overwrites any user-provided scope)
+    # Process filter_tags: use client's read_scopes for filtering
     filter_tags = dict[str, Any](request.filter_tags) if request.filter_tags is not None else {}
-    filter_tags["scope"] = client.scope
+    # Add read_scopes for filtering - memories are readable if scope IN client.read_scopes
+    filter_tags["read_scopes"] = client.read_scopes
 
     # Parse time_range from request, converting to UTC and stripping timezone for DB comparison
     time_range_dict = None
@@ -4949,7 +5023,8 @@ class DashboardClientResponse(BaseModel):
     id: str
     name: str
     email: Optional[str]
-    scope: str
+    write_scope: Optional[str]
+    read_scopes: List[str]
     status: str
     admin_user_id: str  # Admin user for memory operations
     created_at: Optional[datetime]
@@ -5060,7 +5135,7 @@ async def dashboard_register(request: DashboardRegisterRequest):
             name=request.name,
             email=request.email,
             password=request.password,
-            scope="admin",  # First/dashboard users get admin scope
+            write_scope="admin",  # First/dashboard users get admin scope
         )
 
         # Generate token
@@ -5074,7 +5149,8 @@ async def dashboard_register(request: DashboardRegisterRequest):
                 id=client.id,
                 name=client.name,
                 email=client.email,
-                scope=client.scope,
+                write_scope=client.write_scope,
+                read_scopes=client.read_scopes,
                 status=client.status,
                 admin_user_id=ClientAuthManager.get_admin_user_id_for_client(client.id),
                 created_at=client.created_at,
@@ -5111,7 +5187,8 @@ async def dashboard_login(request: DashboardLoginRequest):
             id=client.id,
             name=client.name,
             email=client.email,
-            scope=client.scope,
+            write_scope=client.write_scope,
+            read_scopes=client.read_scopes,
             status=client.status,
             admin_user_id=ClientAuthManager.get_admin_user_id_for_client(client.id),
             created_at=client.created_at,
@@ -5139,7 +5216,8 @@ async def dashboard_get_current_client(authorization: Optional[str] = Header(Non
         id=client.id,
         name=client.name,
         email=client.email,
-        scope=client.scope,
+        write_scope=client.write_scope,
+        read_scopes=client.read_scopes,
         status=client.status,
         admin_user_id=ClientAuthManager.get_admin_user_id_for_client(client.id),
         created_at=client.created_at,
@@ -5174,7 +5252,8 @@ async def list_dashboard_clients(
             id=c.id,
             name=c.name,
             email=c.email,
-            scope=c.scope,
+            write_scope=c.write_scope,
+            read_scopes=c.read_scopes,
             status=c.status,
             admin_user_id=ClientAuthManager.get_admin_user_id_for_client(c.id),
             created_at=c.created_at,
