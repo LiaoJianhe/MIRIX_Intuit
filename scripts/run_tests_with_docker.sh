@@ -162,8 +162,8 @@ if [ "$START_SERVER" = true ]; then
         exit 1
     fi
     
-    # Start server container
-    $COMPOSE_CMD -f "$COMPOSE_FILE" up -d test_server
+    # Build and start server container (always rebuild to pick up code changes)
+    $COMPOSE_CMD -f "$COMPOSE_FILE" up -d --build test_server
     
     # Wait for server health check
     echo -e "${YELLOW}Waiting for server...${NC}"
