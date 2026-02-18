@@ -4,6 +4,7 @@ This provides HTTP endpoints that wrap the SyncServer functionality,
 allowing MirixClient instances to communicate with a cloud-hosted server.
 """
 
+import asyncio
 import copy
 import functools
 import json
@@ -661,11 +662,12 @@ async def list_agents(
     """List all agents for the authenticated user."""
     server = get_server()
     client_id, org_id = get_client_and_org(x_client_id, x_org_id)
-    client = server.client_manager.get_client_by_id(client_id)
+    client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
 
     tags_list = tags.split(",") if tags else None
 
-    return server.agent_manager.list_agents(
+    return await asyncio.to_thread(
+        server.agent_manager.list_agents,
         actor=client,
         tags=tags_list,
         query_text=query_text,
@@ -704,12 +706,12 @@ async def create_agent(
     """Create a new agent."""
     server = get_server()
     client_id, org_id = get_client_and_org(x_client_id, x_org_id)
-    client = server.client_manager.get_client_by_id(client_id)
+    client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
 
     # Create memory blocks if provided
     if request.memory:
         for block in request.memory.get_blocks():
-            server.block_manager.create_or_update_block(block, actor=client)
+            await asyncio.to_thread(server.block_manager.create_or_update_block, block, actor=client)
 
     # Prepare block IDs
     block_ids = request.block_ids or []
@@ -736,9 +738,9 @@ async def create_agent(
     if request.name:
         create_params["name"] = request.name
 
-    agent_state = server.create_agent(CreateAgent(**create_params), actor=client)
+    agent_state = await asyncio.to_thread(server.create_agent, CreateAgent(**create_params), actor=client)
 
-    return server.agent_manager.get_agent_by_id(agent_state.id, actor=client)
+    return await server.agent_manager.aget_agent_by_id(agent_state.id, actor=client)
 
 
 @router.get("/agents/{agent_id}", response_model=AgentState)
@@ -752,10 +754,10 @@ async def get_agent(
 
     server = get_server()
     client_id, org_id = get_client_and_org(x_client_id, x_org_id)
-    client = server.client_manager.get_client_by_id(client_id)
+    client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
 
     try:
-        return server.agent_manager.get_agent_by_id(agent_id, actor=client)
+        return await server.agent_manager.aget_agent_by_id(agent_id, actor=client)
     except NoResultFound as e:
         raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found or not accessible")
 
@@ -769,8 +771,8 @@ async def delete_agent(
     """Delete an agent."""
     server = get_server()
     client_id, org_id = get_client_and_org(x_client_id, x_org_id)
-    client = server.client_manager.get_client_by_id(client_id)
-    server.agent_manager.delete_agent(agent_id, actor=client)
+    client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
+    await asyncio.to_thread(server.agent_manager.delete_agent, agent_id, actor=client)
     return {"status": "success", "message": f"Agent {agent_id} deleted"}
 
 
@@ -805,7 +807,7 @@ async def update_agent(
     """Update an agent."""
     server = get_server()
     client_id, org_id = get_client_and_org(x_client_id, x_org_id)
-    client = server.client_manager.get_client_by_id(client_id)
+    client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
 
     # TODO: Implement update_agent in server
     raise HTTPException(status_code=501, detail="Update agent not yet implemented")
@@ -849,17 +851,19 @@ async def update_agent_system_prompt_by_name(
     """
     server = get_server()
     client_id, org_id = get_client_and_org(x_client_id, x_org_id)
-    client = server.client_manager.get_client_by_id(client_id)
+    client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
 
     # List all top-level agents for this client
-    top_level_agents = server.agent_manager.list_agents(actor=client, limit=1000)
+    top_level_agents = await asyncio.to_thread(server.agent_manager.list_agents, actor=client, limit=1000)
 
     # Also get sub-agents (children of meta agent)
     all_agents = list(top_level_agents)
     for agent in top_level_agents:
         if agent.name == "meta_memory_agent":
             # Get sub-agents
-            sub_agents = server.agent_manager.list_agents(actor=client, parent_id=agent.id, limit=1000)
+            sub_agents = await asyncio.to_thread(
+                server.agent_manager.list_agents, actor=client, parent_id=agent.id, limit=1000
+            )
             all_agents.extend(sub_agents)
             break
 
@@ -911,8 +915,9 @@ async def update_agent_system_prompt_by_name(
         raise HTTPException(status_code=404, detail=error_detail)
 
     # Call the update_agent_system_prompt endpoint logic
-    updated_agent = server.agent_manager.update_system_prompt(
-        agent_id=matching_agent.id, system_prompt=request.system_prompt, actor=client
+    updated_agent = await asyncio.to_thread(
+        server.agent_manager.update_system_prompt,
+        agent_id=matching_agent.id, system_prompt=request.system_prompt, actor=client,
     )
 
     return updated_agent
@@ -952,10 +957,11 @@ async def update_agent_system_prompt(
     """
     server = get_server()
     client_id, org_id = get_client_and_org(x_client_id, x_org_id)
-    client = server.client_manager.get_client_by_id(client_id)
+    client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
 
-    updated_agent = server.agent_manager.update_system_prompt(
-        agent_id=agent_id, system_prompt=request.system_prompt, actor=client
+    updated_agent = await asyncio.to_thread(
+        server.agent_manager.update_system_prompt,
+        agent_id=agent_id, system_prompt=request.system_prompt, actor=client,
     )
 
     return updated_agent
@@ -1004,7 +1010,7 @@ async def send_message_to_agent(
     """
     server = get_server()
     client_id, org_id = get_client_and_org(x_client_id, x_org_id)
-    client = server.client_manager.get_client_by_id(client_id)
+    client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
 
     try:
         # Prepare the message
@@ -1052,8 +1058,8 @@ async def list_tools(
     """List all tools."""
     server = get_server()
     client_id, org_id = get_client_and_org(x_client_id, x_org_id)
-    client = server.client_manager.get_client_by_id(client_id)
-    return server.tool_manager.list_tools(cursor=cursor, limit=limit, actor=client)
+    client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
+    return await asyncio.to_thread(server.tool_manager.list_tools, cursor=cursor, limit=limit, actor=client)
 
 
 @router.get("/tools/{tool_id}", response_model=Tool)
@@ -1065,8 +1071,8 @@ async def get_tool(
     """Get a tool by ID."""
     server = get_server()
     client_id, org_id = get_client_and_org(x_client_id, x_org_id)
-    client = server.client_manager.get_client_by_id(client_id)
-    return server.tool_manager.get_tool_by_id(tool_id, actor=client)
+    client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
+    return await asyncio.to_thread(server.tool_manager.get_tool_by_id, tool_id, actor=client)
 
 
 @router.post("/tools", response_model=Tool)
@@ -1078,8 +1084,8 @@ async def create_tool(
     """Create a new tool."""
     server = get_server()
     client_id, org_id = get_client_and_org(x_client_id, x_org_id)
-    client = server.client_manager.get_client_by_id(client_id)
-    return server.tool_manager.create_tool(tool, actor=client)
+    client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
+    return await asyncio.to_thread(server.tool_manager.create_tool, tool, actor=client)
 
 
 @router.delete("/tools/{tool_id}")
@@ -1091,8 +1097,8 @@ async def delete_tool(
     """Delete a tool."""
     server = get_server()
     client_id, org_id = get_client_and_org(x_client_id, x_org_id)
-    client = server.client_manager.get_client_by_id(client_id)
-    server.tool_manager.delete_tool_by_id(tool_id, actor=client)
+    client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
+    await asyncio.to_thread(server.tool_manager.delete_tool_by_id, tool_id, actor=client)
     return {"status": "success", "message": f"Tool {tool_id} deleted"}
 
 
@@ -1110,10 +1116,9 @@ async def list_blocks(
     """List all blocks."""
     server = get_server()
     client_id, org_id = get_client_and_org(x_client_id, x_org_id)
-    client = server.client_manager.get_client_by_id(client_id)
-    # Get default user for block queries (blocks are user-scoped, not client-scoped)
-    user = server.user_manager.get_admin_user()
-    return server.block_manager.get_blocks(user=user, label=label)
+    client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
+    user = await asyncio.to_thread(server.user_manager.get_admin_user)
+    return await asyncio.to_thread(server.block_manager.get_blocks, user=user, label=label)
 
 
 @router.get("/blocks/{block_id}", response_model=Block)
@@ -1123,12 +1128,25 @@ async def get_block(
     x_org_id: Optional[str] = Header(None),
 ):
     """Get a block by ID."""
+    from mirix.database.cache_layer import async_cache_read
+    from mirix.database.cache_provider import get_cache_provider
+
     server = get_server()
     client_id, org_id = get_client_and_org(x_client_id, x_org_id)
-    client = server.client_manager.get_client_by_id(client_id)
-    # Get admin user for block queries (blocks are user-scoped, not client-scoped)
-    user = server.user_manager.get_admin_user()
-    return server.block_manager.get_block_by_id(block_id, user=user)
+    client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
+    user = await asyncio.to_thread(server.user_manager.get_admin_user)
+
+    cache_provider = get_cache_provider()
+    if cache_provider:
+        return await async_cache_read(
+            cache_key=f"{cache_provider.BLOCK_PREFIX}{block_id}",
+            db_fn=lambda: server.block_manager.get_block_by_id(block_id, user=user, use_cache=False),
+            method="hash",
+            ttl=settings.redis_ttl_blocks,
+            model_class=Block,
+            fixups={"value": ""},
+        )
+    return await asyncio.to_thread(server.block_manager.get_block_by_id, block_id, user)
 
 
 @router.post("/blocks", response_model=Block)
@@ -1141,8 +1159,8 @@ async def create_block(
     """Create a block."""
     server = get_server()
     client_id, org_id = get_client_and_org(x_client_id, x_org_id)
-    client = server.client_manager.get_client_by_id(client_id)
-    return server.block_manager.create_or_update_block(block, actor=client, user=user)
+    client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
+    return await asyncio.to_thread(server.block_manager.create_or_update_block, block, actor=client, user=user)
 
 
 @router.delete("/blocks/{block_id}")
@@ -1154,8 +1172,8 @@ async def delete_block(
     """Delete a block."""
     server = get_server()
     client_id, org_id = get_client_and_org(x_client_id, x_org_id)
-    client = server.client_manager.get_client_by_id(client_id)
-    server.block_manager.delete_block(block_id, actor=client)
+    client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
+    await asyncio.to_thread(server.block_manager.delete_block, block_id, actor=client)
     return {"status": "success", "message": f"Block {block_id} deleted"}
 
 
@@ -1198,7 +1216,7 @@ async def list_organizations(
 ):
     """List organizations."""
     server = get_server()
-    return server.organization_manager.list_organizations(cursor=cursor, limit=limit)
+    return await asyncio.to_thread(server.organization_manager.list_organizations, cursor=cursor, limit=limit)
 
 
 @router.post("/organizations", response_model=Organization)
@@ -1209,7 +1227,9 @@ async def create_organization(
 ):
     """Create an organization."""
     server = get_server()
-    return server.organization_manager.create_organization(pydantic_org=Organization(name=name))
+    return await asyncio.to_thread(
+        server.organization_manager.create_organization, pydantic_org=Organization(name=name)
+    )
 
 
 @router.get("/organizations/{org_id}", response_model=Organization)
@@ -1219,12 +1239,23 @@ async def get_organization(
     x_org_id: Optional[str] = Header(None),
 ):
     """Get an organization by ID."""
+    from mirix.database.cache_layer import async_cache_read
+    from mirix.database.cache_provider import get_cache_provider
+
     server = get_server()
+    cache_provider = get_cache_provider()
     try:
-        return server.organization_manager.get_organization_by_id(org_id)
+        if cache_provider:
+            return await async_cache_read(
+                cache_key=f"{cache_provider.ORGANIZATION_PREFIX}{org_id}",
+                db_fn=lambda: server.organization_manager.get_organization_by_id(org_id, use_cache=False),
+                method="hash",
+                ttl=settings.redis_ttl_organizations,
+                model_class=Organization,
+            )
+        return await asyncio.to_thread(server.organization_manager.get_organization_by_id, org_id)
     except Exception:
-        # If organization doesn't exist, return default or create it
-        return server.get_organization_or_default(org_id)
+        return await asyncio.to_thread(server.get_organization_or_default, org_id)
 
 
 class CreateOrGetOrganizationRequest(BaseModel):
@@ -1259,7 +1290,7 @@ async def create_or_get_organization(
 
     try:
         # Try to get existing organization
-        org = server.organization_manager.get_organization_by_id(org_id)
+        org = await asyncio.to_thread(server.organization_manager.get_organization_by_id, org_id)
         if org:
             return org
     except Exception:
@@ -1267,7 +1298,9 @@ async def create_or_get_organization(
 
     # Create new organization if it doesn't exist
     org_create = OrganizationCreate(id=org_id, name=request.name or org_id)
-    org = server.organization_manager.create_organization(pydantic_org=Organization(**org_create.model_dump()))
+    org = await asyncio.to_thread(
+        server.organization_manager.create_organization, pydantic_org=Organization(**org_create.model_dump())
+    )
     logger.debug("Created new organization: %s", org_id)
     return org
 
@@ -1284,8 +1317,20 @@ async def get_user(
     x_org_id: Optional[str] = Header(None),
 ):
     """Get a user by ID."""
+    from mirix.database.cache_layer import async_cache_read
+    from mirix.database.cache_provider import get_cache_provider
+
     server = get_server()
-    return server.user_manager.get_user_by_id(user_id)
+    cache_provider = get_cache_provider()
+    if cache_provider:
+        return await async_cache_read(
+            cache_key=f"{cache_provider.USER_PREFIX}{user_id}",
+            db_fn=lambda: server.user_manager.get_user_by_id(user_id, use_cache=False),
+            method="hash",
+            ttl=settings.redis_ttl_users,
+            model_class=User,
+        )
+    return await asyncio.to_thread(server.user_manager.get_user_by_id, user_id)
 
 
 class CreateOrGetUserRequest(BaseModel):
@@ -1331,7 +1376,7 @@ async def create_or_get_user(
 
     try:
         # Try to get existing user
-        user = server.user_manager.get_user_by_id(user_id)
+        user = await asyncio.to_thread(server.user_manager.get_user_by_id, user_id)
         if user:
             return user
     except Exception:
@@ -1340,7 +1385,8 @@ async def create_or_get_user(
     from mirix.schemas.user import User as PydanticUser
 
     # Create a User object with all required fields (organization-scoped)
-    user = server.user_manager.create_user(
+    user = await asyncio.to_thread(
+        server.user_manager.create_user,
         pydantic_user=PydanticUser(
             id=user_id,
             name=request.name or user_id,
@@ -1373,7 +1419,7 @@ async def delete_user(user_id: str):
     server = get_server()
 
     try:
-        server.user_manager.delete_user_by_id(user_id)
+        await asyncio.to_thread(server.user_manager.delete_user_by_id, user_id)
         return {"message": f"User {user_id} soft deleted successfully"}
     except Exception as e:
         error_msg = str(e)
@@ -1408,7 +1454,7 @@ async def delete_user_memories(user_id: str):
     server = get_server()
 
     try:
-        server.user_manager.delete_memories_by_user_id(user_id)
+        await asyncio.to_thread(server.user_manager.delete_memories_by_user_id, user_id)
         return {
             "message": f"All memories for user {user_id} hard deleted successfully",
             "preserved": ["user"],
@@ -1437,14 +1483,15 @@ async def list_users(
     server = get_server()
 
     # Get client to determine organization
-    client = server.admin_user_manager.get_client_by_id(client_payload["sub"])
+    client = await asyncio.to_thread(server.admin_user_manager.get_client_by_id, client_payload["sub"])
     if not client:
         raise HTTPException(status_code=404, detail="Client not found")
 
     # Use provided organization_id or default to client's organization
     org_id = organization_id or client.organization_id
 
-    users = server.user_manager.list_users(
+    users = await asyncio.to_thread(
+        server.user_manager.list_users,
         cursor=cursor,
         limit=limit,
         organization_id=org_id,
@@ -1492,7 +1539,7 @@ async def create_or_get_client(
 
     try:
         # Try to get existing client
-        client = server.client_manager.get_client_by_id(client_id)
+        client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
 
         if client:
             if fail_if_exists:
@@ -1509,14 +1556,15 @@ async def create_or_get_client(
         pass  # Client doesn't exist, proceed to create
 
     # Create a Client object with all required fields
-    client = server.client_manager.create_client(
+    client = await asyncio.to_thread(
+        server.client_manager.create_client,
         pydantic_client=Client(
             id=client_id,
             name=request.name or client_id,
             organization_id=org_id,
             status=request.status or "active",
             scope=request.scope or "read_write",
-        )
+        ),
     )
     logger.info("Created new client: %s", client_id)
     return JSONResponse(status_code=201, content=client.model_dump(mode="json"))
@@ -1540,7 +1588,9 @@ async def list_clients(
     server = get_server()
     org_id = x_org_id or server.organization_manager.DEFAULT_ORG_ID
 
-    clients = server.client_manager.list_clients(cursor=cursor, limit=limit, organization_id=org_id)
+    clients = await asyncio.to_thread(
+        server.client_manager.list_clients, cursor=cursor, limit=limit, organization_id=org_id
+    )
     return clients
 
 
@@ -1554,16 +1604,29 @@ async def get_client(
 
     **Requires JWT authentication (dashboard only).**
     """
+    from mirix.database.cache_layer import async_cache_read
+    from mirix.database.cache_provider import get_cache_provider
+
     # Require admin JWT authentication
     get_current_admin(authorization)
 
     server = get_server()
-    client = server.client_manager.get_client_by_id(client_id)
+    cache_provider = get_cache_provider()
+    if cache_provider:
+        result = await async_cache_read(
+            cache_key=f"{cache_provider.CLIENT_PREFIX}{client_id}",
+            db_fn=lambda: server.client_manager.get_client_by_id(client_id, use_cache=False),
+            method="hash",
+            ttl=settings.redis_ttl_clients,
+            model_class=Client,
+        )
+    else:
+        result = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
 
-    if not client:
+    if not result:
         raise HTTPException(status_code=404, detail=f"Client {client_id} not found")
 
-    return client
+    return result
 
 
 @router.patch("/clients/{client_id}", response_model=Client)
@@ -1580,7 +1643,7 @@ async def update_client(
     update.id = client_id
 
     try:
-        updated_client = server.client_manager.update_client(update)
+        updated_client = await asyncio.to_thread(server.client_manager.update_client, update)
         return updated_client
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1605,7 +1668,7 @@ async def delete_client(client_id: str):
     server = get_server()
 
     try:
-        server.client_manager.delete_client_by_id(client_id)
+        await asyncio.to_thread(server.client_manager.delete_client_by_id, client_id)
         return {"message": f"Client {client_id} soft deleted successfully"}
     except Exception as e:
         error_msg = str(e)
@@ -1645,7 +1708,7 @@ async def delete_client_memories(client_id: str):
     server = get_server()
 
     try:
-        server.client_manager.delete_memories_by_client_id(client_id)
+        await asyncio.to_thread(server.client_manager.delete_memories_by_client_id, client_id)
         return {
             "message": f"All memories for client {client_id} hard deleted successfully",
             "preserved": ["client", "agents", "tools"],
@@ -1704,7 +1767,7 @@ async def create_client_api_key(
     server = get_server()
 
     # Verify client exists
-    client = server.client_manager.get_client_by_id(client_id)
+    client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
     if not client:
         raise HTTPException(status_code=404, detail=f"Client {client_id} not found")
 
@@ -1712,7 +1775,8 @@ async def create_client_api_key(
     raw_api_key = generate_api_key()
 
     # Create API key record (stores hashed version)
-    api_key_record = server.client_manager.create_client_api_key(
+    api_key_record = await asyncio.to_thread(
+        server.client_manager.create_client_api_key,
         client_id=client_id,
         api_key=raw_api_key,
         name=request.name,
@@ -1760,11 +1824,11 @@ async def list_client_api_keys(
     server = get_server()
 
     # Verify client exists
-    client = server.client_manager.get_client_by_id(client_id)
+    client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
     if not client:
         raise HTTPException(status_code=404, detail=f"Client {client_id} not found")
 
-    api_keys = server.client_manager.list_client_api_keys(client_id)
+    api_keys = await asyncio.to_thread(server.client_manager.list_client_api_keys, client_id)
 
     return [
         ApiKeyInfo(
@@ -1798,12 +1862,12 @@ async def delete_client_api_key(
     server = get_server()
 
     # Verify client exists
-    client = server.client_manager.get_client_by_id(client_id)
+    client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
     if not client:
         raise HTTPException(status_code=404, detail=f"Client {client_id} not found")
 
     try:
-        server.client_manager.delete_client_api_key(api_key_id)
+        await asyncio.to_thread(server.client_manager.delete_client_api_key, api_key_id)
         return {
             "message": f"API key {api_key_id} deleted successfully",
             "id": api_key_id,
@@ -1838,7 +1902,7 @@ async def initialize_meta_agent(
     """
     server = get_server()
     client_id, org_id = get_client_and_org(x_client_id, x_org_id)
-    client = server.client_manager.get_client_by_id(client_id)
+    client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
 
     # Extract config components
     config = request.config
@@ -1859,8 +1923,7 @@ async def initialize_meta_agent(
             create_params["system_prompts"] = meta_config["system_prompts"]
 
     # Check if meta agent already exists for this client
-    # list_agents now automatically filters by client (organization_id + _created_by_id)
-    existing_meta_agents = server.agent_manager.list_agents(actor=client, limit=1000)
+    existing_meta_agents = await asyncio.to_thread(server.agent_manager.list_agents, actor=client, limit=1000)
 
     assert len(existing_meta_agents) <= 1, "Only one meta agent can be created per client"
 
@@ -1881,7 +1944,8 @@ async def initialize_meta_agent(
                 logger.debug("[INIT META AGENT] agents list: %s", create_params["agents"])
 
             # Update the existing meta agent
-            meta_agent = server.agent_manager.update_meta_agent(
+            meta_agent = await asyncio.to_thread(
+                server.agent_manager.update_meta_agent,
                 meta_agent_id=meta_agent.id,
                 meta_agent_update=UpdateMetaAgent(**create_params),
                 actor=client,
@@ -1889,8 +1953,9 @@ async def initialize_meta_agent(
     else:
         from mirix.schemas.agent import CreateMetaAgent
 
-        meta_agent = server.agent_manager.create_meta_agent(
-            meta_agent_create=CreateMetaAgent(**create_params), actor=client
+        meta_agent = await asyncio.to_thread(
+            server.agent_manager.create_meta_agent,
+            meta_agent_create=CreateMetaAgent(**create_params), actor=client,
         )
 
     return meta_agent
@@ -1924,7 +1989,7 @@ async def add_memory(
     """
     server = get_server()
     client_id, org_id = get_client_and_org(x_client_id, x_org_id)
-    client = server.client_manager.get_client_by_id(client_id)
+    client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
 
     # If client doesn't exist, create the default client
     if client is None:
@@ -1933,7 +1998,7 @@ async def add_memory(
 
         if client_id == ClientManager.DEFAULT_CLIENT_ID:
             # Create the default client
-            client = server.client_manager.create_default_client(org_id)
+            client = await asyncio.to_thread(server.client_manager.create_default_client, org_id)
         else:
             # Client ID was provided but doesn't exist - error
             raise HTTPException(
@@ -1942,8 +2007,7 @@ async def add_memory(
             )
 
     # Get the meta agent by ID
-    # TODO: need to check if we really need to check if the meta_agent exists here
-    meta_agent = server.agent_manager.get_agent_by_id(request.meta_agent_id, actor=client)
+    meta_agent = await server.agent_manager.aget_agent_by_id(request.meta_agent_id, actor=client)
 
     # If user_id is not provided, use the admin user for this client
     user_id = request.user_id
@@ -2302,7 +2366,7 @@ async def retrieve_memory_with_conversation(
 
     server = get_server()
     client_id, org_id = get_client_and_org(x_client_id, x_org_id)
-    client = server.client_manager.get_client_by_id(client_id)
+    client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
 
     # If user_id is not provided, use the admin user for this client
     user_id = request.user_id
@@ -2324,7 +2388,7 @@ async def retrieve_memory_with_conversation(
     filter_tags["scope"] = client.scope
 
     # Get all agents for this client (automatically filtered by client via apply_access_predicate)
-    all_agents = server.agent_manager.list_agents(actor=client, limit=1000)
+    all_agents = await asyncio.to_thread(server.agent_manager.list_agents, actor=client, limit=1000)
 
     if not all_agents:
         return {
@@ -2398,7 +2462,7 @@ async def retrieve_memory_with_conversation(
 
         # Get user's timezone for accurate "today" interpretation
         try:
-            user = server.user_manager.get_user_by_id(user_id)
+            user = await asyncio.to_thread(server.user_manager.get_user_by_id, user_id)
             import pytz
 
             user_tz = pytz.timezone(user.timezone)
@@ -2476,7 +2540,7 @@ async def retrieve_memory_with_topic(
     """
     server = get_server()
     client_id, org_id = get_client_and_org(x_client_id, x_org_id)
-    client = server.client_manager.get_client_by_id(client_id)
+    client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
 
     # If user_id is not provided, use the admin user for this client
     if not user_id:
@@ -2507,7 +2571,7 @@ async def retrieve_memory_with_topic(
     parsed_filter_tags["scope"] = client.scope
 
     # Get all agents for this client (automatically filtered by client via apply_access_predicate)
-    all_agents = server.agent_manager.list_agents(actor=client, limit=1000)
+    all_agents = await asyncio.to_thread(server.agent_manager.list_agents, actor=client, limit=1000)
 
     if not all_agents:
         return {
@@ -2618,6 +2682,18 @@ async def search_memory(
     """
     server = get_server()
 
+    # #region agent log
+    import json as _json_dbg; _dbg_log_path = "/Users/jliao2/src/MIRIX_Intuit/.cursor/debug.log"
+    def _dbg(msg, data=None, hyp=""):
+        import time as _t
+        try:
+            with open(_dbg_log_path, "a") as _f:
+                _f.write(_json_dbg.dumps({"timestamp": int(_t.time()*1000), "location": "rest_api.py:search_memory", "message": msg, "data": data or {}, "hypothesisId": hyp}) + "\n")
+        except Exception:
+            pass
+    _dbg("handler_entry", {"user_id": user_id, "memory_type": memory_type, "search_method": search_method, "authorization_present": authorization is not None, "x_client_id": x_client_id}, "A")
+    # #endregion
+
     client = None
 
     # Support both dashboard JWTs and programmatic API key access
@@ -2631,13 +2707,29 @@ async def search_memory(
     # Fallback to use the client_id and org_id passed in the method parameters.
     if not client and x_client_id:
         client_id = x_client_id
-        client = server.client_manager.get_client_by_id(client_id)
+        # #region agent log
+        _dbg("get_client_start", {"client_id": client_id}, "D")
+        # #endregion
+        try:
+            client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
+        except Exception as _client_err:
+            # #region agent log
+            _dbg("get_client_error", {"error": str(_client_err), "type": type(_client_err).__name__}, "D")
+            # #endregion
+            raise
+        # #region agent log
+        _dbg("get_client_done", {"client_found": client is not None}, "D")
+        # #endregion
     else:
         if not client:
             raise HTTPException(
                 status_code=401,
                 detail="Authentication required. Provide either Authorization (Bearer JWT) or X-API-Key header, or x-client-id and x-org-id headers.",
             )
+
+    # #region agent log
+    _dbg("auth_resolved", {"client_id": client.id if client else None, "client_scope": client.scope if client else None}, "D")
+    # #endregion
 
     # If user_id is not provided, use the admin user for this client
     if not user_id:
@@ -2647,7 +2739,7 @@ async def search_memory(
         logger.debug("No user_id provided, using admin user: %s", user_id)
 
     # Get all agents for this client (automatically filtered by client via apply_access_predicate)
-    all_agents = server.agent_manager.list_agents(actor=client, limit=1000)
+    all_agents = await asyncio.to_thread(server.agent_manager.list_agents, actor=client, limit=1000)
 
     if not all_agents:
         return {
@@ -2660,12 +2752,21 @@ async def search_memory(
 
     agent_state = all_agents[0]
 
+    # #region agent log
+    _dbg("agent_found", {"agent_id": agent_state.id, "agent_count": len(all_agents)}, "D")
+    # #endregion
+
     # Get timezone from user record (if exists)
+    user = None
     try:
-        user = server.user_manager.get_user_by_id(user_id)
+        user = await asyncio.to_thread(server.user_manager.get_user_by_id, user_id)
         timezone_str = user.timezone
     except:
         timezone_str = "UTC"
+
+    # #region agent log
+    _dbg("user_resolved", {"user_id": user_id, "user_found": user is not None, "timezone": timezone_str}, "A")
+    # #endregion
 
     # Parse filter_tags from JSON string to dict
     parsed_filter_tags = None
@@ -2733,14 +2834,25 @@ async def search_memory(
         search_field = "null"
 
     # Pre-compute embedding once if using embedding search (to avoid redundant embeddings)
-    embedded_text, embedded_text_padded = _precompute_embedding_for_search(search_method, query, agent_state)
+    # #region agent log
+    _dbg("pre_embedding", {"search_method": search_method, "query_len": len(query) if query else 0}, "B")
+    # #endregion
+    try:
+        embedded_text, embedded_text_padded = _precompute_embedding_for_search(search_method, query, agent_state)
+    except Exception as _emb_err:
+        # #region agent log
+        _dbg("embedding_error", {"error": str(_emb_err), "type": type(_emb_err).__name__}, "B")
+        # #endregion
+        raise
 
     # Collect results from requested memory types
     all_results = []
 
     # If searching all memory types, run searches concurrently for better performance
     if memory_type == "all":
-        import asyncio
+        # #region agent log
+        _dbg("concurrent_search_start", {"user_is_none": user is None}, "B")
+        # #endregion
 
         # Define async wrappers for each manager call
         async def search_episodic():
@@ -2899,13 +3011,26 @@ async def search_memory(
                 return []
 
         # Run all searches concurrently
-        results = await asyncio.gather(
-            search_episodic(),
-            search_resource(),
-            search_procedural(),
-            search_knowledge(),
-            search_semantic(),
-        )
+        # #region agent log
+        _dbg("gather_start", {}, "B")
+        # #endregion
+        try:
+            results = await asyncio.gather(
+                search_episodic(),
+                search_resource(),
+                search_procedural(),
+                search_knowledge(),
+                search_semantic(),
+            )
+        except Exception as _gather_err:
+            # #region agent log
+            _dbg("gather_error", {"error": str(_gather_err), "type": type(_gather_err).__name__}, "B")
+            # #endregion
+            raise
+
+        # #region agent log
+        _dbg("gather_complete", {"result_counts": [len(r) for r in results]}, "B")
+        # #endregion
 
         # Flatten results
         for result_list in results:
@@ -3073,6 +3198,9 @@ async def search_memory(
         except Exception as e:
             logger.error("Error searching semantic memories: %s", e)
 
+    # #region agent log
+    _dbg("handler_success", {"result_count": len(all_results)}, "E")
+    # #endregion
     return {
         "success": True,
         "query": query,
@@ -3139,7 +3267,7 @@ async def search_memory_all_users(
     if client_id:
         # Use the provided client_id - fetch its org_id
         effective_client_id = client_id
-        client = server.client_manager.get_client_by_id(effective_client_id)
+        client = await asyncio.to_thread(server.client_manager.get_client_by_id, effective_client_id)
         effective_org_id = client.organization_id  # Use CLIENT's org_id
         logger.info(
             "Using provided client_id=%s with its organization_id=%s",
@@ -3149,7 +3277,7 @@ async def search_memory_all_users(
     else:
         # Fall back to headers
         effective_client_id, header_org_id = get_client_and_org(x_client_id, x_org_id)
-        client = server.client_manager.get_client_by_id(effective_client_id)
+        client = await asyncio.to_thread(server.client_manager.get_client_by_id, effective_client_id)
         # Use org_id from query param if provided, otherwise use header org_id
         effective_org_id = org_id or header_org_id
         logger.info(
@@ -3203,7 +3331,7 @@ async def search_memory_all_users(
             logger.warning("Invalid end_date format: %s", e)
 
     # Get agents for this client
-    all_agents = server.agent_manager.list_agents(actor=client, limit=1000)
+    all_agents = await asyncio.to_thread(server.agent_manager.list_agents, actor=client, limit=1000)
     if not all_agents:
         return {
             "success": False,
@@ -3245,8 +3373,6 @@ async def search_memory_all_users(
 
     # If searching all memory types, run searches concurrently for better performance
     if memory_type == "all":
-        import asyncio
-
         # Define async wrappers for each manager call
         async def search_episodic():
             try:
@@ -3656,7 +3782,7 @@ async def list_memory_components(
         user_id = ClientAuthManager.get_admin_user_id_for_client(client.id)
         logger.debug("No user_id provided, using admin user: %s", user_id)
 
-    user = server.user_manager.get_user_by_id(user_id)
+    user = await asyncio.to_thread(server.user_manager.get_user_by_id, user_id)
     if not user:
         raise HTTPException(status_code=404, detail=f"User {user_id} not found")
 
@@ -3664,7 +3790,7 @@ async def list_memory_components(
     limit = max(1, min(limit, 200))  # guardrails
 
     # Need an agent state for memory manager configuration
-    agents = server.agent_manager.list_agents(actor=client, limit=1)
+    agents = await asyncio.to_thread(server.agent_manager.list_agents, actor=client, limit=1)
     if not agents:
         raise HTTPException(status_code=404, detail="No agents found for this client")
     agent_state = agents[0]
@@ -3943,12 +4069,13 @@ async def update_episodic_memory(
         logger.debug("No user_id provided, using admin user: %s", user_id)
 
     # Get user
-    user = server.user_manager.get_user_by_id(user_id)
+    user = await asyncio.to_thread(server.user_manager.get_user_by_id, user_id)
     if not user:
         raise HTTPException(status_code=404, detail=f"User {user_id} not found")
 
     try:
-        updated_memory = server.episodic_memory_manager.update_event(
+        updated_memory = await asyncio.to_thread(
+            server.episodic_memory_manager.update_event,
             event_id=memory_id,
             new_summary=request.summary,
             new_details=request.details,
@@ -3984,7 +4111,7 @@ async def delete_episodic_memory(
     server = get_server()
 
     try:
-        server.episodic_memory_manager.delete_event_by_id(memory_id, actor=client)
+        await asyncio.to_thread(server.episodic_memory_manager.delete_event_by_id, memory_id, actor=client)
         return {"success": True, "message": f"Episodic memory {memory_id} deleted"}
     except Exception as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -4024,7 +4151,7 @@ async def update_semantic_memory(
         logger.debug("No user_id provided, using admin user: %s", user_id)
 
     # Get user
-    user = server.user_manager.get_user_by_id(user_id)
+    user = await asyncio.to_thread(server.user_manager.get_user_by_id, user_id)
     if not user:
         raise HTTPException(status_code=404, detail=f"User {user_id} not found")
 
@@ -4037,7 +4164,8 @@ async def update_semantic_memory(
         if request.details is not None:
             semantic_update_data["details"] = request.details
 
-        updated_memory = server.semantic_memory_manager.update_item(
+        updated_memory = await asyncio.to_thread(
+            server.semantic_memory_manager.update_item,
             item_update=SemanticMemoryItemUpdate.model_validate(semantic_update_data),
             user=user,
             actor=client,
@@ -4072,7 +4200,7 @@ async def delete_semantic_memory(
     server = get_server()
 
     try:
-        server.semantic_memory_manager.delete_semantic_item_by_id(memory_id, actor=client)
+        await asyncio.to_thread(server.semantic_memory_manager.delete_semantic_item_by_id, memory_id, actor=client)
         return {"success": True, "message": f"Semantic memory {memory_id} deleted"}
     except Exception as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -4111,7 +4239,7 @@ async def update_procedural_memory(
         logger.debug("No user_id provided, using admin user: %s", user_id)
 
     # Get user
-    user = server.user_manager.get_user_by_id(user_id)
+    user = await asyncio.to_thread(server.user_manager.get_user_by_id, user_id)
     if not user:
         raise HTTPException(status_code=404, detail=f"User {user_id} not found")
 
@@ -4122,7 +4250,8 @@ async def update_procedural_memory(
         if request.steps is not None:
             procedural_update_data["steps"] = request.steps
 
-        updated_memory = server.procedural_memory_manager.update_item(
+        updated_memory = await asyncio.to_thread(
+            server.procedural_memory_manager.update_item,
             item_update=ProceduralMemoryItemUpdate.model_validate(procedural_update_data),
             user=user,
             actor=client,
@@ -4156,7 +4285,7 @@ async def delete_procedural_memory(
     server = get_server()
 
     try:
-        server.procedural_memory_manager.delete_procedure_by_id(memory_id, actor=client)
+        await asyncio.to_thread(server.procedural_memory_manager.delete_procedure_by_id, memory_id, actor=client)
         return {"success": True, "message": f"Procedural memory {memory_id} deleted"}
     except Exception as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -4207,12 +4336,12 @@ async def create_raw_memory(
 
     # Resolve client: use provided client or fetch from client_id
     if not client and client_id:
-        client = server.client_manager.get_client_by_id(client_id)
+        client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
     if not client:
         raise HTTPException(status_code=401, detail="Client or client_id required")
 
     # Get agent_state for embedding generation (required)
-    agents = server.agent_manager.list_agents(actor=client, limit=1)
+    agents = await asyncio.to_thread(server.agent_manager.list_agents, actor=client, limit=1)
     agent_state = agents[0] if agents else None
 
     if not agent_state:
@@ -4237,7 +4366,8 @@ async def create_raw_memory(
     )
 
     try:
-        created_memory = server.raw_memory_manager.create_raw_memory(
+        created_memory = await asyncio.to_thread(
+            server.raw_memory_manager.create_raw_memory,
             raw_memory=raw_memory_create,
             actor=client,
             user_id=user_id,
@@ -4298,11 +4428,15 @@ async def get_raw_memory(
         client: Client performing the operation
         client_id: Alternative to client - will be resolved to client
     """
+    from mirix.database.cache_layer import async_cache_read
+    from mirix.database.cache_provider import get_cache_provider
+    from mirix.schemas.raw_memory import RawMemoryItem as PydanticRawMemoryItem
+
     server = get_server()
 
     # Resolve client: use provided client or fetch from client_id
     if not client and client_id:
-        client = server.client_manager.get_client_by_id(client_id)
+        client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
     if not client:
         raise HTTPException(status_code=401, detail="Client or client_id required")
 
@@ -4311,14 +4445,28 @@ async def get_raw_memory(
         try:
             from mirix.orm.errors import NoResultFound
 
-            server.user_manager.get_user_by_id(user_id)
+            await asyncio.to_thread(server.user_manager.get_user_by_id, user_id)
         except NoResultFound:
             raise HTTPException(status_code=404, detail=f"User {user_id} not found")
 
     try:
         from mirix.orm.errors import NoResultFound
 
-        memory = server.raw_memory_manager.get_raw_memory_by_id(memory_id, actor=client, user_id=user_id)
+        cache_provider = get_cache_provider()
+        if cache_provider:
+            memory = await async_cache_read(
+                cache_key=f"{cache_provider.RAW_MEMORY_PREFIX}{memory_id}",
+                db_fn=lambda: server.raw_memory_manager.get_raw_memory_by_id(
+                    memory_id, actor=client, user_id=user_id, use_cache=False
+                ),
+                method="json",
+                ttl=settings.redis_ttl_default,
+                model_class=PydanticRawMemoryItem,
+            )
+        else:
+            memory = await asyncio.to_thread(
+                server.raw_memory_manager.get_raw_memory_by_id, memory_id, client, user_id
+            )
         return {
             "success": True,
             "memory": memory.model_dump(mode="json"),
@@ -4373,7 +4521,7 @@ async def update_raw_memory(
 
     # Resolve client: use provided client or fetch from client_id
     if not client and client_id:
-        client = server.client_manager.get_client_by_id(client_id)
+        client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
     if not client:
         raise HTTPException(status_code=401, detail="Client or client_id required")
 
@@ -4382,12 +4530,12 @@ async def update_raw_memory(
         try:
             from mirix.orm.errors import NoResultFound
 
-            server.user_manager.get_user_by_id(user_id)
+            await asyncio.to_thread(server.user_manager.get_user_by_id, user_id)
         except NoResultFound:
             raise HTTPException(status_code=404, detail=f"User {user_id} not found")
 
     # Get agent_state for embedding generation (required)
-    agents = server.agent_manager.list_agents(actor=client, limit=1)
+    agents = await asyncio.to_thread(server.agent_manager.list_agents, actor=client, limit=1)
     agent_state = agents[0] if agents else None
 
     if not agent_state:
@@ -4397,7 +4545,8 @@ async def update_raw_memory(
         )
 
     try:
-        updated_memory = server.raw_memory_manager.update_raw_memory(
+        updated_memory = await asyncio.to_thread(
+            server.raw_memory_manager.update_raw_memory,
             memory_id=memory_id,
             new_context=request.context,
             new_filter_tags=request.filter_tags,
@@ -4463,7 +4612,7 @@ async def delete_raw_memory(
 
     # Resolve client: use provided client or fetch from client_id
     if not client and client_id:
-        client = server.client_manager.get_client_by_id(client_id)
+        client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
     if not client:
         raise HTTPException(status_code=401, detail="Client or client_id required")
 
@@ -4472,12 +4621,14 @@ async def delete_raw_memory(
         try:
             from mirix.orm.errors import NoResultFound
 
-            server.user_manager.get_user_by_id(user_id)
+            await asyncio.to_thread(server.user_manager.get_user_by_id, user_id)
         except NoResultFound:
             raise HTTPException(status_code=404, detail=f"User {user_id} not found")
 
     try:
-        deleted = server.raw_memory_manager.delete_raw_memory(memory_id, client, user_id=user_id)
+        deleted = await asyncio.to_thread(
+            server.raw_memory_manager.delete_raw_memory, memory_id, client, user_id=user_id
+        )
         if deleted:
             return {
                 "success": True,
@@ -4756,7 +4907,7 @@ async def update_resource_memory(
         logger.debug("No user_id provided, using admin user: %s", user_id)
 
     # Get user
-    user = server.user_manager.get_user_by_id(user_id)
+    user = await asyncio.to_thread(server.user_manager.get_user_by_id, user_id)
     if not user:
         raise HTTPException(status_code=404, detail=f"User {user_id} not found")
 
@@ -4769,7 +4920,8 @@ async def update_resource_memory(
         if request.content is not None:
             resource_update_data["content"] = request.content
 
-        updated_memory = server.resource_memory_manager.update_item(
+        updated_memory = await asyncio.to_thread(
+            server.resource_memory_manager.update_item,
             item_update=ResourceMemoryItemUpdate.model_validate(resource_update_data),
             user=user,
             actor=client,
@@ -4803,7 +4955,7 @@ async def delete_resource_memory(
     server = get_server()
 
     try:
-        server.resource_memory_manager.delete_resource_by_id(memory_id, actor=client)
+        await asyncio.to_thread(server.resource_memory_manager.delete_resource_by_id, memory_id, actor=client)
         return {"success": True, "message": f"Resource memory {memory_id} deleted"}
     except Exception as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -4825,7 +4977,7 @@ async def delete_knowledge_vault_memory(
     server = get_server()
 
     try:
-        server.knowledge_vault_manager.delete_knowledge_by_id(memory_id, actor=client)
+        await asyncio.to_thread(server.knowledge_vault_manager.delete_knowledge_by_id, memory_id, actor=client)
         return {"success": True, "message": f"Knowledge vault item {memory_id} deleted"}
     except Exception as e:
         raise HTTPException(status_code=404, detail=str(e))

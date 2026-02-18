@@ -187,6 +187,7 @@ class RawMemoryManager:
         memory_id: str,
         actor: PydanticClient,
         user_id: Optional[str] = None,
+        use_cache: bool = True,
     ) -> Optional[PydanticRawMemoryItem]:
         """
         Fetch a single raw memory record by ID (with Redis JSON caching).
@@ -195,6 +196,7 @@ class RawMemoryManager:
             memory_id: ID of the memory to fetch
             actor: Client performing the operation (for scope validation)
             user_id: Optional user ID - if provided, filters by user (404 if mismatch)
+            use_cache: If True, try cache first. If False, skip cache read.
 
         Returns:
             Raw memory as Pydantic model
@@ -207,7 +209,7 @@ class RawMemoryManager:
         try:
             from mirix.database.cache_provider import get_cache_provider
 
-            cache_provider = get_cache_provider()
+            cache_provider = get_cache_provider() if use_cache else None
 
             if cache_provider:
                 cache_key = f"{cache_provider.RAW_MEMORY_PREFIX}{memory_id}"

@@ -958,7 +958,7 @@ def test_api_get_nonexistent_memory(api_client, test_user):
 
 
 @pytest.mark.integration
-def test_api_create_raw_memory(api_client, test_actor, test_user):
+def test_api_create_raw_memory(api_client, test_actor, test_user, test_agent):
     """Test POST /memory/raw endpoint to create a new raw memory."""
     # Test creating raw memory via API
     create_payload = {
@@ -1023,7 +1023,7 @@ def test_api_create_raw_memory_missing_context(api_client, test_user):
 
 
 @pytest.mark.integration
-def test_api_create_raw_memory_auto_creates_user(api_client, test_actor):
+def test_api_create_raw_memory_auto_creates_user(api_client, test_actor, test_agent):
     """Test POST /memory/raw auto-creates user if user_id doesn't exist."""
     import uuid
 

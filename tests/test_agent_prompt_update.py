@@ -75,6 +75,7 @@ def client(server_check, api_auth):
     # Create client with same parameters as add_test_memory.py
     client = MirixClient(
         api_key=api_auth["api_key"],
+        base_url="http://localhost:8000",
         client_name="Demo Client Application",
         client_scope="Sales",
         debug=False,

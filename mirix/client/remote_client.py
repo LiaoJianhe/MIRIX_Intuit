@@ -136,7 +136,7 @@ class MirixClient(AbstractClient):
         super().__init__(debug=debug)
 
         # Get base URL from parameter or environment variable
-        self.base_url = (base_url or os.environ.get("MIRIX_API_URL", "http://localhost:8531")).rstrip("/")
+        self.base_url = (base_url or os.environ.get("MIRIX_API_URL", "http://localhost:8000")).rstrip("/")
 
         self.client_scope = client_scope
         self.timeout = timeout

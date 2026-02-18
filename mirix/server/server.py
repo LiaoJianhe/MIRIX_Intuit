@@ -1458,7 +1458,7 @@ class SyncServer(Server):
 
             # Get the generator object off of the agent's streaming interface
             # This will be attached to the POST SSE request used under-the-hood
-            mirix_agent = self.load_agent(agent_id=agent_id, actor=actor)
+            mirix_agent = await asyncio.to_thread(self.load_agent, agent_id=agent_id, actor=actor)
 
             # Disable token streaming if not OpenAI
             # TODO: cleanup this logic

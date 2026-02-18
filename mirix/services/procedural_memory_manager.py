@@ -402,14 +402,14 @@ class ProceduralMemoryManager:
     @update_timezone
     @enforce_types
     def get_item_by_id(
-        self, item_id: str, user: PydanticUser, timezone_str: str
+        self, item_id: str, user: PydanticUser, timezone_str: str, use_cache: bool = True
     ) -> Optional[PydanticProceduralMemoryItem]:
         """Fetch a procedural memory item by ID (with cache - Redis or IPS Cache)."""
         cache_provider = None
         try:
             from mirix.database.cache_provider import get_cache_provider
 
-            cache_provider = get_cache_provider()
+            cache_provider = get_cache_provider() if use_cache else None
 
             if cache_provider:
                 cache_key = f"{cache_provider.PROCEDURAL_PREFIX}{item_id}"

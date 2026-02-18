@@ -66,6 +66,7 @@ def client(check_server, api_key_factory):
     auth = api_key_factory(TEST_CLIENT_ID, TEST_ORG_ID)
     client = MirixClient(
         api_key=auth["api_key"],
+        base_url=BASE_URL,
         client_name="Test Deletion Client",
         client_scope="test",
         debug=False,
@@ -403,9 +404,14 @@ def test_5_delete_client_memories(client):
     assert counts_after["semantic"] == 0, "Semantic memories should be deleted"
     # Note: Messages are cached in Redis only, not in PostgreSQL, so we don't check them
 
-    # Verify client still exists
-    response = requests.get(f"{BASE_URL}/clients/{TEST_CLIENT_ID}")
-    assert response.status_code == 200, "Client should still exist"
+    # Verify client still exists by making an API-key-authenticated call
+    # (GET /clients/{id} requires admin JWT, so we use the search endpoint instead)
+    response = requests.get(
+        f"{BASE_URL}/memory/search",
+        params={"user_id": TEST_USER_ID, "query": "test", "limit": 1},
+        headers={"X-Client-ID": TEST_CLIENT_ID, "X-Org-ID": TEST_ORG_ID},
+    )
+    assert response.status_code == 200, "Client should still exist (search should work)"
 
     # Verify user still exists
     response = requests.get(f"{BASE_URL}/users/{TEST_USER_ID}")

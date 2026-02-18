@@ -176,9 +176,9 @@ class TestSearchAllUsers:
         logger.info("=" * 80)
 
         client_id = f"test-client-1-{int(time.time())}"
-        # MirixClient will use MIRIX_API_URL from environment or default to http://localhost:8000
         client = MirixClient(
             api_key=None,
+            base_url=BASE_URL,
             client_id=client_id,
             client_name="Test Client 1",
             client_scope=client_scope_value,
@@ -231,6 +231,7 @@ class TestSearchAllUsers:
         # Different scope from client1 (read_write) - use read_only
         client = MirixClient(
             api_key=None,
+            base_url=BASE_URL,
             client_id=client_id,
             client_name="Test Client 3",
             client_scope="read_only",  # DIFFERENT scope
@@ -253,9 +254,9 @@ class TestSearchAllUsers:
         logger.info("=" * 80)
 
         client_id = f"test-client-2-{int(time.time())}"
-        # MirixClient will use MIRIX_API_URL from environment or default to http://localhost:8000
         client = MirixClient(
             api_key=None,
+            base_url=BASE_URL,
             client_id=client_id,
             client_name="Test Client 2",
             client_scope=client_scope_value,  # Same scope as client1

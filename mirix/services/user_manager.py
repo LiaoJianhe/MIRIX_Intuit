@@ -351,7 +351,7 @@ class UserManager:
             raise
 
     @enforce_types
-    def get_user_by_id(self, user_id: str) -> PydanticUser:
+    def get_user_by_id(self, user_id: str, use_cache: bool = True) -> PydanticUser:
         """Fetch a user by ID (with cache - Redis or IPS Cache)."""
         from mirix.log import get_logger
 
@@ -360,7 +360,7 @@ class UserManager:
         try:
             from mirix.database.cache_provider import get_cache_provider
 
-            cache_provider = get_cache_provider()
+            cache_provider = get_cache_provider() if use_cache else None
 
             if cache_provider:
                 cache_key = f"{cache_provider.USER_PREFIX}{user_id}"

@@ -553,7 +553,7 @@ class ClientManager:
             raise
 
     @enforce_types
-    def get_client_by_id(self, client_id: str) -> PydanticClient:
+    def get_client_by_id(self, client_id: str, use_cache: bool = True) -> PydanticClient:
         """Fetch a client by ID (with cache - Redis or IPS Cache)."""
         from mirix.log import get_logger
 
@@ -562,7 +562,7 @@ class ClientManager:
         try:
             from mirix.database.cache_provider import get_cache_provider
 
-            cache_provider = get_cache_provider()
+            cache_provider = get_cache_provider() if use_cache else None
 
             if cache_provider:
                 cache_key = f"{cache_provider.CLIENT_PREFIX}{client_id}"

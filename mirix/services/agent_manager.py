@@ -1,6 +1,6 @@
 import os
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
@@ -1334,18 +1334,151 @@ class AgentManager:
 
             return agent_states
 
-    @enforce_types
-    def get_agent_by_id(self, agent_id: str, actor: PydanticClient) -> PydanticAgentState:
-        """Fetch an agent by its ID (with cache and Redis pipeline for tools/blocks)."""
+    def _reconstruct_agent_from_cache(
+        self, cached_data, agent_id, actor, redis_client, cache_provider
+    ) -> Optional[PydanticAgentState]:
+        """Reconstruct a full agent from cached hash data + Redis pipeline lookups.
+
+        Extracted from get_agent_by_id for reuse by aget_agent_by_id.
+        """
         import json
 
-        from mirix.database.cache_provider import get_cache_provider
-        from mirix.database.redis_client import get_redis_client
-        from mirix.log import get_logger
+        from mirix.schemas.block import Block as PydanticBlock
+        from mirix.schemas.memory import Memory as PydanticMemory
         from mirix.schemas.tool import Tool as PydanticTool
 
-        logger = get_logger(__name__)
-        cache_provider = get_cache_provider()
+        # Deserialize JSON fields
+        for field in ("message_ids", "llm_config", "embedding_config", "tool_rules", "mcp_tools"):
+            if field in cached_data and isinstance(cached_data[field], str):
+                cached_data[field] = json.loads(cached_data[field])
+
+        # Retrieve tools from Redis using pipeline
+        tools = []
+        if "tool_ids" in cached_data and cached_data["tool_ids"]:
+            tool_ids = (
+                json.loads(cached_data["tool_ids"])
+                if isinstance(cached_data["tool_ids"], str)
+                else cached_data["tool_ids"]
+            )
+            pipe = redis_client.client.pipeline()
+            for tool_id in tool_ids:
+                pipe.hgetall(f"{redis_client.TOOL_PREFIX}{tool_id}")
+            tool_results = pipe.execute()
+            for tool_data in tool_results:
+                if tool_data:
+                    if "json_schema" in tool_data and isinstance(tool_data["json_schema"], str):
+                        tool_data["json_schema"] = json.loads(tool_data["json_schema"])
+                    if "tags" in tool_data and isinstance(tool_data["tags"], str):
+                        tool_data["tags"] = json.loads(tool_data["tags"])
+                    tools.append(PydanticTool(**tool_data))
+
+        cached_data["tools"] = tools
+        cached_data.pop("tool_ids", None)
+
+        # Reconstruct memory from block IDs
+        blocks = []
+        prompt_template = ""
+        if "memory_block_ids" in cached_data and cached_data["memory_block_ids"]:
+            block_ids = (
+                json.loads(cached_data["memory_block_ids"])
+                if isinstance(cached_data["memory_block_ids"], str)
+                else cached_data["memory_block_ids"]
+            )
+            prompt_template = cached_data.get("memory_prompt_template", "")
+            pipe = redis_client.client.pipeline()
+            for block_id in block_ids:
+                pipe.hgetall(f"{redis_client.BLOCK_PREFIX}{block_id}")
+            block_results = pipe.execute()
+            for block_data in block_results:
+                if block_data:
+                    if "value" not in block_data or block_data["value"] is None:
+                        block_data["value"] = ""
+                    blocks.append(PydanticBlock(**block_data))
+
+        memory = PydanticMemory(blocks=blocks, prompt_template=prompt_template)
+        cached_data["memory"] = memory
+        cached_data.pop("memory_block_ids", None)
+        cached_data.pop("memory_prompt_template", None)
+
+        agent_state = PydanticAgentState(**cached_data)
+
+        # SECURITY CHECK: Verify agent belongs to this client
+        if agent_state.created_by_id != actor.id:
+            from sqlalchemy.exc import NoResultFound
+
+            raise NoResultFound(f"Agent {agent_id} not found or not accessible to client {actor.id}")
+
+        return agent_state
+
+    def _serialize_agent_for_cache(self, pydantic_agent, agent_id, cache_provider, redis_client) -> Dict[str, Any]:
+        """Serialize agent to cache-ready dict with JSON-encoded nested fields.
+
+        Extracted from get_agent_by_id for reuse by aget_agent_by_id.
+        Returns the dict to pass to cache_provider.set_hash / acache_set_hash.
+        Also writes tool hashes and reverse-key mappings to Redis as a side effect.
+        """
+        import json
+
+        from mirix.settings import settings
+
+        data = pydantic_agent.model_dump(mode="json")
+
+        for field in ("message_ids", "llm_config", "embedding_config", "tool_rules", "mcp_tools"):
+            if field in data and data[field]:
+                data[field] = json.dumps(data[field])
+
+        if "tools" in data and data["tools"]:
+            tool_ids = [tool["id"] for tool in data["tools"]]
+            data["tool_ids"] = json.dumps(tool_ids)
+            for tool in data["tools"]:
+                tool_key = f"{cache_provider.TOOL_PREFIX}{tool['id']}"
+                tool_data = dict(tool)
+                if "json_schema" in tool_data and tool_data["json_schema"]:
+                    tool_data["json_schema"] = json.dumps(tool_data["json_schema"])
+                if "tags" in tool_data and tool_data["tags"]:
+                    tool_data["tags"] = json.dumps(tool_data["tags"])
+                cache_provider.set_hash(tool_key, tool_data, ttl=settings.redis_ttl_tools)
+
+        if "memory" in data and data["memory"]:
+            memory_obj = data["memory"]
+            if isinstance(memory_obj, dict) and "blocks" in memory_obj:
+                block_ids = [
+                    block["id"] if isinstance(block, dict) else block.id for block in memory_obj["blocks"]
+                ]
+                data["memory_block_ids"] = json.dumps(block_ids)
+                data["memory_prompt_template"] = memory_obj.get("prompt_template", "")
+                if redis_client:
+                    for block_id in block_ids:
+                        reverse_key = f"{redis_client.BLOCK_PREFIX}{block_id}:agents"
+                        redis_client.client.sadd(reverse_key, agent_id)
+                        redis_client.client.expire(reverse_key, settings.redis_ttl_agents)
+
+        if "children" in data and data["children"]:
+            children_ids = [
+                child["id"] if isinstance(child, dict) else child.id for child in data["children"]
+            ]
+            data["children_ids"] = json.dumps(children_ids)
+            if redis_client:
+                for child_id in children_ids:
+                    reverse_key = f"{redis_client.AGENT_PREFIX}{child_id}:parent"
+                    redis_client.client.set(reverse_key, agent_id)
+                    redis_client.client.expire(reverse_key, settings.redis_ttl_agents)
+
+        data.pop("tools", None)
+        data.pop("memory", None)
+        data.pop("children", None)
+
+        return data
+
+    @enforce_types
+    def get_agent_by_id(
+        self, agent_id: str, actor: PydanticClient, use_cache: bool = True
+    ) -> PydanticAgentState:
+        """Fetch an agent by its ID (with cache and Redis pipeline for tools/blocks)."""
+        from mirix.database.cache_provider import get_cache_provider
+        from mirix.database.redis_client import get_redis_client
+
+        cache_provider = get_cache_provider() if use_cache else None
         redis_client = get_redis_client()
 
         try:
@@ -1354,130 +1487,20 @@ class AgentManager:
                 cached_data = cache_provider.get_hash(cache_key)
                 if cached_data and redis_client:
                     logger.debug("Cache HIT for agent %s", agent_id)
-
-                    # Deserialize JSON fields
-                    if "message_ids" in cached_data:
-                        cached_data["message_ids"] = (
-                            json.loads(cached_data["message_ids"])
-                            if isinstance(cached_data["message_ids"], str)
-                            else cached_data["message_ids"]
-                        )
-                    if "llm_config" in cached_data:
-                        cached_data["llm_config"] = (
-                            json.loads(cached_data["llm_config"])
-                            if isinstance(cached_data["llm_config"], str)
-                            else cached_data["llm_config"]
-                        )
-                    if "embedding_config" in cached_data:
-                        cached_data["embedding_config"] = (
-                            json.loads(cached_data["embedding_config"])
-                            if isinstance(cached_data["embedding_config"], str)
-                            else cached_data["embedding_config"]
-                        )
-                    if "tool_rules" in cached_data:
-                        cached_data["tool_rules"] = (
-                            json.loads(cached_data["tool_rules"])
-                            if isinstance(cached_data["tool_rules"], str)
-                            else cached_data["tool_rules"]
-                        )
-                    if "mcp_tools" in cached_data:
-                        cached_data["mcp_tools"] = (
-                            json.loads(cached_data["mcp_tools"])
-                            if isinstance(cached_data["mcp_tools"], str)
-                            else cached_data["mcp_tools"]
-                        )
-
-                    # Retrieve tools from Redis using pipeline (denormalized tools_agents)
-                    tools = []
-                    if "tool_ids" in cached_data and cached_data["tool_ids"]:
-                        tool_ids = (
-                            json.loads(cached_data["tool_ids"])
-                            if isinstance(cached_data["tool_ids"], str)
-                            else cached_data["tool_ids"]
-                        )
-
-                        # Use pipeline for efficient parallel retrieval
-                        pipe = redis_client.client.pipeline()
-                        for tool_id in tool_ids:
-                            pipe.hgetall(f"{redis_client.TOOL_PREFIX}{tool_id}")
-                        tool_results = pipe.execute()
-
-                        # Deserialize tool data
-                        for tool_data in tool_results:
-                            if tool_data:
-                                # Convert Redis hash data to proper types
-                                if "json_schema" in tool_data and isinstance(tool_data["json_schema"], str):
-                                    tool_data["json_schema"] = json.loads(tool_data["json_schema"])
-                                if "tags" in tool_data and isinstance(tool_data["tags"], str):
-                                    tool_data["tags"] = json.loads(tool_data["tags"])
-                                tools.append(PydanticTool(**tool_data))
-
-                    cached_data["tools"] = tools
-                    cached_data.pop("tool_ids", None)  # Remove denormalized field
-
-                    # Reconstruct memory from block IDs
-                    from mirix.schemas.block import Block as PydanticBlock
-                    from mirix.schemas.memory import Memory as PydanticMemory
-
-                    blocks = []
-                    prompt_template = ""
-
-                    if "memory_block_ids" in cached_data and cached_data["memory_block_ids"]:
-                        block_ids = (
-                            json.loads(cached_data["memory_block_ids"])
-                            if isinstance(cached_data["memory_block_ids"], str)
-                            else cached_data["memory_block_ids"]
-                        )
-                        prompt_template = cached_data.get("memory_prompt_template", "")
-
-                        # Use pipeline for efficient parallel block retrieval
-                        pipe = redis_client.client.pipeline()
-                        for block_id in block_ids:
-                            pipe.hgetall(f"{redis_client.BLOCK_PREFIX}{block_id}")
-                        block_results = pipe.execute()
-
-                        # Reconstruct blocks
-                        for block_data in block_results:
-                            if block_data:
-                                # Normalize block data: ensure 'value' is never None (use empty string instead)
-                                if "value" not in block_data or block_data["value"] is None:
-                                    block_data["value"] = ""
-                                blocks.append(PydanticBlock(**block_data))
-
-                        logger.debug(
-                            "Reconstructed memory with %s blocks for agent %s",
-                            len(blocks),
-                            agent_id,
-                        )
-
-                    # Always create a Memory object (even if empty) - never None
-                    memory = PydanticMemory(blocks=blocks, prompt_template=prompt_template)
-
-                    cached_data["memory"] = memory
-                    cached_data.pop("memory_block_ids", None)
-                    cached_data.pop("memory_prompt_template", None)
-
-                    agent_state = PydanticAgentState(**cached_data)
-
-                    # SECURITY CHECK: Verify agent belongs to this client
-                    # Prevents cross-client access via Redis cache
-                    if agent_state.created_by_id != actor.id:
-                        from sqlalchemy.exc import NoResultFound
-
-                        raise NoResultFound(f"Agent {agent_id} not found or not accessible to client {actor.id}")
-
-                    return agent_state  # Cache HIT (agent + tools + memory)
+                    agent_state = self._reconstruct_agent_from_cache(
+                        cached_data, agent_id, actor, redis_client, cache_provider
+                    )
+                    if agent_state is not None:
+                        return agent_state
         except Exception as e:
             logger.warning("Cache read failed for agent %s: %s", agent_id, e)
 
         # Cache MISS or no cache - fetch from PostgreSQL with client filtering
         with self.session_maker() as session:
-            # AgentModel.read calls apply_access_predicate, which now filters by client (organization_id + _created_by_id)
-            # If agent doesn't belong to this client, read() will raise NoResultFound automatically
             agent = AgentModel.read(
                 db_session=session,
                 identifier=agent_id,
-                actor=actor,  # Triggers client-level filtering via apply_access_predicate
+                actor=actor,
             )
             pydantic_agent = agent.to_pydantic()
 
@@ -1486,63 +1509,9 @@ class AgentManager:
                 if cache_provider:
                     from mirix.settings import settings
 
-                    data = pydantic_agent.model_dump(mode="json")
-
-                    if "message_ids" in data and data["message_ids"]:
-                        data["message_ids"] = json.dumps(data["message_ids"])
-                    if "llm_config" in data and data["llm_config"]:
-                        data["llm_config"] = json.dumps(data["llm_config"])
-                    if "embedding_config" in data and data["embedding_config"]:
-                        data["embedding_config"] = json.dumps(data["embedding_config"])
-                    if "tool_rules" in data and data["tool_rules"]:
-                        data["tool_rules"] = json.dumps(data["tool_rules"])
-                    if "mcp_tools" in data and data["mcp_tools"]:
-                        data["mcp_tools"] = json.dumps(data["mcp_tools"])
-
-                    if "tools" in data and data["tools"]:
-                        tool_ids = [tool["id"] for tool in data["tools"]]
-                        data["tool_ids"] = json.dumps(tool_ids)
-
-                        for tool in data["tools"]:
-                            tool_key = f"{cache_provider.TOOL_PREFIX}{tool['id']}"
-                            tool_data = dict(tool)
-                            if "json_schema" in tool_data and tool_data["json_schema"]:
-                                tool_data["json_schema"] = json.dumps(tool_data["json_schema"])
-                            if "tags" in tool_data and tool_data["tags"]:
-                                tool_data["tags"] = json.dumps(tool_data["tags"])
-                            cache_provider.set_hash(tool_key, tool_data, ttl=settings.redis_ttl_tools)
-
-                    if "memory" in data and data["memory"]:
-                        memory_obj = data["memory"]
-                        if isinstance(memory_obj, dict) and "blocks" in memory_obj:
-                            block_ids = [
-                                block["id"] if isinstance(block, dict) else block.id for block in memory_obj["blocks"]
-                            ]
-                            data["memory_block_ids"] = json.dumps(block_ids)
-                            data["memory_prompt_template"] = memory_obj.get("prompt_template", "")
-
-                            if redis_client:
-                                for block_id in block_ids:
-                                    reverse_key = f"{redis_client.BLOCK_PREFIX}{block_id}:agents"
-                                    redis_client.client.sadd(reverse_key, agent_id)
-                                    redis_client.client.expire(reverse_key, settings.redis_ttl_agents)
-
-                    if "children" in data and data["children"]:
-                        children_ids = [
-                            child["id"] if isinstance(child, dict) else child.id for child in data["children"]
-                        ]
-                        data["children_ids"] = json.dumps(children_ids)
-
-                        if redis_client:
-                            for child_id in children_ids:
-                                reverse_key = f"{redis_client.AGENT_PREFIX}{child_id}:parent"
-                                redis_client.client.set(reverse_key, agent_id)
-                                redis_client.client.expire(reverse_key, settings.redis_ttl_agents)
-
-                    data.pop("tools", None)
-                    data.pop("memory", None)
-                    data.pop("children", None)
-
+                    data = self._serialize_agent_for_cache(
+                        pydantic_agent, agent_id, cache_provider, redis_client
+                    )
                     agent_cache_key = f"{cache_provider.AGENT_PREFIX}{agent_id}"
                     cache_provider.set_hash(agent_cache_key, data, ttl=settings.redis_ttl_agents)
                     logger.debug("Populated cache for agent %s with tools", agent_id)
@@ -1550,6 +1519,62 @@ class AgentManager:
                 logger.warning("Failed to populate cache for agent %s: %s", agent_id, e)
 
             return pydantic_agent
+
+    async def aget_agent_by_id(self, agent_id: str, actor: PydanticClient) -> PydanticAgentState:
+        """Async version of get_agent_by_id.
+
+        Uses async cache for the initial agent hash read, DB fallback in
+        thread, and async cache for population. Tool/block reconstruction
+        still uses Redis pipeline (sync, in thread) because it requires
+        multiple round-trips not covered by the IPS Cache async interface.
+        """
+        import asyncio
+
+        from mirix.database.cache_provider import (
+            acache_get_hash,
+            acache_set_hash,
+            get_cache_provider,
+        )
+        from mirix.database.redis_client import get_redis_client
+
+        cache_provider = get_cache_provider()
+        redis_client = get_redis_client()
+
+        # 1. Try async cache read
+        try:
+            if cache_provider:
+                cache_key = f"{cache_provider.AGENT_PREFIX}{agent_id}"
+                cached_data = await acache_get_hash(cache_key)
+                if cached_data and redis_client:
+                    agent = await asyncio.to_thread(
+                        self._reconstruct_agent_from_cache,
+                        cached_data, agent_id, actor, redis_client, cache_provider,
+                    )
+                    if agent is not None:
+                        return agent
+        except Exception as e:
+            logger.warning("Cache read failed for agent %s: %s", agent_id, e)
+
+        # 2. DB fallback in thread
+        pydantic_agent = await asyncio.to_thread(
+            self.get_agent_by_id, agent_id, actor, False
+        )
+
+        # 3. Populate cache asynchronously
+        if pydantic_agent and cache_provider:
+            try:
+                from mirix.settings import settings
+
+                data = await asyncio.to_thread(
+                    self._serialize_agent_for_cache,
+                    pydantic_agent, agent_id, cache_provider, redis_client,
+                )
+                agent_cache_key = f"{cache_provider.AGENT_PREFIX}{agent_id}"
+                await acache_set_hash(agent_cache_key, data, ttl=settings.redis_ttl_agents)
+            except Exception as e:
+                logger.warning("Failed to populate cache for agent %s: %s", agent_id, e)
+
+        return pydantic_agent
 
     @enforce_types
     def get_agent_by_name(self, agent_name: str, actor: PydanticClient) -> PydanticAgentState:

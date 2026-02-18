@@ -27,7 +27,7 @@ class OrganizationManager:
             return self.create_default_organization()
 
     @enforce_types
-    def get_organization_by_id(self, org_id: str) -> Optional[PydanticOrganization]:
+    def get_organization_by_id(self, org_id: str, use_cache: bool = True) -> Optional[PydanticOrganization]:
         """Fetch an organization by ID (with cache - Redis or IPS Cache)."""
         from mirix.log import get_logger
 
@@ -36,7 +36,7 @@ class OrganizationManager:
         try:
             from mirix.database.cache_provider import get_cache_provider
 
-            cache_provider = get_cache_provider()
+            cache_provider = get_cache_provider() if use_cache else None
 
             if cache_provider:
                 cache_key = f"{cache_provider.ORGANIZATION_PREFIX}{org_id}"

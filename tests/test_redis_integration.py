@@ -387,17 +387,20 @@ class TestUserManagerRedis:
         assert cached_data["timezone"] == "Europe/London"
 
     def test_user_delete_removes_cache(self, user_manager, test_user, redis_client):
-        """Test deleting user removes from Redis cache."""
+        """Test soft-deleting user updates Redis cache with is_deleted=true."""
         # test_user fixture already creates the user
         # Verify in cache
         redis_key = f"{redis_client.USER_PREFIX}{test_user.id}"
         assert redis_client.get_hash(redis_key) is not None
 
-        # Delete user
+        # Soft delete user
         user_manager.delete_user_by_id(test_user.id)
 
-        # Verify removed from cache
-        assert redis_client.get_hash(redis_key) is None
+        # Verify cache is updated with is_deleted flag (soft delete keeps
+        # the entry to prevent stale re-population from DB)
+        cached_data = redis_client.get_hash(redis_key)
+        assert cached_data is not None
+        assert cached_data["is_deleted"] in (True, "true", "True")
 
 
 # ============================================================================

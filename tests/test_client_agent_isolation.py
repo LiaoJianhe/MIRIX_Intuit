@@ -64,6 +64,7 @@ def client_a(check_server, api_key_factory):
     auth_a = api_key_factory(TEST_CLIENT_A_ID, TEST_ORG_ID)
     client = MirixClient(
         api_key=auth_a["api_key"],
+        base_url=BASE_URL,
         client_name="Test Isolation Client A",
         client_scope="test",
         debug=False,
@@ -108,6 +109,7 @@ def client_b(check_server, api_key_factory):
     auth_b = api_key_factory(TEST_CLIENT_B_ID, TEST_ORG_ID)
     client = MirixClient(
         api_key=auth_b["api_key"],
+        base_url=BASE_URL,
         client_name="Test Isolation Client B",
         client_scope="test",
         debug=False,

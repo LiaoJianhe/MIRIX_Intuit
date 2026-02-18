@@ -125,7 +125,7 @@ class EpisodicMemoryManager:
     @update_timezone
     @enforce_types
     def get_episodic_memory_by_id(
-        self, episodic_memory_id: str, user: PydanticUser, timezone_str: str = None
+        self, episodic_memory_id: str, user: PydanticUser, timezone_str: str = None, use_cache: bool = True
     ) -> Optional[PydanticEpisodicEvent]:
         """
         Fetch a single episodic memory record by ID (with Redis JSON caching).
@@ -134,6 +134,7 @@ class EpisodicMemoryManager:
             episodic_memory_id: ID of the memory to fetch
             user: User who owns this memory
             timezone_str: Optional timezone string
+            use_cache: If True, try cache first. If False, skip cache read.
 
         Raises:
             NoResultFound: If the record doesn't exist or doesn't belong to user
@@ -142,7 +143,7 @@ class EpisodicMemoryManager:
         try:
             from mirix.database.cache_provider import get_cache_provider
 
-            cache_provider = get_cache_provider()
+            cache_provider = get_cache_provider() if use_cache else None
 
             if cache_provider:
                 cache_key = f"{cache_provider.EPISODIC_PREFIX}{episodic_memory_id}"

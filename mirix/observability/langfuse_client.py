@@ -6,6 +6,7 @@ Each container instance gets its own singleton client.
 """
 
 import atexit
+import sys
 import threading
 from typing import TYPE_CHECKING, Optional
 
@@ -92,8 +93,9 @@ def initialize_langfuse(force: bool = False) -> Optional["Langfuse"]:
 
             _langfuse_enabled = True
 
-            # Register cleanup on process exit
-            atexit.register(flush_langfuse)
+            # Register cleanup on process exit (silent wrapper
+            # avoids logging when streams are closed at shutdown)
+            atexit.register(_atexit_flush)
 
             # Verify connection with initial flush
             try:
@@ -142,6 +144,21 @@ def is_langfuse_enabled() -> bool:
         True if LangFuse is enabled and client is initialized
     """
     return _langfuse_enabled and _langfuse_client is not None
+
+
+def _atexit_flush() -> None:
+    """Silently flush LangFuse at process exit.
+
+    During interpreter shutdown, logging streams (sys.stderr/stdout)
+    may already be closed. This wrapper flushes the client directly
+    without going through the logging system to avoid
+    ``ValueError: I/O operation on closed file``.
+    """
+    if _langfuse_client and _langfuse_enabled:
+        try:
+            _langfuse_client.flush()
+        except Exception:
+            pass
 
 
 def flush_langfuse(timeout: Optional[float] = None) -> bool:

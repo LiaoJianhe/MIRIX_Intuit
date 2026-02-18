@@ -336,13 +336,15 @@ class BlockManager:
         return new_blocks
 
     @enforce_types
-    def get_block_by_id(self, block_id: str, user: Optional[PydanticUser] = None) -> Optional[PydanticBlock]:
+    def get_block_by_id(
+        self, block_id: str, user: Optional[PydanticUser] = None, use_cache: bool = True
+    ) -> Optional[PydanticBlock]:
         """Retrieve a block by its ID (with cache - Redis or IPS Cache)."""
         cache_provider = None
         try:
             from mirix.database.cache_provider import get_cache_provider
 
-            cache_provider = get_cache_provider()
+            cache_provider = get_cache_provider() if use_cache else None
 
             if cache_provider:
                 cache_key = f"{cache_provider.BLOCK_PREFIX}{block_id}"
