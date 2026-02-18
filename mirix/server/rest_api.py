@@ -917,7 +917,9 @@ async def update_agent_system_prompt_by_name(
     # Call the update_agent_system_prompt endpoint logic
     updated_agent = await asyncio.to_thread(
         server.agent_manager.update_system_prompt,
-        agent_id=matching_agent.id, system_prompt=request.system_prompt, actor=client,
+        agent_id=matching_agent.id,
+        system_prompt=request.system_prompt,
+        actor=client,
     )
 
     return updated_agent
@@ -961,7 +963,9 @@ async def update_agent_system_prompt(
 
     updated_agent = await asyncio.to_thread(
         server.agent_manager.update_system_prompt,
-        agent_id=agent_id, system_prompt=request.system_prompt, actor=client,
+        agent_id=agent_id,
+        system_prompt=request.system_prompt,
+        actor=client,
     )
 
     return updated_agent
@@ -1955,7 +1959,8 @@ async def initialize_meta_agent(
 
         meta_agent = await asyncio.to_thread(
             server.agent_manager.create_meta_agent,
-            meta_agent_create=CreateMetaAgent(**create_params), actor=client,
+            meta_agent_create=CreateMetaAgent(**create_params),
+            actor=client,
         )
 
     return meta_agent
@@ -2682,18 +2687,6 @@ async def search_memory(
     """
     server = get_server()
 
-    # #region agent log
-    import json as _json_dbg; _dbg_log_path = "/Users/jliao2/src/MIRIX_Intuit/.cursor/debug.log"
-    def _dbg(msg, data=None, hyp=""):
-        import time as _t
-        try:
-            with open(_dbg_log_path, "a") as _f:
-                _f.write(_json_dbg.dumps({"timestamp": int(_t.time()*1000), "location": "rest_api.py:search_memory", "message": msg, "data": data or {}, "hypothesisId": hyp}) + "\n")
-        except Exception:
-            pass
-    _dbg("handler_entry", {"user_id": user_id, "memory_type": memory_type, "search_method": search_method, "authorization_present": authorization is not None, "x_client_id": x_client_id}, "A")
-    # #endregion
-
     client = None
 
     # Support both dashboard JWTs and programmatic API key access
@@ -2707,29 +2700,13 @@ async def search_memory(
     # Fallback to use the client_id and org_id passed in the method parameters.
     if not client and x_client_id:
         client_id = x_client_id
-        # #region agent log
-        _dbg("get_client_start", {"client_id": client_id}, "D")
-        # #endregion
-        try:
-            client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
-        except Exception as _client_err:
-            # #region agent log
-            _dbg("get_client_error", {"error": str(_client_err), "type": type(_client_err).__name__}, "D")
-            # #endregion
-            raise
-        # #region agent log
-        _dbg("get_client_done", {"client_found": client is not None}, "D")
-        # #endregion
+        client = await asyncio.to_thread(server.client_manager.get_client_by_id, client_id)
     else:
         if not client:
             raise HTTPException(
                 status_code=401,
                 detail="Authentication required. Provide either Authorization (Bearer JWT) or X-API-Key header, or x-client-id and x-org-id headers.",
             )
-
-    # #region agent log
-    _dbg("auth_resolved", {"client_id": client.id if client else None, "client_scope": client.scope if client else None}, "D")
-    # #endregion
 
     # If user_id is not provided, use the admin user for this client
     if not user_id:
@@ -2752,10 +2729,6 @@ async def search_memory(
 
     agent_state = all_agents[0]
 
-    # #region agent log
-    _dbg("agent_found", {"agent_id": agent_state.id, "agent_count": len(all_agents)}, "D")
-    # #endregion
-
     # Get timezone from user record (if exists)
     user = None
     try:
@@ -2763,10 +2736,6 @@ async def search_memory(
         timezone_str = user.timezone
     except:
         timezone_str = "UTC"
-
-    # #region agent log
-    _dbg("user_resolved", {"user_id": user_id, "user_found": user is not None, "timezone": timezone_str}, "A")
-    # #endregion
 
     # Parse filter_tags from JSON string to dict
     parsed_filter_tags = None
@@ -2834,25 +2803,14 @@ async def search_memory(
         search_field = "null"
 
     # Pre-compute embedding once if using embedding search (to avoid redundant embeddings)
-    # #region agent log
-    _dbg("pre_embedding", {"search_method": search_method, "query_len": len(query) if query else 0}, "B")
-    # #endregion
-    try:
-        embedded_text, embedded_text_padded = _precompute_embedding_for_search(search_method, query, agent_state)
-    except Exception as _emb_err:
-        # #region agent log
-        _dbg("embedding_error", {"error": str(_emb_err), "type": type(_emb_err).__name__}, "B")
-        # #endregion
-        raise
+    embedded_text, embedded_text_padded = _precompute_embedding_for_search(search_method, query, agent_state)
 
     # Collect results from requested memory types
     all_results = []
 
     # If searching all memory types, run searches concurrently for better performance
     if memory_type == "all":
-        # #region agent log
-        _dbg("concurrent_search_start", {"user_is_none": user is None}, "B")
-        # #endregion
+        import asyncio
 
         # Define async wrappers for each manager call
         async def search_episodic():
@@ -3011,26 +2969,13 @@ async def search_memory(
                 return []
 
         # Run all searches concurrently
-        # #region agent log
-        _dbg("gather_start", {}, "B")
-        # #endregion
-        try:
-            results = await asyncio.gather(
-                search_episodic(),
-                search_resource(),
-                search_procedural(),
-                search_knowledge(),
-                search_semantic(),
-            )
-        except Exception as _gather_err:
-            # #region agent log
-            _dbg("gather_error", {"error": str(_gather_err), "type": type(_gather_err).__name__}, "B")
-            # #endregion
-            raise
-
-        # #region agent log
-        _dbg("gather_complete", {"result_counts": [len(r) for r in results]}, "B")
-        # #endregion
+        results = await asyncio.gather(
+            search_episodic(),
+            search_resource(),
+            search_procedural(),
+            search_knowledge(),
+            search_semantic(),
+        )
 
         # Flatten results
         for result_list in results:
@@ -3198,9 +3143,6 @@ async def search_memory(
         except Exception as e:
             logger.error("Error searching semantic memories: %s", e)
 
-    # #region agent log
-    _dbg("handler_success", {"result_count": len(all_results)}, "E")
-    # #endregion
     return {
         "success": True,
         "query": query,
@@ -4464,9 +4406,7 @@ async def get_raw_memory(
                 model_class=PydanticRawMemoryItem,
             )
         else:
-            memory = await asyncio.to_thread(
-                server.raw_memory_manager.get_raw_memory_by_id, memory_id, client, user_id
-            )
+            memory = await asyncio.to_thread(server.raw_memory_manager.get_raw_memory_by_id, memory_id, client, user_id)
         return {
             "success": True,
             "memory": memory.model_dump(mode="json"),
