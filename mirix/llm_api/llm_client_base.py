@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 from abc import abstractmethod
@@ -69,6 +70,145 @@ class LLMClientBase:
             reason = "LangFuse client not available" if not langfuse else "No active trace_id in context"
             self.logger.debug(f"Sending LLM request without LangFuse tracing ({reason})")
             return self._execute_without_langfuse(request_data, messages)
+
+    async def request_async(self, request_data: dict) -> dict:
+        """
+        Async variant of request(); default runs sync request in thread pool.
+        Override in subclasses that have native async HTTP clients.
+        """
+        return await asyncio.to_thread(self.request, request_data)
+
+    async def async_send_llm_request(
+        self,
+        messages: List[Message],
+        tools: Optional[List[dict]] = None,
+        stream: bool = False,
+        force_tool_call: Optional[str] = None,
+        get_input_data_for_debugging: bool = False,
+        existing_file_uris: Optional[List[str]] = None,
+    ) -> ChatCompletionResponse:
+        """
+        Async variant of send_llm_request; uses request_async to avoid blocking.
+        """
+        request_data = self.build_request_data(
+            messages,
+            self.llm_config,
+            tools,
+            force_tool_call,
+            existing_file_uris=existing_file_uris,
+        )
+
+        if get_input_data_for_debugging:
+            return request_data
+
+        langfuse = get_langfuse_client()
+        trace_context = get_trace_context() if langfuse else {}
+        trace_id = trace_context.get("trace_id") if trace_context else None
+        parent_span_id = trace_context.get("observation_id") if trace_context else None
+        if langfuse and trace_id:
+            return await self._execute_with_langfuse_async(
+                langfuse, request_data, messages, tools, trace_id, parent_span_id
+            )
+        return await self._execute_without_langfuse_async(request_data, messages)
+
+    async def _execute_without_langfuse_async(
+        self, request_data: dict, messages: List[Message]
+    ) -> ChatCompletionResponse:
+        """Execute LLM request without LangFuse (async)."""
+        try:
+            t1 = time.time()
+            response_data = await self.request_async(request_data)
+            t2 = time.time()
+            self.logger.debug("LLM request time: %.2f seconds", t2 - t1)
+        except Exception as e:
+            raise self.handle_llm_error(e)
+        return self.convert_response_to_chat_completion(response_data, messages)
+
+    async def _execute_with_langfuse_async(
+        self,
+        langfuse: Langfuse,
+        request_data: dict,
+        messages: List[Message],
+        tools: Optional[List[dict]],
+        trace_id: str,
+        parent_span_id: Optional[str] = None,
+    ) -> ChatCompletionResponse:
+        """Execute LLM request with LangFuse (async)."""
+        messages_for_trace = []
+        for m in messages:
+            role = m.role.value if hasattr(m.role, "value") else str(m.role)
+            content_text = ""
+            if hasattr(m, "content") and m.content:
+                text_parts = []
+                for part in m.content:
+                    if hasattr(part, "text"):
+                        text_parts.append(part.text)
+                    elif hasattr(part, "reasoning"):
+                        text_parts.append(f"[reasoning]{part.reasoning}")
+                content_text = "\n".join(text_parts) if text_parts else str(m.content)
+            msg_dict: dict = {"role": role, "content": content_text}
+            if hasattr(m, "tool_calls") and m.tool_calls:
+                msg_dict["tool_calls"] = [
+                    {
+                        "id": getattr(tc, "id", None),
+                        "function": {
+                            "name": (getattr(tc.function, "name", None) if hasattr(tc, "function") else None),
+                            "arguments": (getattr(tc.function, "arguments", None) if hasattr(tc, "function") else None),
+                        },
+                    }
+                    for tc in m.tool_calls
+                ]
+            messages_for_trace.append(msg_dict)
+
+        trace_context_dict: dict = {"trace_id": trace_id}
+        if parent_span_id:
+            trace_context_dict["parent_span_id"] = parent_span_id
+        trace_input: dict = {"messages": messages_for_trace}
+        if tools:
+            trace_input["tools"] = tools
+
+        try:
+            observation_context = langfuse.start_as_current_observation(
+                name="llm_completion",
+                as_type="generation",
+                trace_context=cast("TraceContext", trace_context_dict),
+                model=self.llm_config.langfuse_model or self.llm_config.model,
+                input=trace_input,
+                metadata={
+                    "provider": self.llm_config.model_endpoint_type,
+                    "tools_count": len(tools) if tools else 0,
+                },
+            )
+        except Exception as e:
+            self.logger.error("Langfuse failed to start observation: %s", e)
+            return await self._execute_without_langfuse_async(request_data, messages)
+
+        with observation_context as generation:
+            mark_observation_as_child(generation)
+            try:
+                t1 = time.time()
+                response_data = await self.request_async(request_data)
+                t2 = time.time()
+                self.logger.debug("LLM request time: %.2f seconds", t2 - t1)
+            except Exception as e:
+                try:
+                    generation.update(
+                        status_message=str(e),
+                        level="ERROR",
+                        metadata={"error_type": type(e).__name__},
+                    )
+                except Exception as langfuse_err:
+                    self.logger.error("Failed to update LangFuse trace: %s", langfuse_err)
+                raise self.handle_llm_error(e)
+
+            chat_completion_data = self.convert_response_to_chat_completion(response_data, messages)
+            try:
+                output_message = self._build_output_message(chat_completion_data)
+                usage_dict = self._build_usage_dict(chat_completion_data)
+                generation.update(output=output_message, usage_details=usage_dict)
+            except Exception as update_err:
+                self.logger.error("Failed to update LangFuse trace with success: %s", update_err)
+            return chat_completion_data
 
     def _execute_without_langfuse(self, request_data: dict, messages: List[Message]) -> ChatCompletionResponse:
         """Execute LLM request without LangFuse tracing."""

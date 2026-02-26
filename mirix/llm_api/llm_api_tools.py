@@ -1,3 +1,4 @@
+import asyncio
 import random
 import time
 from typing import TYPE_CHECKING, List, Optional
@@ -673,3 +674,11 @@ def create(
             except Exception as update_error:
                 logger.warning(f"Failed to update LangFuse generation with error: {update_error}")
         raise  # Re-raise to preserve existing error handling
+
+
+async def acreate(*args, **kwargs) -> ChatCompletionResponse:
+    """
+    Async variant of create(); runs sync create() in thread pool to avoid blocking.
+    Same signature and behavior as create().
+    """
+    return await asyncio.to_thread(create, *args, **kwargs)

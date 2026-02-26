@@ -1423,9 +1423,7 @@ class RedisMemoryClient:
             # Redis will return all indexed fields when return_fields is not called
 
             # Execute vector search
-            results = await self.client.ft(index_name).search(
-                query_obj, query_params={"embedding": embedding_bytes}
-            )
+            results = await self.client.ft(index_name).search(query_obj, query_params={"embedding": embedding_bytes})
 
             return [self._doc_to_dict(doc) for doc in results.docs]
 
@@ -1599,13 +1597,13 @@ async def initialize_redis_client() -> Optional[RedisMemoryClient]:
             logger.warning("Redis enabled but no URI configured")
             return None
 
-        # Store event loop for sync callers (run_coroutine_threadsafe)
-        set_event_loop_for_sync_bridge()
+        # Store event loop for sync callers so it matches this Redis client's loop
+        set_event_loop_for_sync_bridge(force=True)
 
         # Initialize with optimized connection pool settings
         _redis_client = RedisMemoryClient(
             redis_uri=redis_uri,
-            max_connections=settings.redis_max_connections,
+            max_connections=settings.redis_max_connections_per_worker,
             socket_timeout=settings.redis_socket_timeout,
             socket_connect_timeout=settings.redis_socket_connect_timeout,
             socket_keepalive=settings.redis_socket_keepalive,
@@ -1626,16 +1624,27 @@ async def initialize_redis_client() -> Optional[RedisMemoryClient]:
 
         logger.info("Redis client initialized successfully with optimized connection pool")
 
+        # Initialize sync client for unified cache provider
+        from mirix.database.redis_sync_client import initialize_redis_sync_client
+
+        sync_client = initialize_redis_sync_client()
+        if sync_client is None:
+            raise RuntimeError(
+                "Redis is enabled but sync client initialization failed. "
+                "Cache provider requires both async and sync clients. "
+                "Check Redis connection settings."
+            )
+
         # Auto-register as cache and search provider so service managers can use get_cache_provider() / get_search_provider()
         try:
             from mirix.database.cache_provider import register_cache_provider
-            from mirix.database.redis_cache_provider import RedisCacheProvider
+            from mirix.database.redis_cache_provider import RedisUnifiedCacheProvider
             from mirix.database.redis_search_provider import RedisSearchProvider
             from mirix.database.search_provider import register_search_provider
 
-            redis_cache_provider = RedisCacheProvider(_redis_client)
+            redis_cache_provider = RedisUnifiedCacheProvider(_redis_client, sync_client)
             register_cache_provider("redis", redis_cache_provider)
-            logger.info("Auto-registered Redis cache provider")
+            logger.info("Auto-registered Redis unified cache provider")
 
             redis_search_provider = RedisSearchProvider(_redis_client)
             register_search_provider("redis", redis_search_provider)
@@ -1661,6 +1670,7 @@ async def close_redis_client() -> None:
     """Close the global Redis client, unregister providers, and clear the stored event loop."""
     global _redis_client
     from mirix.database.cache_provider import unregister_cache_provider
+    from mirix.database.redis_sync_client import close_redis_sync_client
     from mirix.database.search_provider import unregister_search_provider
     from mirix.database.sync_bridge import clear_sync_bridge
 
@@ -1669,4 +1679,5 @@ async def close_redis_client() -> None:
         unregister_search_provider("redis")
         await _redis_client.close()
         _redis_client = None
+    close_redis_sync_client()
     clear_sync_bridge()

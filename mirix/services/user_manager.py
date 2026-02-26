@@ -361,13 +361,17 @@ class UserManager:
         logger = get_logger(__name__)
         cache_provider = None
         try:
-            from mirix.database.cache_provider import get_cache_provider
+            from mirix.database.cache_provider import (
+                get_cache_provider,
+                sync_cache_get_hash,
+                sync_cache_set_hash,
+            )
 
             cache_provider = get_cache_provider() if use_cache else None
 
             if cache_provider:
                 cache_key = f"{cache_provider.USER_PREFIX}{user_id}"
-                cached_data = cache_provider.get_hash(cache_key)
+                cached_data = sync_cache_get_hash(cache_key)
                 if cached_data:
                     logger.debug("Cache HIT for user %s", user_id)
                     return PydanticUser(**cached_data)
@@ -384,7 +388,9 @@ class UserManager:
 
                     cache_key = f"{cache_provider.USER_PREFIX}{user_id}"
                     data = pydantic_user.model_dump(mode="json")
-                    cache_provider.set_hash(cache_key, data, ttl=settings.redis_ttl_users)
+                    sync_cache_set_hash(
+                        cache_key, data, ttl=settings.redis_ttl_users
+                    )
                     logger.debug("Populated cache for user %s", user_id)
             except Exception as e:
                 logger.warning("Failed to populate cache for user %s: %s", user_id, e)

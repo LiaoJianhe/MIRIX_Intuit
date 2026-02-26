@@ -34,13 +34,17 @@ class OrganizationManager:
         logger = get_logger(__name__)
         cache_provider = None
         try:
-            from mirix.database.cache_provider import get_cache_provider
+            from mirix.database.cache_provider import (
+                get_cache_provider,
+                sync_cache_get_hash,
+                sync_cache_set_hash,
+            )
 
             cache_provider = get_cache_provider() if use_cache else None
 
             if cache_provider:
                 cache_key = f"{cache_provider.ORGANIZATION_PREFIX}{org_id}"
-                cached_data = cache_provider.get_hash(cache_key)
+                cached_data = sync_cache_get_hash(cache_key)
                 if cached_data:
                     logger.debug("Cache HIT for organization %s", org_id)
                     return PydanticOrganization(**cached_data)
@@ -57,7 +61,11 @@ class OrganizationManager:
 
                     cache_key = f"{cache_provider.ORGANIZATION_PREFIX}{org_id}"
                     data = pydantic_org.model_dump(mode="json")
-                    cache_provider.set_hash(cache_key, data, ttl=settings.redis_ttl_organizations)
+                    sync_cache_set_hash(
+                        cache_key,
+                        data,
+                        ttl=settings.redis_ttl_organizations,
+                    )
                     logger.debug("Populated cache for organization %s", org_id)
             except Exception as e:
                 logger.warning("Failed to populate cache for organization %s: %s", org_id, e)
@@ -108,14 +116,17 @@ class OrganizationManager:
 
             # Remove from cache before hard delete
             try:
-                from mirix.database.cache_provider import get_cache_provider
+                from mirix.database.cache_provider import (
+                    get_cache_provider,
+                    sync_cache_delete,
+                )
                 from mirix.log import get_logger
 
                 logger = get_logger(__name__)
                 cache_provider = get_cache_provider()
                 if cache_provider:
                     cache_key = f"{cache_provider.ORGANIZATION_PREFIX}{org_id}"
-                    cache_provider.delete(cache_key)
+                    sync_cache_delete(cache_key)
                     logger.debug("Removed organization %s from cache", org_id)
             except Exception as e:
                 from mirix.log import get_logger

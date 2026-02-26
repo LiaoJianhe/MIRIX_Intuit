@@ -15,6 +15,8 @@ from mirix.database.cache_provider import (
     get_cache_provider,
     get_registered_providers,
     register_cache_provider,
+    sync_cache_get_hash,
+    sync_cache_set_hash,
     unregister_cache_provider,
 )
 
@@ -98,3 +100,49 @@ def test_get_registered_providers():
     reg = get_registered_providers()
     assert reg == {"mock": provider}
     assert "mock" in reg
+
+
+def test_register_default_sync_dispatch():
+    """Registering a provider makes sync_cache_* call provider sync methods."""
+    provider = MockCacheProvider()
+    register_cache_provider("mock", provider)
+    # sync_cache_* should delegate to provider sync methods (no event loop needed)
+    result = sync_cache_get_hash("key")
+    assert result == {"mock": "data"}
+    unregister_cache_provider("mock")
+
+
+def test_sync_cache_delegates_to_provider():
+    """sync_cache_get_hash delegates to provider.get_hash."""
+    provider = MockCacheProvider()
+    register_cache_provider("mock", provider)
+    data = sync_cache_get_hash("mykey")
+    assert data == {"mock": "data"}
+    ok = sync_cache_set_hash("mykey", {"k": "v"})
+    assert ok is True
+    unregister_cache_provider("mock")
+
+
+def test_sync_cache_returns_none_when_provider_missing_sync_methods():
+    """When provider has only async methods (no sync), sync_cache_* returns None/False."""
+
+    class AsyncOnlyProvider:
+        """Provider with only async methods (no sync get_hash)."""
+
+        MESSAGE_PREFIX = "msg:"
+        BLOCK_PREFIX = "block:"
+
+        async def aget_hash(self, key: str):
+            return {"async": "hash"}
+
+        async def aset_hash(self, key: str, data: dict, ttl: int = None):
+            return True
+
+    provider = AsyncOnlyProvider()
+    register_cache_provider("async_only", provider)
+    # Provider has no sync get_hash method -> getattr returns None -> returns default
+    data = sync_cache_get_hash("key")
+    assert data is None
+    ok = sync_cache_set_hash("key", {"k": "v"})
+    assert ok is False
+    unregister_cache_provider("async_only")

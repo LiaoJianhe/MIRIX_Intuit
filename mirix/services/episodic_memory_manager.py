@@ -142,13 +142,17 @@ class EpisodicMemoryManager:
         """
         cache_provider = None
         try:
-            from mirix.database.cache_provider import get_cache_provider
+            from mirix.database.cache_provider import (
+                get_cache_provider,
+                sync_cache_get_json,
+                sync_cache_set_json,
+            )
 
             cache_provider = get_cache_provider() if use_cache else None
 
             if cache_provider:
                 cache_key = f"{cache_provider.EPISODIC_PREFIX}{episodic_memory_id}"
-                cached_data = cache_provider.get_json(cache_key)
+                cached_data = sync_cache_get_json(cache_key)
                 if cached_data:
                     logger.debug("Cache HIT for episodic memory %s", episodic_memory_id)
                     return PydanticEpisodicEvent(**cached_data)
@@ -318,12 +322,15 @@ class EpisodicMemoryManager:
             try:
                 episodic_memory_item = EpisodicEvent.read(db_session=session, identifier=id, actor=actor)
                 # Remove from cache before hard delete
-                from mirix.database.cache_provider import get_cache_provider
+                from mirix.database.cache_provider import (
+                    get_cache_provider,
+                    sync_cache_delete,
+                )
 
                 cache_provider = get_cache_provider()
                 if cache_provider:
                     cache_key = f"{cache_provider.EPISODIC_PREFIX}{id}"
-                    cache_provider.delete(cache_key)
+                    sync_cache_delete(cache_key)
                 episodic_memory_item.hard_delete(session)
             except NoResultFound:
                 raise NoResultFound(f"Episodic episodic_memory record with id {id} not found.")
@@ -988,13 +995,11 @@ class EpisodicMemoryManager:
 
     def _sync_list_episodic_memory(self, *args, **kwargs) -> List[PydanticEpisodicEvent]:
         """Sync wrapper for list_episodic_memory (for use from sync callers e.g. agent step)."""
-        from mirix.database.sync_bridge import get_event_loop
+        from mirix.database.sync_bridge import get_event_loop, run_sync
 
         loop = get_event_loop()
         if loop:
-            return asyncio.run_coroutine_threadsafe(
-                self.list_episodic_memory(*args, **kwargs), loop
-            ).result(timeout=60)
+            return run_sync(self.list_episodic_memory(*args, **kwargs), timeout=60)
         raise RuntimeError("No event loop available for sync list_episodic_memory")
 
     def _postgresql_fulltext_search(

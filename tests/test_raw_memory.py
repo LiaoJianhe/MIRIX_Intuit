@@ -160,10 +160,13 @@ def redis_client(event_loop_sync_bridge):
 
     # Ensure cache provider is registered (may have been cleared by other test modules)
     from mirix.database.cache_provider import get_cache_provider, register_cache_provider
-    from mirix.database.redis_cache_provider import RedisCacheProvider
+    from mirix.database.redis_cache_provider import RedisUnifiedCacheProvider
+    from mirix.database.redis_sync_client import initialize_redis_sync_client
 
     if get_cache_provider() is None:
-        register_cache_provider("redis", RedisCacheProvider(client))
+        sync_client = initialize_redis_sync_client()
+        assert sync_client is not None, "Redis sync client required for integration tests"
+        register_cache_provider("redis", RedisUnifiedCacheProvider(client, sync_client))
 
     return _RedisSyncWrapper(client, loop)
 
@@ -854,7 +857,9 @@ def test_api_create_and_get_raw_memory(api_client, raw_memory_manager, test_acto
 
 
 @pytest.mark.integration
-def test_api_update_raw_memory_replace(api_client, raw_memory_manager, test_actor, test_user, mock_embedding_model):
+def test_api_update_raw_memory_replace(
+    api_client, raw_memory_manager, test_actor, test_user, test_agent, mock_embedding_model
+):
     """Test PATCH /memory/raw/{memory_id} endpoint with replace mode."""
     import os
 
@@ -911,7 +916,7 @@ def test_api_update_raw_memory_replace(api_client, raw_memory_manager, test_acto
 
 @pytest.mark.integration
 def test_api_update_raw_memory_append_and_merge(
-    api_client, raw_memory_manager, test_actor, test_user, mock_embedding_model
+    api_client, raw_memory_manager, test_actor, test_user, test_agent, mock_embedding_model
 ):
     """Test PATCH /memory/raw/{memory_id} endpoint with append and merge modes."""
     import os

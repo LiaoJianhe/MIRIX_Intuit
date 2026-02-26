@@ -101,9 +101,9 @@ async def async_cache_invalidate(*cache_keys: str) -> None:
     Invalidate one or more cache keys asynchronously.
 
     For use in REST API handlers that need to invalidate cache after an
-    async operation. For sync write paths (ORM lifecycle), use the sync
-    cache_provider.delete() directly -- it runs in a thread where exec()
-    works.
+    async operation. For sync write paths (ORM lifecycle), use
+    sync_cache_delete() (or other sync_cache_* helpers) so cache works
+    with async-only providers when the sync bridge is set.
 
     Args:
         *cache_keys: One or more full cache keys to delete.

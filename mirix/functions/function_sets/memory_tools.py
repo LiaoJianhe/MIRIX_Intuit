@@ -8,6 +8,7 @@ from mirix.agent import Agent, AgentState
 
 if TYPE_CHECKING:
     from mirix.schemas.memory import Memory
+
 from mirix.log import get_logger
 from mirix.observability.context import (
     clear_trace_context,
@@ -897,9 +898,7 @@ def trigger_memory_update(self: "Agent", user_message: object, memory_types: Lis
             )
 
     # Get child agents (sync: we are in sync tool context; list_agents is async)
-    child_agent_states = self.agent_manager._sync_list_agents(
-        parent_id=self.agent_state.id, actor=self.actor
-    )
+    child_agent_states = self.agent_manager._sync_list_agents(parent_id=self.agent_state.id, actor=self.actor)
 
     # Map agent types to agent states
     agent_type_to_state = {agent_state.agent_type: agent_state for agent_state in child_agent_states}

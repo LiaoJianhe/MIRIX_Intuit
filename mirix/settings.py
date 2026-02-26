@@ -183,6 +183,16 @@ class Settings(BaseSettings):
         else:
             return None
 
+    @property
+    def pg_pool_size_per_worker(self) -> int:
+        """Pool size divided by uvicorn workers for multi-worker deployments."""
+        return max(5, self.pg_pool_size // max(1, self.uvicorn_workers))
+
+    @property
+    def redis_max_connections_per_worker(self) -> int:
+        """Redis max connections divided by uvicorn workers for multi-worker deployments."""
+        return max(5, self.redis_max_connections // max(1, self.uvicorn_workers))
+
     # multi agent settings
     multi_agent_send_message_max_retries: int = 3
     multi_agent_send_message_timeout: int = 20 * 60
@@ -200,6 +210,10 @@ class Settings(BaseSettings):
 
     # event loop parallelism
     event_loop_threadpool_max_workers: int = 43
+    executor_fast_io_workers: int = 20
+    executor_slow_io_workers: int = 15
+    max_concurrent_agent_steps: int = 15
+    max_concurrent_memory_extractions: int = 10
 
     # experimental toggle
     use_experimental: bool = False

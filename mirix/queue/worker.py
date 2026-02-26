@@ -32,6 +32,7 @@ class QueueWorker:
         queue: "QueueInterface",
         server: Optional[Any] = None,
         partition_id: Optional[int] = None,
+        step_semaphore: Optional[threading.Semaphore] = None,
     ):
         """
         Initialize the queue worker
@@ -42,6 +43,7 @@ class QueueWorker:
             partition_id: Optional partition ID for partitioned queues.
                          If set, worker will only consume from this partition.
                          If None, uses default queue.get() behavior.
+            step_semaphore: Optional semaphore to bound concurrent agent steps.
         """
         logger.debug(
             "Initializing queue worker: server=%s, partition_id=%s",
@@ -52,6 +54,7 @@ class QueueWorker:
         self.queue = queue
         self._server = server
         self._partition_id = partition_id
+        self._step_semaphore = step_semaphore
         self._running = False
         self._thread = None
         self._lock = threading.RLock()
@@ -310,6 +313,12 @@ class QueueWorker:
                     occurred_at=occurred_at,
                 )
 
+            def _run_step():
+                if self._step_semaphore is not None:
+                    with self._step_semaphore:
+                        return _do_send_messages()
+                return _do_send_messages()
+
             if langfuse and trace_id:
                 from typing import cast
 
@@ -342,9 +351,9 @@ class QueueWorker:
                             user_id=trace_context.get("user_id"),
                             session_id=trace_context.get("session_id"),
                         )
-                    usage = _do_send_messages()
+                    usage = _run_step()
             else:
-                usage = _do_send_messages()
+                usage = _run_step()
 
             # Log successful processing
             logger.debug(

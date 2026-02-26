@@ -420,13 +420,17 @@ class SemanticMemoryManager:
         """Fetch a semantic memory item by ID (with cache - Redis or IPS Cache)."""
         cache_provider = None
         try:
-            from mirix.database.cache_provider import get_cache_provider
+            from mirix.database.cache_provider import (
+                get_cache_provider,
+                sync_cache_get_json,
+                sync_cache_set_json,
+            )
 
             cache_provider = get_cache_provider() if use_cache else None
 
             if cache_provider:
                 cache_key = f"{cache_provider.SEMANTIC_PREFIX}{semantic_memory_id}"
-                cached_data = cache_provider.get_json(cache_key)
+                cached_data = sync_cache_get_json(cache_key)
                 if cached_data:
                     logger.debug("Cache HIT for semantic memory %s", semantic_memory_id)
                     return PydanticSemanticMemoryItem(**cached_data)
@@ -448,7 +452,9 @@ class SemanticMemoryManager:
                     if cache_provider:
                         cache_key = f"{cache_provider.SEMANTIC_PREFIX}{semantic_memory_id}"
                         data = pydantic_item.model_dump(mode="json")
-                        cache_provider.set_json(cache_key, data, ttl=settings.redis_ttl_default)
+                        sync_cache_set_json(
+                            cache_key, data, ttl=settings.redis_ttl_default
+                        )
                         logger.debug(
                             "Populated cache for semantic memory %s",
                             semantic_memory_id,
@@ -925,13 +931,11 @@ class SemanticMemoryManager:
 
     def _sync_list_semantic_items(self, *args, **kwargs) -> List[PydanticSemanticMemoryItem]:
         """Sync wrapper for list_semantic_items (for use from sync callers e.g. agent step)."""
-        from mirix.database.sync_bridge import get_event_loop
+        from mirix.database.sync_bridge import get_event_loop, run_sync
 
         loop = get_event_loop()
         if loop:
-            return asyncio.run_coroutine_threadsafe(
-                self.list_semantic_items(*args, **kwargs), loop
-            ).result(timeout=60)
+            return run_sync(self.list_semantic_items(*args, **kwargs), timeout=60)
         raise RuntimeError("No event loop available for sync list_semantic_items")
 
     @enforce_types
@@ -1010,12 +1014,15 @@ class SemanticMemoryManager:
             try:
                 item = SemanticMemoryItem.read(db_session=session, identifier=semantic_memory_id, actor=actor)
                 # Remove from cache before hard delete
-                from mirix.database.cache_provider import get_cache_provider
+                from mirix.database.cache_provider import (
+                    get_cache_provider,
+                    sync_cache_delete,
+                )
 
                 cache_provider = get_cache_provider()
                 if cache_provider:
                     cache_key = f"{cache_provider.SEMANTIC_PREFIX}{semantic_memory_id}"
-                    cache_provider.delete(cache_key)
+                    sync_cache_delete(cache_key)
                 item.hard_delete(session)
             except NoResultFound:
                 raise NoResultFound(f"Semantic memory item with id {semantic_memory_id} not found.")

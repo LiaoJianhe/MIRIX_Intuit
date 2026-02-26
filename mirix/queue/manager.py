@@ -9,12 +9,14 @@ user_id-based partitioning for parallel processing.
 
 import atexit
 import logging
+import threading
 import time
 from typing import Any, List, Optional
 
 from mirix.log import get_logger
 from mirix.queue import config
 from mirix.queue.memory_queue import MemoryQueue, PartitionedMemoryQueue
+from mirix.settings import settings
 from mirix.queue.message_pb2 import QueueMessage
 from mirix.queue.queue_interface import QueueInterface
 from mirix.queue.worker import QueueWorker
@@ -39,6 +41,7 @@ class QueueManager:
         self._initialized = False
         self._num_workers = 1
         self._round_robin = False
+        self._step_semaphore: Optional[threading.Semaphore] = None
 
     def initialize(self, server: Optional[Any] = None) -> None:
         """
@@ -86,7 +89,18 @@ class QueueManager:
             "provided" if server else "None",
         )
 
+        if settings.uvicorn_workers > 1 and config.QUEUE_TYPE == "memory":
+            logger.warning(
+                "In-memory queue does not share state across processes. With uvicorn_workers=%s, "
+                "each process has its own queue; messages enqueued in one process are not visible "
+                "to workers in another. Use Kafka (QUEUE_TYPE=kafka) for multi-worker deployments.",
+                settings.uvicorn_workers,
+            )
+
         self._server = server
+
+        # Bounded concurrency for agent steps across all workers
+        self._step_semaphore = threading.Semaphore(settings.max_concurrent_agent_steps)
 
         # Create appropriate queue based on configuration
         logger.info("Creating queue instance...")
@@ -100,13 +114,22 @@ class QueueManager:
             # Multiple workers with partitioned queue
             logger.info("Creating %d background workers (partitioned)...", self._num_workers)
             for partition_id in range(self._num_workers):
-                worker = QueueWorker(self._queue, server=self._server, partition_id=partition_id)
+                worker = QueueWorker(
+                    self._queue,
+                    server=self._server,
+                    partition_id=partition_id,
+                    step_semaphore=self._step_semaphore,
+                )
                 self._workers.append(worker)
                 logger.debug("Worker %d created", partition_id)
         else:
             # Single worker (default behavior)
             logger.info("Creating single background worker...")
-            worker = QueueWorker(self._queue, server=self._server)
+            worker = QueueWorker(
+                self._queue,
+                server=self._server,
+                step_semaphore=self._step_semaphore,
+            )
             self._workers.append(worker)
             logger.debug("Worker created")
 

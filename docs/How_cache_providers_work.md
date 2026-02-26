@@ -68,46 +68,41 @@ With no provider, the handler takes the `else` branch: **one `asyncio.to_thread(
 
 ## 2. Redis as Cache Provider
 
-When Redis is available, the server registers it as the active cache provider. **RedisCacheProvider** implements both sync and async methods: sync for ORM and managers that run in threads, async for REST handlers so Redis I/O does not block the event loop.
+Mirix supports two Redis registration patterns:
 
-### 2.1 Registration at startup
+- **Async path (default):** `RedisAsyncCacheProvider` wraps `RedisMemoryClient` (redis.asyncio.Redis). Registered with `async_only=True`. Sync callers use `sync_cache_*`, which route through the sync bridge; async callers use `acache_*` and call the provider's async methods directly.
+- **Sync path (optional):** `RedisSyncCacheProvider` wraps `RedisSyncMemoryClient` (sync redis.Redis). Registered with `async_only=False`. Sync callers call provider sync methods directly (no bridge); async callers use `asyncio.to_thread(sync_method)`.
 
-On server startup, `server.py` calls `initialize_redis_client()`. Inside `redis_client.py`, after the connection and indexes are created, Redis **auto-registers** as the cache provider:
+### 2.1 Registration at startup (async path — default)
+
+On server startup, `initialize_redis_client()` runs. Inside `redis_client.py`, after the connection and indexes are created, Redis **auto-registers** as the cache provider with **async_only=True**:
 
 ```python
 # redis_client.py (inside initialize_redis_client())
 from mirix.database.cache_provider import register_cache_provider
-from mirix.database.redis_cache_provider import RedisCacheProvider
+from mirix.database.redis_cache_provider import RedisAsyncCacheProvider
 from mirix.database.redis_search_provider import RedisSearchProvider
 from mirix.database.search_provider import register_search_provider
 from mirix.database.sync_bridge import set_event_loop_for_sync_bridge
 
 set_event_loop_for_sync_bridge()
-redis_cache_provider = RedisCacheProvider(_redis_client)
-register_cache_provider("redis", redis_cache_provider)
+redis_cache_provider = RedisAsyncCacheProvider(_redis_client)
+register_cache_provider("redis", redis_cache_provider, async_only=True)
 redis_search_provider = RedisSearchProvider(_redis_client)
 register_search_provider("redis", redis_search_provider)
 ```
 
-`register_cache_provider("redis", redis_provider)` runs under `_registry_lock`: it stores the instance in `_cache_providers`, sets `_active_provider_name = "redis"`, and sets `_active_provider = provider`. `get_cache_provider()` performs a lock-free read of `_active_provider` and returns that `RedisCacheProvider` instance.
+`register_cache_provider("redis", redis_cache_provider, async_only=True)` stores the provider and sets `_active_provider_async_only = True`. Sync callers use the **sync_cache_*** helpers (e.g. `sync_cache_get_hash`), which run the corresponding `acache_*` coroutine via the sync bridge. Async callers use `acache_*` and hit the provider's async methods directly. `RedisCacheProvider` is a backward-compat alias for `RedisAsyncCacheProvider`.
 
-### 2.2 The adapter: RedisCacheProvider
+### 2.2 The adapters: RedisAsyncCacheProvider and RedisSyncCacheProvider
 
-`RedisCacheProvider` wraps `RedisMemoryClient` and implements the full cache interface:
+- **RedisAsyncCacheProvider** wraps `RedisMemoryClient` (async). It implements **only** async methods; sync callers go through `sync_cache_*` → sync bridge → `acache_*`.
+- **RedisSyncCacheProvider** wraps `RedisSyncMemoryClient` (sync redis.Redis). It implements **only** sync methods; async callers use `acache_*` which fall back to `asyncio.to_thread(sync_method)`. To use the sync path: `initialize_redis_sync_client()` then `register_cache_provider("redis", RedisSyncCacheProvider(sync_client))`.
 
-- **Sync** (for ORM and managers running in threads): `get`, `set`, `delete`, `get_hash`, `set_hash`, `get_json`, `set_json`, plus extended `delete_many`, `update_hash_field`, `set_string`, `get_string`, `delete_string`. Implemented via `_run_async()` using `asyncio.run_coroutine_threadsafe()` so the sync API works from non-async contexts.
-- **Async** (for REST handlers): `aget`, `aset`, `adelete`, `aget_hash`, `aset_hash`, `aget_json`, `aset_json`, plus `adelete_many`, `aupdate_hash_field`, `aset_string`, `aget_string`, `adelete_string`. These call `RedisMemoryClient`’s async methods directly, so no thread is used for Redis I/O on the async path.
 
-### 2.3 Sync path — managers
+### 2.3 Sync path — managers (async provider)
 
-When sync code (agents, workers, other managers) calls a manager with `use_cache=True`:
-
-```python
-cache_provider = get_cache_provider()   # → RedisCacheProvider
-cached_data = cache_provider.get_hash(key)   # Sync Redis HGETALL
-```
-
-Flow: **manager → RedisCacheProvider.get_hash() → RedisMemoryClient.get_hash() → Redis.** On cache miss, the manager hits PostgreSQL and then calls `cache_provider.set_hash(...)` to populate the cache.
+When the **async** Redis provider is registered (`async_only=True`), sync code uses the dispatcher helpers: `sync_cache_get_hash(key)` etc. These run `acache_get_hash` via the sync bridge. When the **sync** Redis provider is registered (`async_only=False`), the dispatcher calls `provider.get_hash(key)` directly (no bridge).
 
 ### 2.4 Async path — REST handlers and _acache_dispatch
 
@@ -158,8 +153,9 @@ REST handler (async)
 
 | Path        | What happens                                                                 |
 |------------|-------------------------------------------------------------------------------|
-| Sync       | Manager or ORM uses `get_cache_provider()` → `RedisCacheProvider`; sync get/set use `_run_async` (run_coroutine_threadsafe) so Redis runs on the event loop from a worker thread. |
-| Async REST | Handler uses `async_cache_read` → `acache_get_hash` / `acache_set_hash` → `_acache_dispatch` → `await provider.aget_hash` / `aset_hash` (direct async Redis, no thread). |
+| Sync (async provider) | Sync callers use `sync_cache_get_hash` etc. → dispatcher runs `acache_*` via sync bridge (run_coroutine_threadsafe). Requires `set_event_loop_for_sync_bridge()` from async startup. |
+| Sync (sync provider)  | Sync callers use `sync_cache_get_hash` etc. → dispatcher calls `provider.get_hash` directly (no bridge). |
+| Async REST | Handler uses `async_cache_read` → `acache_get_hash` / `acache_set_hash` → `_acache_dispatch` → `await provider.aget_hash` / `aset_hash` (direct async Redis, no thread). With sync provider, `_acache_dispatch` falls back to `asyncio.to_thread(provider.get_hash)`. |
 
 ---
 
@@ -169,13 +165,13 @@ An async cache provider implements the **optional** async methods (e.g. `aget_ha
 
 ### 3.1 Registration
 
-Another service (e.g. ECMS) or startup code creates a provider that implements both sync and async interfaces, then registers it:
+Another service or startup code creates a provider that implements both sync and async interfaces, then registers it:
 
 ```python
 from mirix.database.cache_provider import register_cache_provider
 
 async_provider = MyAsyncCacheProvider(config)   # has get_hash, set_hash, aget_hash, aset_hash, ...
-register_cache_provider("ips_cache", async_provider)
+register_cache_provider("my_cache", async_provider)
 ```
 
 The last registered provider is active, so `get_cache_provider()` returns `MyAsyncCacheProvider`.
@@ -269,8 +265,8 @@ When Redis is used, both providers are registered in `redis_client.py` after the
 
 ```python
 # redis_client.py (inside initialize_redis_client())
-redis_cache_provider = RedisCacheProvider(_redis_client)
-register_cache_provider("redis", redis_cache_provider)
+redis_cache_provider = RedisAsyncCacheProvider(_redis_client)
+register_cache_provider("redis", redis_cache_provider, async_only=True)
 redis_search_provider = RedisSearchProvider(_redis_client)
 register_search_provider("redis", redis_search_provider)
 ```
@@ -352,3 +348,15 @@ Same cache keys, same payloads; only the I/O path (async vs sync) changes.
 | Async provider | e.g. `MyAsyncCacheProvider` | Sync get/set on provider + DB | await provider.aget_hash/aset_hash + to_thread(db_fn) |
 
 The same REST and manager code supports all cases; only the registered provider and whether it implements async methods change the behavior. A **sync-only** provider (sync methods only, no `aget_*`/`aset_*`) is supported: async callers use `_acache_dispatch`, which falls back to `asyncio.to_thread(sync_method)` when the async variant is missing.
+
+### Option 2: Async-only cache provider (sync_cache_* API)
+
+To support an **async-only** cache provider (one that implements only `aget_*`/`aset_*` and no sync `get_*`/`set_*`), register it with **`async_only=True`**:
+
+```python
+register_cache_provider("ips_cache", async_only_provider, async_only=True)
+```
+
+When `async_only=True`, all sync callers (managers, ORM lifecycle) use the **sync cache API** (`sync_cache_get_hash`, `sync_cache_set_hash`, `sync_cache_get_json`, `sync_cache_set_json`, `sync_cache_delete`, `sync_cache_delete_many`, `sync_cache_update_hash_field`, `sync_cache_set_string`, `sync_cache_get_string`, `sync_cache_delete_string`). These helpers run the corresponding `acache_*` coroutine via the sync bridge (`run_coroutine_threadsafe` on the stored event loop). The provider does not need to implement any sync methods.
+
+**Requirement:** When using `async_only=True`, the application must call **`set_event_loop_for_sync_bridge()`** from async context (e.g. in REST server startup or Redis init) before any sync code runs cache operations. Otherwise sync_cache_* will return None/False/0 when the loop is missing.

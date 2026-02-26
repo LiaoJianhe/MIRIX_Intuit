@@ -35,7 +35,7 @@ from mirix.helpers import ToolRulesSolver
 from mirix.helpers.message_helpers import prepare_input_message_create
 from mirix.interface import AgentInterface
 from mirix.llm_api.helpers import calculate_summarizer_cutoff, get_token_counts_for_messages, is_context_overflow_error
-from mirix.llm_api.llm_api_tools import create
+from mirix.llm_api.llm_api_tools import acreate, create
 from mirix.llm_api.llm_client import LLMClient
 from mirix.log import get_logger
 from mirix.memory import summarize_messages
@@ -857,6 +857,85 @@ class Agent(BaseAgent):
 
         log_telemetry(self.logger, "_handle_ai_response finish catch-all exception")
         raise Exception("Retries exhausted and no valid response received.")
+
+    async def _async_get_ai_reply(
+        self,
+        message_sequence: List[Message],
+        function_call: Optional[str] = None,
+        first_message: bool = False,
+        stream: bool = False,
+        step_count: Optional[int] = None,
+        get_input_data_for_debugging: bool = False,
+        existing_file_uris: Optional[List[str]] = None,
+        llm_client: Optional[LLMClient] = None,
+    ) -> ChatCompletionResponse:
+        """
+        Single-attempt async LLM call; used from inner_step via run_sync to release
+        the worker thread during the LLM wait. Falls back to sync _get_ai_reply on
+        timeout or when no event loop is available.
+        """
+        allowed_tool_names = self.tool_rules_solver.get_allowed_tool_names(
+            last_function_response=self.last_function_response
+        )
+        agent_state_tool_jsons = [t.json_schema for t in self.agent_state.tools]
+        allowed_functions = (
+            agent_state_tool_jsons
+            if not allowed_tool_names
+            else [f for f in agent_state_tool_jsons if f["name"] in allowed_tool_names]
+        )
+        force_tool_call = None
+        if (
+            step_count is not None
+            and step_count == 0
+            and not self.supports_structured_output
+            and len(self.tool_rules_solver.init_tool_rules) > 0
+        ):
+            force_tool_call = self.tool_rules_solver.init_tool_rules[0].tool_name
+        elif step_count is not None and step_count > 0 and len(allowed_tool_names) == 1:
+            force_tool_call = allowed_tool_names[0]
+
+        active_llm_client = llm_client or LLMClient.create(llm_config=self.agent_state.llm_config)
+
+        if active_llm_client and not stream:
+            response = await active_llm_client.async_send_llm_request(
+                messages=message_sequence,
+                tools=allowed_functions,
+                stream=stream,
+                force_tool_call=force_tool_call,
+                get_input_data_for_debugging=get_input_data_for_debugging,
+                existing_file_uris=existing_file_uris,
+            )
+        else:
+            response = await acreate(
+                llm_config=self.agent_state.llm_config,
+                messages=message_sequence,
+                user_id=self.agent_state.created_by_id,
+                functions=allowed_functions,
+                function_call=function_call,
+                first_message=first_message,
+                force_tool_call=force_tool_call,
+                stream=stream,
+                stream_interface=self.interface,
+                name=self.agent_state.name,
+            )
+
+        if get_input_data_for_debugging:
+            return response
+        if len(response.choices) == 0 or response.choices[0] is None:
+            raise ValueError(f"API call returned an empty message: {response}")
+        for choice in response.choices:
+            if choice.message.content == "" and len(choice.message.tool_calls) == 0:
+                raise ValueError(f"API call returned an empty message: {response}")
+        if response.choices[0].finish_reason not in ["stop", "function_call", "tool_calls"]:
+            raise ValueError(f"Bad finish reason from API: {response.choices[0].finish_reason}")
+
+        if (
+            hasattr(response, "usage")
+            and response.usage is not None
+            and getattr(response.usage, "total_tokens", 0) > self.agent_state.llm_config.context_window
+        ):
+            self.summarize_messages_inplace(existing_file_uris=existing_file_uris)
+        return response
 
     def _handle_ai_response(
         self,
@@ -2268,14 +2347,47 @@ These keywords have been used to retrieve relevant memories from the database.
                 )
 
             # Step 2: send the conversation and available functions to the LLM
-            response = self._get_ai_reply(
-                message_sequence=input_message_sequence,
-                first_message=first_message,
-                stream=stream,
-                step_count=step_count,
-                existing_file_uris=existing_file_uris,
-                llm_client=llm_client,
-            )
+            # Use async path when we have an event loop and are not on it (releases thread during LLM wait)
+            try:
+                import threading
+
+                from mirix.database.sync_bridge import get_event_loop, get_event_loop_thread_id, run_sync
+
+                loop = get_event_loop()
+                on_loop_thread = (
+                    get_event_loop_thread_id() is not None
+                    and threading.current_thread().ident == get_event_loop_thread_id()
+                )
+                if loop and not on_loop_thread:
+                    response = run_sync(
+                        self._async_get_ai_reply(
+                            message_sequence=input_message_sequence,
+                            first_message=first_message,
+                            stream=stream,
+                            step_count=step_count,
+                            existing_file_uris=existing_file_uris,
+                            llm_client=llm_client,
+                        ),
+                        timeout=120,
+                    )
+                else:
+                    response = self._get_ai_reply(
+                        message_sequence=input_message_sequence,
+                        first_message=first_message,
+                        stream=stream,
+                        step_count=step_count,
+                        existing_file_uris=existing_file_uris,
+                        llm_client=llm_client,
+                    )
+            except Exception:
+                response = self._get_ai_reply(
+                    message_sequence=input_message_sequence,
+                    first_message=first_message,
+                    stream=stream,
+                    step_count=step_count,
+                    existing_file_uris=existing_file_uris,
+                    llm_client=llm_client,
+                )
 
             # Log the raw AI response for debugging and analysis
             printv(

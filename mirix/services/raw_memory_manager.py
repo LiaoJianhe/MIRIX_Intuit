@@ -209,13 +209,17 @@ class RawMemoryManager:
         # Try cache first (cache provider: Redis or IPS Cache)
         cache_provider = None
         try:
-            from mirix.database.cache_provider import get_cache_provider
+            from mirix.database.cache_provider import (
+                get_cache_provider,
+                sync_cache_get_json,
+                sync_cache_set_json,
+            )
 
             cache_provider = get_cache_provider() if use_cache else None
 
             if cache_provider:
                 cache_key = f"{cache_provider.RAW_MEMORY_PREFIX}{memory_id}"
-                cached_data = cache_provider.get_json(cache_key)
+                cached_data = sync_cache_get_json(cache_key)
                 if cached_data:
                     # Cache HIT - validate scope before returning
                     logger.debug("Cache HIT for raw memory %s", memory_id)
@@ -261,7 +265,9 @@ class RawMemoryManager:
                     if cache_provider:
                         cache_key = f"{cache_provider.RAW_MEMORY_PREFIX}{memory_id}"
                         data = pydantic_memory.model_dump(mode="json")
-                        cache_provider.set_json(cache_key, data, ttl=settings.redis_ttl_default)
+                        sync_cache_set_json(
+                            cache_key, data, ttl=settings.redis_ttl_default
+                        )
                         logger.debug(
                             "Populated cache for raw memory %s",
                             memory_id,
@@ -408,12 +414,15 @@ class RawMemoryManager:
 
             # Invalidate cache
             try:
-                from mirix.database.cache_provider import get_cache_provider
+                from mirix.database.cache_provider import (
+                    get_cache_provider,
+                    sync_cache_delete,
+                )
 
                 cache_provider = get_cache_provider()
                 if cache_provider:
                     cache_key = f"{cache_provider.RAW_MEMORY_PREFIX}{memory_id}"
-                    cache_provider.delete(cache_key)
+                    sync_cache_delete(cache_key)
                     logger.debug("Invalidated cache for memory %s", memory_id)
             except Exception as e:
                 logger.warning(
@@ -467,12 +476,15 @@ class RawMemoryManager:
 
                 # Invalidate cache
                 try:
-                    from mirix.database.cache_provider import get_cache_provider
+                    from mirix.database.cache_provider import (
+                        get_cache_provider,
+                        sync_cache_delete,
+                    )
 
                     cache_provider = get_cache_provider()
                     if cache_provider:
                         cache_key = f"{cache_provider.RAW_MEMORY_PREFIX}{memory_id}"
-                        cache_provider.delete(cache_key)
+                        sync_cache_delete(cache_key)
                         logger.debug(
                             "Invalidated cache for deleted memory %s",
                             memory_id,

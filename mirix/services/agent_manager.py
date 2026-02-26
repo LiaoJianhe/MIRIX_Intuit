@@ -722,15 +722,13 @@ class AgentManager:
 
             # Invalidate parent cache if this is a child agent (async from sync context)
             if parent_id:
-                import asyncio
+                from mirix.database.sync_bridge import run_sync_or_default
 
-                from mirix.database.sync_bridge import get_event_loop
-
-                loop = get_event_loop()
-                if loop:
-                    asyncio.run_coroutine_threadsafe(
-                        self._invalidate_parent_cache_for_child(new_agent.id, parent_id), loop
-                    ).result(timeout=5)
+                run_sync_or_default(
+                    self._invalidate_parent_cache_for_child(new_agent.id, parent_id),
+                    default=None,
+                    timeout=5,
+                )
 
             # Convert to PydanticAgentState and return
             return new_agent.to_pydantic()
@@ -740,13 +738,14 @@ class AgentManager:
         # Get current state BEFORE update to detect changes (async from sync context)
         old_agent_state = None
         if agent_update.system:
-            from mirix.database.sync_bridge import get_event_loop
+            from mirix.database.sync_bridge import get_event_loop, run_sync
 
             loop = get_event_loop()
             if loop:
-                old_agent_state = asyncio.run_coroutine_threadsafe(
-                    self.get_agent_by_id(agent_id=agent_id, actor=actor), loop
-                ).result(timeout=10)
+                old_agent_state = run_sync(
+                    self.get_agent_by_id(agent_id=agent_id, actor=actor),
+                    timeout=10,
+                )
 
         # Update agent (including system field in database)
         agent_state = self._update_agent(agent_id=agent_id, agent_update=agent_update, actor=actor)
@@ -877,20 +876,22 @@ class AgentManager:
             agent.update_with_redis(session, actor=actor)  # Updates Redis cache
 
             # Invalidate parent caches if parent_id changed or agent has a parent (async from sync context)
-            import asyncio
-
-            from mirix.database.sync_bridge import get_event_loop
+            from mirix.database.sync_bridge import get_event_loop, run_sync_or_default
 
             loop = get_event_loop()
             if loop:
                 if old_parent_id:
-                    asyncio.run_coroutine_threadsafe(
-                        self._invalidate_parent_cache_for_child(agent_id, old_parent_id), loop
-                    ).result(timeout=5)
+                    run_sync_or_default(
+                        self._invalidate_parent_cache_for_child(agent_id, old_parent_id),
+                        default=None,
+                        timeout=5,
+                    )
                 if agent.parent_id and agent.parent_id != old_parent_id:
-                    asyncio.run_coroutine_threadsafe(
-                        self._invalidate_parent_cache_for_child(agent_id, agent.parent_id), loop
-                    ).result(timeout=5)
+                    run_sync_or_default(
+                        self._invalidate_parent_cache_for_child(agent_id, agent.parent_id),
+                        default=None,
+                        timeout=5,
+                    )
 
             # Convert to PydanticAgentState and return
             return agent.to_pydantic()
@@ -904,7 +905,12 @@ class AgentManager:
             parent_id: Optional parent_id if known, otherwise will look up from reverse mapping
         """
         try:
-            from mirix.database.cache_provider import acache_delete_string, acache_get_string, get_cache_provider
+            from mirix.database.cache_provider import (
+                acache_delete,
+                acache_delete_string,
+                acache_get_string,
+                get_cache_provider,
+            )
 
             cache_provider = get_cache_provider()
 
@@ -916,7 +922,7 @@ class AgentManager:
             # Invalidate parent agent cache via cache provider
             if parent_id and cache_provider:
                 parent_key = f"{cache_provider.AGENT_PREFIX}{parent_id}"
-                cache_provider.delete(parent_key)
+                await acache_delete(parent_key)
                 logger.debug(
                     "Invalidated parent agent %s cache due to child %s change",
                     parent_id,
@@ -1218,7 +1224,12 @@ class AgentManager:
         try:
             import json
 
-            from mirix.database.cache_provider import acache_set_string, get_cache_provider
+            from mirix.database.cache_provider import (
+                acache_get_hash,
+                acache_set_hash,
+                acache_set_string,
+                get_cache_provider,
+            )
             from mirix.settings import settings
 
             cache_provider = get_cache_provider()
@@ -1231,9 +1242,11 @@ class AgentManager:
 
                     # Update parent's cache: get existing hash, merge children_ids, set_hash
                     parent_key = f"{cache_provider.AGENT_PREFIX}{agent_state.id}"
-                    existing = cache_provider.get_hash(parent_key) or {}
+                    existing = (await acache_get_hash(parent_key)) or {}
                     existing["children_ids"] = json.dumps(children_ids)
-                    cache_provider.set_hash(parent_key, existing, ttl=settings.redis_ttl_agents)
+                    await acache_set_hash(
+                        parent_key, existing, ttl=settings.redis_ttl_agents
+                    )
 
                     # Maintain reverse mapping for cache invalidation
                     for child_id in children_ids:
@@ -1356,8 +1369,12 @@ class AgentManager:
                 if isinstance(cached_data["tool_ids"], str)
                 else cached_data["tool_ids"]
             )
+            from mirix.database.cache_provider import sync_cache_get_hash
+
             for tool_id in tool_ids:
-                tool_data = cache_provider.get_hash(f"{cache_provider.TOOL_PREFIX}{tool_id}")
+                tool_data = sync_cache_get_hash(
+                    f"{cache_provider.TOOL_PREFIX}{tool_id}"
+                )
                 if tool_data:
                     if "json_schema" in tool_data and isinstance(tool_data["json_schema"], str):
                         tool_data["json_schema"] = json.loads(tool_data["json_schema"])
@@ -1379,7 +1396,9 @@ class AgentManager:
             )
             prompt_template = cached_data.get("memory_prompt_template", "")
             for block_id in block_ids:
-                block_data = cache_provider.get_hash(f"{cache_provider.BLOCK_PREFIX}{block_id}")
+                block_data = sync_cache_get_hash(
+                    f"{cache_provider.BLOCK_PREFIX}{block_id}"
+                )
                 if block_data:
                     if "value" not in block_data or block_data["value"] is None:
                         block_data["value"] = ""
@@ -1418,7 +1437,11 @@ class AgentManager:
         """
         import json
 
-        from mirix.database.cache_provider import acache_get_string, acache_set_string
+        from mirix.database.cache_provider import (
+            acache_get_string,
+            acache_set_hash,
+            acache_set_string,
+        )
         from mirix.settings import settings
 
         data = pydantic_agent.model_dump(mode="json")
@@ -1444,7 +1467,9 @@ class AgentManager:
                     tool_data["json_schema"] = json.dumps(tool_data["json_schema"])
                 if "tags" in tool_data and tool_data["tags"]:
                     tool_data["tags"] = json.dumps(tool_data["tags"])
-                cache_provider.set_hash(tool_key, tool_data, ttl=settings.redis_ttl_tools)
+                await acache_set_hash(
+                    tool_key, tool_data, ttl=settings.redis_ttl_tools
+                )
 
         if "memory" in data and data["memory"]:
             memory_obj = data["memory"]
@@ -1534,22 +1559,23 @@ class AgentManager:
 
     def _sync_get_agent_by_id(self, agent_id: str, actor: PydanticClient, use_cache: bool = True) -> PydanticAgentState:
         """Sync wrapper for get_agent_by_id (for use from sync callers)."""
-        from mirix.database.sync_bridge import get_event_loop
+        from mirix.database.sync_bridge import get_event_loop, run_sync
 
         loop = get_event_loop()
         if loop:
-            return asyncio.run_coroutine_threadsafe(self.get_agent_by_id(agent_id, actor, use_cache), loop).result(
-                timeout=10
+            return run_sync(
+                self.get_agent_by_id(agent_id, actor, use_cache),
+                timeout=10,
             )
         raise RuntimeError("No event loop available for sync get_agent_by_id")
 
     def _sync_list_agents(self, *args, **kwargs) -> List[PydanticAgentState]:
         """Sync wrapper for list_agents (for use from sync callers)."""
-        from mirix.database.sync_bridge import get_event_loop
+        from mirix.database.sync_bridge import get_event_loop, run_sync
 
         loop = get_event_loop()
         if loop:
-            return asyncio.run_coroutine_threadsafe(self.list_agents(*args, **kwargs), loop).result(timeout=30)
+            return run_sync(self.list_agents(*args, **kwargs), timeout=30)
         raise RuntimeError("No event loop available for sync list_agents")
 
     async def aget_agent_by_id(self, agent_id: str, actor: PydanticClient) -> PydanticAgentState:
@@ -1633,14 +1659,17 @@ class AgentManager:
 
             # Remove from cache before hard delete
             try:
-                from mirix.database.cache_provider import get_cache_provider
+                from mirix.database.cache_provider import (
+                    get_cache_provider,
+                    sync_cache_delete,
+                )
                 from mirix.log import get_logger
 
                 logger = get_logger(__name__)
                 cache_provider = get_cache_provider()
                 if cache_provider:
                     cache_key = f"{cache_provider.AGENT_PREFIX}{agent_id}"
-                    cache_provider.delete(cache_key)
+                    sync_cache_delete(cache_key)
                     logger.debug("Removed agent %s from cache", agent_id)
             except Exception as e:
                 from mirix.log import get_logger
@@ -1652,15 +1681,13 @@ class AgentManager:
 
             # Invalidate parent cache if this was a child agent (async from sync context)
             if parent_id:
-                import asyncio
+                from mirix.database.sync_bridge import run_sync_or_default
 
-                from mirix.database.sync_bridge import get_event_loop
-
-                loop = get_event_loop()
-                if loop:
-                    asyncio.run_coroutine_threadsafe(
-                        self._invalidate_parent_cache_for_child(agent_id, parent_id), loop
-                    ).result(timeout=5)
+                run_sync_or_default(
+                    self._invalidate_parent_cache_for_child(agent_id, parent_id),
+                    default=None,
+                    timeout=5,
+                )
 
     # ======================================================================================================================
     # In Context Messages Management

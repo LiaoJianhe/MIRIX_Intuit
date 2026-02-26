@@ -73,6 +73,9 @@ from mirix.queue.queue_util import put_messages
 # Initialize server (single instance shared across all requests)
 _server: Optional[SyncServer] = None
 
+# Bounded concurrency for memory extraction (add_memory endpoint)
+_memory_extraction_semaphore: Optional[asyncio.Semaphore] = None
+
 
 def get_server() -> SyncServer:
     """Get or create the singleton SyncServer instance."""
@@ -99,6 +102,16 @@ async def initialize():
     except Exception as e:
         logger.warning("Could not set event loop for sync bridge: %s", e)
 
+    # Set default thread pool for asyncio.to_thread (fast executor)
+    try:
+        from mirix.server.executors import get_fast_executor, initialize_executors
+
+        initialize_executors()
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(get_fast_executor())
+    except Exception as e:
+        logger.warning("Could not set default executor: %s", e)
+
     # Initialize Redis (async; also registers cache provider)
     try:
         from mirix.database.redis_client import initialize_redis_client
@@ -115,10 +128,14 @@ async def initialize():
     # Initialize SyncServer (singleton) in a thread pool so sync cache calls
     # run off the event-loop thread and do not deadlock the Redis sync bridge.
     global _server
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     _server = await loop.run_in_executor(None, SyncServer)
     server = _server
     logger.info("SyncServer initialized")
+
+    # Bounded concurrency for memory extraction (admission control)
+    global _memory_extraction_semaphore
+    _memory_extraction_semaphore = asyncio.Semaphore(settings.max_concurrent_memory_extractions)
 
     # Initialize queue with server reference
     initialize_queue(server)
@@ -131,6 +148,14 @@ async def cleanup():
     This function can be called by external applications to cleanup the server.
     """
     logger.info("Shutting down Mirix REST API server")
+
+    # Shut down executors
+    try:
+        from mirix.server.executors import shutdown_executors
+
+        shutdown_executors()
+    except Exception as e:
+        logger.warning("Could not shut down executors: %s", e)
 
     # Close Redis client and clear sync bridge
     try:
@@ -347,7 +372,9 @@ async def inject_client_org_headers(request: Request, call_next):
     x_api_key = request.headers.get("x-api-key")
     if x_api_key:
         try:
-            client_id, org_id = get_client_and_org(x_api_key=x_api_key)
+            client_id, org_id = await asyncio.to_thread(
+                get_client_and_org, None, None, x_api_key
+            )
 
             # Replace or add headers so FastAPI dependencies can read them
             headers = [
@@ -1157,11 +1184,40 @@ async def list_blocks(
     x_org_id: Optional[str] = Header(None),
 ):
     """List all blocks (filtered by client's read_scopes)."""
+    from mirix.database.cache_layer import async_cache_read
+    from mirix.database.cache_provider import get_cache_provider
+
     server = get_server()
     client_id, org_id = get_client_and_org(x_client_id, x_org_id)
-    client = server.client_manager.get_client_by_id(client_id)
-    user = server.user_manager.get_admin_user()
-    return server.block_manager.get_blocks(
+    cache_provider = get_cache_provider()
+    if cache_provider:
+        client = await async_cache_read(
+            cache_key=f"{cache_provider.CLIENT_PREFIX}{client_id}",
+            db_fn=lambda: server.client_manager.get_client_by_id(
+                client_id, use_cache=False
+            ),
+            method="hash",
+            ttl=settings.redis_ttl_clients,
+            model_class=Client,
+        )
+        user = await async_cache_read(
+            cache_key=f"{cache_provider.USER_PREFIX}{server.user_manager.ADMIN_USER_ID}",
+            db_fn=lambda: server.user_manager.get_user_by_id(
+                server.user_manager.ADMIN_USER_ID, use_cache=False
+            ),
+            method="hash",
+            ttl=settings.redis_ttl_users,
+            model_class=User,
+        )
+    else:
+        client = await asyncio.to_thread(
+            server.client_manager.get_client_by_id, client_id
+        )
+        user = await asyncio.to_thread(server.user_manager.get_admin_user)
+    if not client or not user:
+        raise HTTPException(status_code=404, detail="Client or admin user not found")
+    return await asyncio.to_thread(
+        server.block_manager.get_blocks,
         user=user,
         label=label,
         any_scopes=client.read_scopes,
@@ -1406,7 +1462,7 @@ async def create_or_get_user(
     server = get_server()
 
     # Accept JWT or injected headers (from API key middleware)
-    client, auth_type = get_client_from_jwt_or_api_key(authorization, http_request)
+    client, auth_type = await get_client_from_jwt_or_api_key(authorization, http_request)
     if not client:
         raise HTTPException(status_code=404, detail="Client not found")
 
@@ -2120,17 +2176,31 @@ async def add_memory(
     # Queue for async processing instead of synchronous execution
     # Note: actor is Client for org-level access control
     #       user_id represents the actual end-user (or admin user if not provided)
-    put_messages(
-        actor=client,
-        agent_id=meta_agent.id,
-        input_messages=input_messages,
-        chaining=request.chaining,
-        user_id=user_id,  # End-user for data filtering (or admin user)
-        verbose=request.verbose,
-        filter_tags=filter_tags,
-        use_cache=request.use_cache,
-        occurred_at=request.occurred_at,  # Optional timestamp for episodic memory
-    )
+    if _memory_extraction_semaphore is not None:
+        async with _memory_extraction_semaphore:
+            put_messages(
+                actor=client,
+                agent_id=meta_agent.id,
+                input_messages=input_messages,
+                chaining=request.chaining,
+                user_id=user_id,  # End-user for data filtering (or admin user)
+                verbose=request.verbose,
+                filter_tags=filter_tags,
+                use_cache=request.use_cache,
+                occurred_at=request.occurred_at,  # Optional timestamp for episodic memory
+            )
+    else:
+        put_messages(
+            actor=client,
+            agent_id=meta_agent.id,
+            input_messages=input_messages,
+            chaining=request.chaining,
+            user_id=user_id,
+            verbose=request.verbose,
+            filter_tags=filter_tags,
+            use_cache=request.use_cache,
+            occurred_at=request.occurred_at,
+        )
 
     logger.debug("Memory queued for processing: %s", meta_agent.id)
 
@@ -2157,7 +2227,7 @@ class RetrieveMemoryRequest(BaseModel):
     end_date: Optional[str] = None  # e.g., "2025-11-19T23:59:59" or "2025-11-19T23:59:59+00:00"
 
 
-def retrieve_memories_by_keywords(
+async def retrieve_memories_by_keywords(
     server: SyncServer,
     client: Client,
     user_id: str,
@@ -2197,11 +2267,32 @@ def retrieve_memories_by_keywords(
             end_date.isoformat() if end_date else None,
         )
 
-    # Get timezone from user record (if exists)
+    # Get timezone from user record (if exists); use async cache when on event loop
+    from mirix.database.cache_layer import async_cache_read
+    from mirix.database.cache_provider import get_cache_provider
+
+    cache_provider = get_cache_provider()
+    if cache_provider:
+        user = await async_cache_read(
+            cache_key=f"{cache_provider.USER_PREFIX}{user_id}",
+            db_fn=lambda: server.user_manager.get_user_by_id(
+                user_id, use_cache=False
+            ),
+            method="hash",
+            ttl=settings.redis_ttl_users,
+            model_class=User,
+        )
+    else:
+        user = await asyncio.to_thread(
+            server.user_manager.get_user_by_id, user_id
+        )
+    if user is None:
+        user = await asyncio.to_thread(
+            server.user_manager.get_user_by_id, user_id
+        )
     try:
-        user = server.user_manager.get_user_by_id(user_id)
-        timezone_str = user.timezone
-    except:
+        timezone_str = user.timezone if user else "UTC"
+    except Exception:
         timezone_str = "UTC"
     memories = {}
 
@@ -2210,7 +2301,7 @@ def retrieve_memories_by_keywords(
         episodic_manager = server.episodic_memory_manager
 
         # Get recent episodic memories with temporal filter
-        recent_episodic = episodic_manager.list_episodic_memory(
+        recent_episodic = await episodic_manager.list_episodic_memory(
             agent_state=agent_state,  # Not accessed during BM25 search
             user=user,
             limit=limit,
@@ -2224,7 +2315,7 @@ def retrieve_memories_by_keywords(
         # Get relevant episodic memories based on keywords with temporal filter
         relevant_episodic = []
         if key_words:
-            relevant_episodic = episodic_manager.list_episodic_memory(
+            relevant_episodic = await episodic_manager.list_episodic_memory(
                 agent_state=agent_state,  # Not accessed during BM25 search
                 user=user,
                 query=key_words,
@@ -2266,7 +2357,7 @@ def retrieve_memories_by_keywords(
     try:
         semantic_manager = server.semantic_memory_manager
 
-        semantic_items = semantic_manager.list_semantic_items(
+        semantic_items = await semantic_manager.list_semantic_items(
             agent_state=agent_state,  # Not accessed during BM25 search
             user=user,
             query=key_words,
@@ -2298,7 +2389,7 @@ def retrieve_memories_by_keywords(
     try:
         resource_manager = server.resource_memory_manager
 
-        resources = resource_manager.list_resources(
+        resources = await resource_manager.list_resources(
             agent_state=agent_state,  # Not accessed during BM25 search
             user=user,
             query=key_words,
@@ -2330,7 +2421,7 @@ def retrieve_memories_by_keywords(
     try:
         procedural_manager = server.procedural_memory_manager
 
-        procedures = procedural_manager.list_procedures(
+        procedures = await procedural_manager.list_procedures(
             agent_state=agent_state,  # Not accessed during BM25 search
             user=user,
             query=key_words,
@@ -2361,7 +2452,7 @@ def retrieve_memories_by_keywords(
     try:
         knowledge_vault_manager = server.knowledge_vault_manager
 
-        knowledge_items = knowledge_vault_manager.list_knowledge(
+        knowledge_items = await knowledge_vault_manager.list_knowledge(
             agent_state=agent_state,  # Not accessed during BM25 search
             user=user,
             query=key_words,
@@ -2556,7 +2647,7 @@ async def retrieve_memory_with_conversation(
             )
 
     # Retrieve memories with temporal filtering
-    memories = retrieve_memories_by_keywords(
+    memories = await retrieve_memories_by_keywords(
         server=server,
         client=client,
         user_id=user_id,
@@ -2650,7 +2741,7 @@ async def retrieve_memory_with_topic(
         }
 
     # Retrieve memories using the helper function
-    memories = retrieve_memories_by_keywords(
+    memories = await retrieve_memories_by_keywords(
         server=server,
         client=client,
         user_id=user_id,
@@ -2755,7 +2846,7 @@ async def search_memory(
     # Support both dashboard JWTs and programmatic API key access
     if authorization:
         try:
-            client, _ = get_client_from_jwt_or_api_key(authorization)
+            client, _ = await get_client_from_jwt_or_api_key(authorization)
         except HTTPException:
             # If JWT/API key auth fails, fall through to use x_client_id
             pass
@@ -3775,7 +3866,7 @@ async def list_memory_components(
         )
 
     # Authenticate (JWT or API key)
-    client, auth_type = get_client_from_jwt_or_api_key(authorization, http_request)
+    client, auth_type = await get_client_from_jwt_or_api_key(authorization, http_request)
     server = get_server()
 
     # Default to the admin user for this client
@@ -3930,7 +4021,8 @@ async def list_memory_components(
         }
 
     if fetch_all or memory_type == "core":
-        blocks = server.block_manager.get_blocks(
+        blocks = await asyncio.to_thread(
+            server.block_manager.get_blocks,
             user=user,
             any_scopes=client.read_scopes,
             auto_create_from_default=False,
@@ -3976,7 +4068,7 @@ async def list_memory_fields(
     what the backend supports.
     """
     # Authenticate to keep parity with other memory endpoints
-    get_client_from_jwt_or_api_key(authorization, http_request)
+    await get_client_from_jwt_or_api_key(authorization, http_request)
 
     fields_by_type = {
         "episodic": ["summary", "details"],
@@ -3999,12 +4091,15 @@ async def list_memory_fields(
 # ============================================================================
 
 
-def get_client_from_jwt_or_api_key(
+async def get_client_from_jwt_or_api_key(
     authorization: Optional[str] = None,
     request: Optional[Request] = None,
 ) -> tuple:
     """
     Authenticate using either JWT token (dashboard) or Client API Key (programmatic).
+
+    Uses async cache (acache_get_hash) when available to avoid sync cache deadlock
+    on the event loop thread.
 
     Args:
         authorization: Bearer JWT token from Authorization header
@@ -4017,17 +4112,37 @@ def get_client_from_jwt_or_api_key(
     Raises:
         HTTPException: If neither auth method is provided or valid
     """
+    from mirix.database.cache_layer import async_cache_read
+    from mirix.database.cache_provider import get_cache_provider
+
     server = get_server()
+    cache_provider = get_cache_provider()
+
+    async def _get_client(client_id: str):
+        if cache_provider:
+            return await async_cache_read(
+                cache_key=f"{cache_provider.CLIENT_PREFIX}{client_id}",
+                db_fn=lambda: server.client_manager.get_client_by_id(
+                    client_id, use_cache=False
+                ),
+                method="hash",
+                ttl=settings.redis_ttl_clients,
+                model_class=Client,
+            )
+        return await asyncio.to_thread(
+            server.client_manager.get_client_by_id, client_id
+        )
 
     # Try JWT first (dashboard)
     if authorization:
         try:
             admin_payload = get_current_admin(authorization)
-            # Get client from JWT payload (sub contains client_id)
             client_id = admin_payload["sub"]
-            client = server.client_manager.get_client_by_id(client_id)
+            client = await _get_client(client_id)
             if not client:
-                raise HTTPException(status_code=404, detail=f"Client {client_id} not found")
+                raise HTTPException(
+                    status_code=404, detail=f"Client {client_id} not found"
+                )
             return client, "jwt"
         except HTTPException:
             pass  # Try API key next
@@ -4038,9 +4153,11 @@ def get_client_from_jwt_or_api_key(
         org_id = request.headers.get("x-org-id")
         if client_id:
             client_id, org_id = get_client_and_org(client_id, org_id)
-            client = server.client_manager.get_client_by_id(client_id)
+            client = await _get_client(client_id)
             if not client:
-                raise HTTPException(status_code=404, detail=f"Client {client_id} not found")
+                raise HTTPException(
+                    status_code=404, detail=f"Client {client_id} not found"
+                )
             return client, "api_key"
 
     raise HTTPException(
@@ -4072,7 +4189,7 @@ async def update_episodic_memory(
     Updates the summary and/or details fields of the memory.
     """
     # Authenticate with either JWT or API key
-    client, auth_type = get_client_from_jwt_or_api_key(authorization, http_request)
+    client, auth_type = await get_client_from_jwt_or_api_key(authorization, http_request)
 
     server = get_server()
 
@@ -4121,7 +4238,7 @@ async def delete_episodic_memory(
 
     **Accepts both JWT (dashboard) and Client API Key (programmatic).**
     """
-    client, auth_type = get_client_from_jwt_or_api_key(authorization, http_request)
+    client, auth_type = await get_client_from_jwt_or_api_key(authorization, http_request)
 
     server = get_server()
 
@@ -4154,7 +4271,7 @@ async def update_semantic_memory(
     **Accepts both JWT (dashboard) and Client API Key (programmatic).**
     """
     # Authenticate with either JWT or API key
-    client, auth_type = get_client_from_jwt_or_api_key(authorization, http_request)
+    client, auth_type = await get_client_from_jwt_or_api_key(authorization, http_request)
 
     server = get_server()
 
@@ -4210,7 +4327,7 @@ async def delete_semantic_memory(
 
     **Accepts both JWT (dashboard) and Client API Key (programmatic).**
     """
-    client, auth_type = get_client_from_jwt_or_api_key(authorization, http_request)
+    client, auth_type = await get_client_from_jwt_or_api_key(authorization, http_request)
 
     server = get_server()
 
@@ -4242,7 +4359,7 @@ async def update_procedural_memory(
     **Accepts both JWT (dashboard) and Client API Key (programmatic).**
     """
     # Authenticate with either JWT or API key
-    client, auth_type = get_client_from_jwt_or_api_key(authorization, http_request)
+    client, auth_type = await get_client_from_jwt_or_api_key(authorization, http_request)
 
     server = get_server()
 
@@ -4295,7 +4412,7 @@ async def delete_procedural_memory(
 
     **Accepts both JWT (dashboard) and Client API Key (programmatic).**
     """
-    client, auth_type = get_client_from_jwt_or_api_key(authorization, http_request)
+    client, auth_type = await get_client_from_jwt_or_api_key(authorization, http_request)
 
     server = get_server()
 
@@ -4327,7 +4444,7 @@ async def create_raw_memory_handler(
         request: Create request with context, filter_tags, etc.
         user_id: User ID this memory belongs to (required query parameter)
     """
-    client, auth_type = get_client_from_jwt_or_api_key(authorization, http_request)
+    client, auth_type = await get_client_from_jwt_or_api_key(authorization, http_request)
     response = await create_raw_memory(request, user_id, client)
     return response
 
@@ -4420,7 +4537,7 @@ async def get_raw_memory_handler(
     **Accepts both JWT (dashboard) and Client API Key (programmatic).**
     """
     # Authenticate with either JWT or API key
-    client, auth_type = get_client_from_jwt_or_api_key(authorization, http_request)
+    client, auth_type = await get_client_from_jwt_or_api_key(authorization, http_request)
     response = await get_raw_memory(memory_id, user_id, client)
     return response
 
@@ -4505,7 +4622,7 @@ async def update_raw_memory_handler(
     **Accepts both JWT (dashboard) and Client API Key (programmatic).**
     """
     # Authenticate with either JWT or API key
-    client, auth_type = get_client_from_jwt_or_api_key(authorization, http_request)
+    client, auth_type = await get_client_from_jwt_or_api_key(authorization, http_request)
     response = await update_raw_memory(memory_id, request, user_id, client)
     return response
 
@@ -4598,7 +4715,7 @@ async def delete_raw_memory_handler(
     **Accepts both JWT (dashboard) and Client API Key (programmatic).**
     """
     # Authenticate with either JWT or API key
-    client, auth_type = get_client_from_jwt_or_api_key(authorization, http_request)
+    client, auth_type = await get_client_from_jwt_or_api_key(authorization, http_request)
     response = await delete_raw_memory(memory_id, client)
     return response
 
@@ -4667,7 +4784,7 @@ async def search_raw_memory_handler(
     **Accepts both JWT (dashboard) and Client API Key (programmatic).**
     """
     # Authenticate with either JWT or API key
-    client, auth_type = get_client_from_jwt_or_api_key(authorization, http_request)
+    client, auth_type = await get_client_from_jwt_or_api_key(authorization, http_request)
     response = await search_raw_memory(request, user_id, client)
     return response
 
@@ -4687,20 +4804,53 @@ async def search_raw_memory(
         client: Client performing the operation
         client_id: Alternative to client - will be resolved to client
     """
+    from mirix.database.cache_layer import async_cache_read
+    from mirix.database.cache_provider import get_cache_provider
+
     server = get_server()
 
-    # Resolve client: use provided client or fetch from client_id
+    # Resolve client: use async cache when on event loop to avoid deadlock
     if not client and client_id:
-        client = server.client_manager.get_client_by_id(client_id)
+        cache_provider = get_cache_provider()
+        if cache_provider:
+            client = await async_cache_read(
+                cache_key=f"{cache_provider.CLIENT_PREFIX}{client_id}",
+                db_fn=lambda: server.client_manager.get_client_by_id(
+                    client_id, use_cache=False
+                ),
+                method="hash",
+                ttl=settings.redis_ttl_clients,
+                model_class=Client,
+            )
+        else:
+            client = await asyncio.to_thread(
+                server.client_manager.get_client_by_id, client_id
+            )
     if not client:
         raise HTTPException(status_code=401, detail="Client or client_id required")
 
-    # If user_id provided, validate user exists
+    # If user_id provided, validate user exists (use async cache when on event loop)
     if user_id:
         try:
             from mirix.orm.errors import NoResultFound
 
-            server.user_manager.get_user_by_id(user_id)
+            cache_provider = get_cache_provider()
+            if cache_provider:
+                user = await async_cache_read(
+                    cache_key=f"{cache_provider.USER_PREFIX}{user_id}",
+                    db_fn=lambda: server.user_manager.get_user_by_id(
+                        user_id, use_cache=False
+                    ),
+                    method="hash",
+                    ttl=settings.redis_ttl_users,
+                    model_class=User,
+                )
+            else:
+                user = await asyncio.to_thread(
+                    server.user_manager.get_user_by_id, user_id
+                )
+            if user is None:
+                raise NoResultFound()
         except NoResultFound:
             raise HTTPException(status_code=404, detail=f"User {user_id} not found")
 
@@ -4832,7 +4982,7 @@ async def cleanup_raw_memories_handler(
         }
     """
     # Authenticate with either JWT or API key
-    client, auth_type = get_client_from_jwt_or_api_key(authorization, http_request)
+    client, auth_type = await get_client_from_jwt_or_api_key(authorization, http_request)
 
     logger.info(
         "Manual cleanup job triggered by client %s (auth: %s) with threshold: %d days",
@@ -4855,11 +5005,28 @@ async def cleanup_raw_memories(
 
     **Accepts both JWT (dashboard) and Client API Key (programmatic).**
     """
+    from mirix.database.cache_layer import async_cache_read
+    from mirix.database.cache_provider import get_cache_provider
+
     server = get_server()
 
-    # Resolve client: use provided client or fetch from client_id
+    # Resolve client: use async cache when on event loop to avoid deadlock
     if not client and client_id:
-        client = server.client_manager.get_client_by_id(client_id)
+        cache_provider = get_cache_provider()
+        if cache_provider:
+            client = await async_cache_read(
+                cache_key=f"{cache_provider.CLIENT_PREFIX}{client_id}",
+                db_fn=lambda: server.client_manager.get_client_by_id(
+                    client_id, use_cache=False
+                ),
+                method="hash",
+                ttl=settings.redis_ttl_clients,
+                model_class=Client,
+            )
+        else:
+            client = await asyncio.to_thread(
+                server.client_manager.get_client_by_id, client_id
+            )
     if not client:
         raise HTTPException(status_code=401, detail="Client or client_id required")
 
@@ -4909,7 +5076,7 @@ async def update_resource_memory(
     **Accepts both JWT (dashboard) and Client API Key (programmatic).**
     """
     # Authenticate with either JWT or API key
-    client, auth_type = get_client_from_jwt_or_api_key(authorization, http_request)
+    client, auth_type = await get_client_from_jwt_or_api_key(authorization, http_request)
 
     server = get_server()
 
@@ -4964,7 +5131,7 @@ async def delete_resource_memory(
 
     **Accepts both JWT (dashboard) and Client API Key (programmatic).**
     """
-    client, auth_type = get_client_from_jwt_or_api_key(authorization, http_request)
+    client, auth_type = await get_client_from_jwt_or_api_key(authorization, http_request)
 
     server = get_server()
 
@@ -4986,7 +5153,7 @@ async def delete_knowledge_vault_memory(
 
     **Accepts both JWT (dashboard) and Client API Key (programmatic).**
     """
-    client, auth_type = get_client_from_jwt_or_api_key(authorization, http_request)
+    client, auth_type = await get_client_from_jwt_or_api_key(authorization, http_request)
 
     server = get_server()
 

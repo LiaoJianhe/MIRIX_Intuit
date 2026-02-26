@@ -31,13 +31,17 @@ class MessageManager:
         logger = get_logger(__name__)
         cache_provider = None
         try:
-            from mirix.database.cache_provider import get_cache_provider
+            from mirix.database.cache_provider import (
+                get_cache_provider,
+                sync_cache_get_hash,
+                sync_cache_set_hash,
+            )
 
             cache_provider = get_cache_provider()
 
             if use_cache and cache_provider:
                 cache_key = f"{cache_provider.MESSAGE_PREFIX}{message_id}"
-                cached_data = cache_provider.get_hash(cache_key)
+                cached_data = sync_cache_get_hash(cache_key)
                 if cached_data:
                     return PydanticMessage(**cached_data)
         except Exception as e:
@@ -55,7 +59,11 @@ class MessageManager:
 
                         cache_key = f"{cache_provider.MESSAGE_PREFIX}{message_id}"
                         data = pydantic_message.model_dump(mode="json")
-                        cache_provider.set_hash(cache_key, data, ttl=settings.redis_ttl_messages)
+                        sync_cache_set_hash(
+                            cache_key,
+                            data,
+                            ttl=settings.redis_ttl_messages,
+                        )
                 except Exception as e:
                     logger.warning("Failed to populate cache for message %s: %s", message_id, e)
 
@@ -183,12 +191,15 @@ class MessageManager:
                     actor=actor,
                 )
                 # Remove from cache before hard delete
-                from mirix.database.cache_provider import get_cache_provider
+                from mirix.database.cache_provider import (
+                    get_cache_provider,
+                    sync_cache_delete,
+                )
 
                 cache_provider = get_cache_provider()
                 if cache_provider:
                     cache_key = f"{cache_provider.MESSAGE_PREFIX}{message_id}"
-                    cache_provider.delete(cache_key)
+                    sync_cache_delete(cache_key)
                 msg.hard_delete(session, actor=actor)
             except NoResultFound:
                 raise ValueError(f"Message with id {message_id} not found.")
@@ -536,13 +547,16 @@ class MessageManager:
 
             # Delete detached messages (and clean up cache)
             deleted_count = 0
-            from mirix.database.cache_provider import get_cache_provider
+            from mirix.database.cache_provider import (
+                get_cache_provider,
+                sync_cache_delete,
+            )
 
             cache_provider = get_cache_provider()
             for msg in detached_messages:
                 if cache_provider:
                     redis_key = f"{cache_provider.MESSAGE_PREFIX}{msg.id}"
-                    cache_provider.delete(redis_key)
+                    sync_cache_delete(redis_key)
                 msg.hard_delete(session, actor=actor)
                 deleted_count += 1
 
@@ -585,13 +599,16 @@ class MessageManager:
                 detached_messages = [msg for msg in all_messages if msg.id not in current_message_ids]
 
                 deleted_count = 0
-                from mirix.database.cache_provider import get_cache_provider
+                from mirix.database.cache_provider import (
+                    get_cache_provider,
+                    sync_cache_delete,
+                )
 
                 cache_provider = get_cache_provider()
                 for msg in detached_messages:
                     if cache_provider:
                         redis_key = f"{cache_provider.MESSAGE_PREFIX}{msg.id}"
-                        cache_provider.delete(redis_key)
+                        sync_cache_delete(redis_key)
                     msg.hard_delete(session)
                     deleted_count += 1
 

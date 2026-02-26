@@ -782,7 +782,13 @@ class SqlalchemyBase(CommonSqlalchemyMetaMixins, Base):
             actor: User performing the operation
         """
         try:
-            from mirix.database.cache_provider import get_cache_provider
+            from mirix.database.cache_provider import (
+                get_cache_provider,
+                sync_cache_delete,
+                sync_cache_set_hash,
+                sync_cache_set_json,
+                sync_cache_set_string,
+            )
             from mirix.settings import settings
 
             cache_provider = get_cache_provider()
@@ -797,39 +803,49 @@ class SqlalchemyBase(CommonSqlalchemyMetaMixins, Base):
             if table_name == "block":
                 cache_key = f"{cache_provider.BLOCK_PREFIX}{self.id}"
                 if operation == "delete":
-                    cache_provider.delete(cache_key)
+                    sync_cache_delete(cache_key)
                 else:
                     data = self.to_pydantic().model_dump(mode="json")
-                    cache_provider.set_hash(cache_key, data, ttl=settings.redis_ttl_blocks)
+                    sync_cache_set_hash(
+                        cache_key, data, ttl=settings.redis_ttl_blocks
+                    )
                 return
 
             if table_name == "messages":
                 cache_key = f"{cache_provider.MESSAGE_PREFIX}{self.id}"
                 if operation == "delete":
-                    cache_provider.delete(cache_key)
+                    sync_cache_delete(cache_key)
                 else:
                     data = self.to_pydantic().model_dump(mode="json")
-                    cache_provider.set_hash(cache_key, data, ttl=settings.redis_ttl_messages)
+                    sync_cache_set_hash(
+                        cache_key, data, ttl=settings.redis_ttl_messages
+                    )
                 return
 
             # ORGANIZATION CACHING (Hash-based)
             if table_name == "organizations":
                 cache_key = f"{cache_provider.ORGANIZATION_PREFIX}{self.id}"
                 if operation == "delete":
-                    cache_provider.delete(cache_key)
+                    sync_cache_delete(cache_key)
                 else:
                     data = self.to_pydantic().model_dump(mode="json")
-                    cache_provider.set_hash(cache_key, data, ttl=settings.redis_ttl_organizations)
+                    sync_cache_set_hash(
+                        cache_key,
+                        data,
+                        ttl=settings.redis_ttl_organizations,
+                    )
                 return
 
             # USER CACHING (Hash-based)
             if table_name == "users":
                 cache_key = f"{cache_provider.USER_PREFIX}{self.id}"
                 if operation == "delete":
-                    cache_provider.delete(cache_key)
+                    sync_cache_delete(cache_key)
                 else:
                     data = self.to_pydantic().model_dump(mode="json")
-                    cache_provider.set_hash(cache_key, data, ttl=settings.redis_ttl_users)
+                    sync_cache_set_hash(
+                        cache_key, data, ttl=settings.redis_ttl_users
+                    )
                 return
 
             # AGENT CACHING (Hash-based, with denormalized tool_ids)
@@ -838,7 +854,7 @@ class SqlalchemyBase(CommonSqlalchemyMetaMixins, Base):
 
                 cache_key = f"{cache_provider.AGENT_PREFIX}{self.id}"
                 if operation == "delete":
-                    cache_provider.delete(cache_key)
+                    sync_cache_delete(cache_key)
                 else:
                     data = self.to_pydantic().model_dump(mode="json")
 
@@ -847,55 +863,86 @@ class SqlalchemyBase(CommonSqlalchemyMetaMixins, Base):
                     if "llm_config" in data and data["llm_config"]:
                         data["llm_config"] = json.dumps(data["llm_config"])
                     if "embedding_config" in data and data["embedding_config"]:
-                        data["embedding_config"] = json.dumps(data["embedding_config"])
+                        data["embedding_config"] = json.dumps(
+                            data["embedding_config"]
+                        )
                     if "tool_rules" in data and data["tool_rules"]:
                         data["tool_rules"] = json.dumps(data["tool_rules"])
                     if "mcp_tools" in data and data["mcp_tools"]:
                         data["mcp_tools"] = json.dumps(data["mcp_tools"])
 
                     if "tools" in data and data["tools"]:
-                        tool_ids = [tool.id if hasattr(tool, "id") else tool["id"] for tool in data["tools"]]
+                        tool_ids = [
+                            tool.id if hasattr(tool, "id") else tool["id"]
+                            for tool in data["tools"]
+                        ]
                         data["tool_ids"] = json.dumps(tool_ids)
 
                         for tool in data["tools"]:
                             tool_data = (
                                 tool
                                 if isinstance(tool, dict)
-                                else tool.model_dump(mode="json") if hasattr(tool, "model_dump") else tool.__dict__
+                                else (
+                                    tool.model_dump(mode="json")
+                                    if hasattr(tool, "model_dump")
+                                    else tool.__dict__
+                                )
                             )
                             tool_key = f"{cache_provider.TOOL_PREFIX}{tool_data['id']}"
 
                             if "json_schema" in tool_data and tool_data["json_schema"]:
-                                tool_data["json_schema"] = json.dumps(tool_data["json_schema"])
+                                tool_data["json_schema"] = json.dumps(
+                                    tool_data["json_schema"]
+                                )
                             if "tags" in tool_data and tool_data["tags"]:
-                                tool_data["tags"] = json.dumps(tool_data["tags"])
+                                tool_data["tags"] = json.dumps(
+                                    tool_data["tags"]
+                                )
 
-                            cache_provider.set_hash(tool_key, tool_data, ttl=settings.redis_ttl_tools)
+                            sync_cache_set_hash(
+                                tool_key,
+                                tool_data,
+                                ttl=settings.redis_ttl_tools,
+                            )
 
                     if "memory" in data and data["memory"]:
                         memory_obj = data["memory"]
                         if isinstance(memory_obj, dict) and "blocks" in memory_obj:
                             block_ids = [
-                                block.id if hasattr(block, "id") else block["id"] for block in memory_obj["blocks"]
+                                block.id
+                                if hasattr(block, "id")
+                                else block["id"]
+                                for block in memory_obj["blocks"]
                             ]
                             data["memory_block_ids"] = json.dumps(block_ids)
-                            data["memory_prompt_template"] = memory_obj.get("prompt_template", "")
+                            data["memory_prompt_template"] = memory_obj.get(
+                                "prompt_template", ""
+                            )
 
                     if "children" in data and data["children"]:
-                        children_ids = [child.id if hasattr(child, "id") else child["id"] for child in data["children"]]
+                        children_ids = [
+                            child.id
+                            if hasattr(child, "id")
+                            else child["id"]
+                            for child in data["children"]
+                        ]
                         data["children_ids"] = json.dumps(children_ids)
 
                         for child_id in children_ids:
                             reverse_key = f"{cache_provider.AGENT_PREFIX}{child_id}:parent"
-                            cache_provider.set_string(
-                                reverse_key, str(self.id), ttl=settings.redis_ttl_agents
+                            sync_cache_set_string(
+                                reverse_key,
+                                str(self.id),
+                                ttl=settings.redis_ttl_agents,
                             )
 
                     data.pop("tools", None)
                     data.pop("memory", None)
                     data.pop("children", None)
 
-                    cache_provider.set_hash(cache_key, data, ttl=settings.redis_ttl_agents)
+                    sync_cache_set_hash(
+                        cache_key, data, ttl=settings.redis_ttl_agents
+                    )
                 return
 
             # TOOL CACHING (Hash-based)
@@ -904,16 +951,20 @@ class SqlalchemyBase(CommonSqlalchemyMetaMixins, Base):
 
                 cache_key = f"{cache_provider.TOOL_PREFIX}{self.id}"
                 if operation == "delete":
-                    cache_provider.delete(cache_key)
+                    sync_cache_delete(cache_key)
                 else:
                     data = self.to_pydantic().model_dump(mode="json")
 
                     if "json_schema" in data and data["json_schema"]:
-                        data["json_schema"] = json.dumps(data["json_schema"])
+                        data["json_schema"] = json.dumps(
+                            data["json_schema"]
+                        )
                     if "tags" in data and data["tags"]:
                         data["tags"] = json.dumps(data["tags"])
 
-                    cache_provider.set_hash(cache_key, data, ttl=settings.redis_ttl_tools)
+                    sync_cache_set_hash(
+                        cache_key, data, ttl=settings.redis_ttl_tools
+                    )
                 return
 
             # JSON-BASED CACHING (memory tables with embeddings)
@@ -931,7 +982,7 @@ class SqlalchemyBase(CommonSqlalchemyMetaMixins, Base):
                 cache_key = f"{prefix}{self.id}"
 
                 if operation == "delete":
-                    cache_provider.delete(cache_key)
+                    sync_cache_delete(cache_key)
                 else:
                     data = self.to_pydantic().model_dump(mode="json")
 
@@ -940,7 +991,9 @@ class SqlalchemyBase(CommonSqlalchemyMetaMixins, Base):
                     if hasattr(self, "occurred_at") and self.occurred_at:
                         data["occurred_at_ts"] = self.occurred_at.timestamp()
 
-                    cache_provider.set_json(cache_key, data, ttl=settings.redis_ttl_default)
+                    sync_cache_set_json(
+                        cache_key, data, ttl=settings.redis_ttl_default
+                    )
 
         except Exception as e:
             # Log but don't fail the operation if Redis fails

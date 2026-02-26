@@ -148,12 +148,15 @@ class BlockManager:
         Called when a block is updated or deleted to maintain cache consistency.
         """
         try:
-            from mirix.database.cache_provider import get_cache_provider
+            from mirix.database.cache_provider import (
+                get_cache_provider,
+                sync_cache_delete,
+            )
 
             cache_provider = get_cache_provider()
             if cache_provider:
                 cache_key = f"{cache_provider.BLOCK_PREFIX}{block_id}"
-                cache_provider.delete(cache_key)
+                sync_cache_delete(cache_key)
         except Exception as e:
             logger.warning("Failed to invalidate cache for block %s: %s", block_id, e)
 
@@ -192,7 +195,10 @@ class BlockManager:
     @enforce_types
     def delete_block(self, block_id: str, actor: PydanticClient) -> PydanticBlock:
         """Delete a block by its ID (removes from cache)."""
-        from mirix.database.cache_provider import get_cache_provider
+        from mirix.database.cache_provider import (
+            get_cache_provider,
+            sync_cache_delete,
+        )
 
         with self.session_maker() as session:
             block = BlockModel.read(db_session=session, identifier=block_id)
@@ -200,7 +206,7 @@ class BlockManager:
             cache_provider = get_cache_provider()
             if cache_provider:
                 cache_key = f"{cache_provider.BLOCK_PREFIX}{block_id}"
-                cache_provider.delete(cache_key)
+                sync_cache_delete(cache_key)
 
             self._invalidate_block_cache(block_id)
 
@@ -408,13 +414,17 @@ class BlockManager:
         """Retrieve a block by its ID (with cache - Redis or IPS Cache)."""
         cache_provider = None
         try:
-            from mirix.database.cache_provider import get_cache_provider
+            from mirix.database.cache_provider import (
+                get_cache_provider,
+                sync_cache_get_hash,
+                sync_cache_set_hash,
+            )
 
             cache_provider = get_cache_provider() if use_cache else None
 
             if cache_provider:
                 cache_key = f"{cache_provider.BLOCK_PREFIX}{block_id}"
-                cached_data = cache_provider.get_hash(cache_key)
+                cached_data = sync_cache_get_hash(cache_key)
                 if cached_data:
                     if "value" not in cached_data or cached_data["value"] is None:
                         cached_data["value"] = ""
@@ -451,7 +461,9 @@ class BlockManager:
 
                         cache_key = f"{cache_provider.BLOCK_PREFIX}{block_id}"
                         data = pydantic_block.model_dump(mode="json")
-                        cache_provider.set_hash(cache_key, data, ttl=settings.redis_ttl_blocks)
+                        sync_cache_set_hash(
+                            cache_key, data, ttl=settings.redis_ttl_blocks
+                        )
                 except Exception as e:
                     logger.warning("Failed to populate cache for block %s: %s", block_id, e)
 

@@ -208,14 +208,17 @@ class ClientManager:
 
             # Remove from cache since it's deleted
             try:
-                from mirix.database.cache_provider import get_cache_provider
+                from mirix.database.cache_provider import (
+                    get_cache_provider,
+                    sync_cache_delete,
+                )
                 from mirix.log import get_logger
 
                 logger = get_logger(__name__)
                 cache_provider = get_cache_provider()
                 if cache_provider:
                     cache_key = f"{cache_provider.CLIENT_PREFIX}{client_id}"
-                    cache_provider.delete(cache_key)
+                    sync_cache_delete(cache_key)
                     logger.debug("Removed soft-deleted client %s from cache", client_id)
             except Exception as e:
                 from mirix.log import get_logger
@@ -527,14 +530,17 @@ class ClientManager:
                 )
 
             # Invalidate ALL agent caches for this client (force reload from PostgreSQL with cleared message_ids)
-            from mirix.database.cache_provider import get_cache_provider
+            from mirix.database.cache_provider import (
+                get_cache_provider,
+                sync_cache_delete,
+            )
 
             cache_provider = get_cache_provider()
             if cache_provider and agent_ids:
                 logger.debug("Invalidating %d agent caches for client %s", len(agent_ids), client_id)
                 for agent_id in agent_ids:
                     agent_key = f"{cache_provider.AGENT_PREFIX}{agent_id}"
-                    cache_provider.delete(agent_key)
+                    sync_cache_delete(agent_key)
                 logger.debug("Invalidated %d agent caches", len(agent_ids))
 
             logger.info(
@@ -562,13 +568,17 @@ class ClientManager:
         logger = get_logger(__name__)
         cache_provider = None
         try:
-            from mirix.database.cache_provider import get_cache_provider
+            from mirix.database.cache_provider import (
+                get_cache_provider,
+                sync_cache_get_hash,
+                sync_cache_set_hash,
+            )
 
             cache_provider = get_cache_provider() if use_cache else None
 
             if cache_provider:
                 cache_key = f"{cache_provider.CLIENT_PREFIX}{client_id}"
-                cached_data = cache_provider.get_hash(cache_key)
+                cached_data = sync_cache_get_hash(cache_key)
                 if cached_data:
                     logger.debug("Cache HIT for client %s", client_id)
                     # Multi-scope (PR 53): ensure read_scopes is a list when from cache
@@ -598,7 +608,9 @@ class ClientManager:
 
                     cache_key = f"{cache_provider.CLIENT_PREFIX}{client_id}"
                     data = pydantic_client.model_dump(mode="json")
-                    cache_provider.set_hash(cache_key, data, ttl=settings.redis_ttl_clients)
+                    sync_cache_set_hash(
+                        cache_key, data, ttl=settings.redis_ttl_clients
+                    )
                     logger.debug("Populated cache for client %s", client_id)
             except Exception as e:
                 logger.warning("Failed to populate cache for client %s: %s", client_id, e)

@@ -37,7 +37,11 @@ Optional async methods (providers MAY implement for zero-thread async I/O):
 Async dispatch helpers (acache_get, acache_set_hash, etc.):
     If the active provider has async methods -> call them directly (zero threads).
     If not -> fall back to asyncio.to_thread() around the sync method.
-    RedisCacheProvider implements async methods, so Redis uses the direct async path.
+
+Providers should implement both sync and async methods. Sync callers (ORM,
+managers) use sync_cache_* which call provider sync methods directly. Async
+callers (REST handlers) use acache_* which call provider async methods if
+available, or fall back to asyncio.to_thread(sync_method).
 
 Key prefix constants (all providers should define these):
     BLOCK_PREFIX, MESSAGE_PREFIX, EPISODIC_PREFIX, SEMANTIC_PREFIX,
@@ -51,20 +55,20 @@ key-value operations and get_search_provider() for search, with DB fallback when
 no provider is registered.
 
 Usage:
-    # In external project
+    # Provider implementing both sync and async methods (recommended)
     from mirix.database.cache_provider import register_cache_provider
-    cache_provider = MyCustomCacheProvider(config)
-    register_cache_provider("my_cache", cache_provider)
-
-    # If you use sync server paths (queue worker, load_agent, etc.), call from
-    # async startup: mirix.database.sync_bridge.set_event_loop_for_sync_bridge()
-    # so sync wrappers (_sync_get_agent_by_id, _sync_list_*, etc.) have a loop.
+    from mirix.database.redis_cache_provider import RedisUnifiedCacheProvider
+    from mirix.database.redis_client import RedisMemoryClient
+    from mirix.database.redis_sync_client import RedisSyncMemoryClient
+    async_client = RedisMemoryClient(redis_uri=...)
+    sync_client = RedisSyncMemoryClient(redis_uri=...)
+    register_cache_provider("redis", RedisUnifiedCacheProvider(async_client, sync_client))
 
     # In Mirix service managers (sync)
-    from mirix.database.cache_provider import get_cache_provider
+    from mirix.database.cache_provider import get_cache_provider, sync_cache_get_hash
     cache_provider = get_cache_provider()
     if cache_provider:
-        data = cache_provider.get_hash(f"{cache_provider.MESSAGE_PREFIX}{msg_id}")
+        data = sync_cache_get_hash(f"{cache_provider.MESSAGE_PREFIX}{msg_id}")
 
     # In async REST handlers
     from mirix.database.cache_provider import acache_get_hash
@@ -92,6 +96,12 @@ def register_cache_provider(name: str, provider: Any) -> None:
 
     Similar to register_auth_provider() pattern. Last registered provider
     becomes the active one.
+
+    Providers should implement both sync and async methods for the cache
+    interface (duck typing). Sync callers (managers) use sync_cache_* which
+    call provider sync methods directly. Async callers (REST handlers) use
+    acache_* which call provider async methods if available, or fall back to
+    asyncio.to_thread(sync_method).
 
     Args:
         name: Provider identifier (e.g., "redis", "ips_cache").
@@ -156,7 +166,7 @@ async def _acache_dispatch(method: str, *args, **kwargs) -> Any:
     Generic async dispatch for any cache provider method.
 
     Checks whether the active provider exposes an async variant (a-prefixed).
-    If yes -> await it directly (zero threads; RedisCacheProvider and IPS Cache).
+    If yes -> await it directly (zero threads).
     If no  -> fall back to asyncio.to_thread() around the sync method.
     """
     provider = get_cache_provider()
@@ -242,3 +252,92 @@ async def acache_get_string(key: str) -> Optional[str]:
 async def acache_delete_string(key: str) -> bool:
     """Async delete string key."""
     return await _acache_dispatch("delete_string", key) or False
+
+
+# ── Sync cache API (for sync callers; supports async_only providers via bridge) ──
+
+
+def _sync_cache_dispatch(
+    method: str,
+    default: Any,
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """
+    Run cache operation from sync context. Calls provider's sync method directly.
+    """
+    provider = get_cache_provider()
+    if provider is None:
+        return default
+    fn = getattr(provider, method, None)
+    if fn is None:
+        logger.warning("Cache provider missing sync method: %s", method)
+        return default
+    try:
+        return fn(*args, **kwargs)
+    except Exception as e:
+        logger.warning("Sync cache (provider.%s) failed: %s", method, e)
+        return default
+
+
+def sync_cache_get_hash(key: str) -> Optional[Dict[str, Any]]:
+    """Sync get_hash; calls provider.get_hash directly."""
+    return _sync_cache_dispatch("get_hash", None, key)
+
+
+def sync_cache_set_hash(
+    key: str, data: Dict[str, Any], ttl: Optional[int] = None
+) -> bool:
+    """Sync set_hash; calls provider.set_hash directly."""
+    result = _sync_cache_dispatch("set_hash", False, key, data, ttl)
+    return bool(result)
+
+
+def sync_cache_get_json(key: str) -> Optional[Dict[str, Any]]:
+    """Sync get_json; calls provider.get_json directly."""
+    return _sync_cache_dispatch("get_json", None, key)
+
+
+def sync_cache_set_json(
+    key: str, data: Dict[str, Any], ttl: Optional[int] = None
+) -> bool:
+    """Sync set_json; calls provider.set_json directly."""
+    result = _sync_cache_dispatch("set_json", False, key, data, ttl)
+    return bool(result)
+
+
+def sync_cache_delete(key: str) -> bool:
+    """Sync delete; calls provider.delete directly."""
+    result = _sync_cache_dispatch("delete", False, key)
+    return bool(result)
+
+
+def sync_cache_delete_many(keys: List[str]) -> int:
+    """Sync delete_many; calls provider.delete_many directly."""
+    result = _sync_cache_dispatch("delete_many", 0, keys)
+    return result if isinstance(result, int) else 0
+
+
+def sync_cache_update_hash_field(key: str, field: str, value: str) -> bool:
+    """Sync update_hash_field; calls provider.update_hash_field directly."""
+    result = _sync_cache_dispatch("update_hash_field", False, key, field, value)
+    return bool(result)
+
+
+def sync_cache_set_string(
+    key: str, value: str, ttl: Optional[int] = None
+) -> bool:
+    """Sync set_string; calls provider.set_string directly."""
+    result = _sync_cache_dispatch("set_string", False, key, value, ttl)
+    return bool(result)
+
+
+def sync_cache_get_string(key: str) -> Optional[str]:
+    """Sync get_string; calls provider.get_string directly."""
+    return _sync_cache_dispatch("get_string", None, key)
+
+
+def sync_cache_delete_string(key: str) -> bool:
+    """Sync delete_string; calls provider.delete_string directly."""
+    result = _sync_cache_dispatch("delete_string", False, key)
+    return bool(result)

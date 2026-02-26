@@ -159,9 +159,7 @@ def meta_agent(server, client):
     for agent in existing_agents:
         if agent.agent_type == AgentType.meta_memory_agent:
             # Ensure it has children (avoid orphan from a run that failed after creating meta but before sub-agents)
-            children = asyncio.run(
-                server.agent_manager.list_agents(actor=client, parent_id=agent.id)
-            )
+            children = asyncio.run(server.agent_manager.list_agents(actor=client, parent_id=agent.id))
             if children:
                 print(f"\n[OK] Using existing meta agent: {agent.id}")
                 return agent

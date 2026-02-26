@@ -294,7 +294,7 @@ if not USE_PGLITE and settings.mirix_pg_uri_no_default:
             pg_uri_for_log = f"{protocol_user}:****@{parts[1]}"
 
     logger.debug("Connection String: %s", pg_uri_for_log)
-    logger.debug("Pool Size: %s", settings.pg_pool_size)
+    logger.debug("Pool Size: %s", settings.pg_pool_size_per_worker)
     logger.debug("Max Overflow: %s", settings.pg_max_overflow)
     logger.debug("Pool Timeout: %ss", settings.pg_pool_timeout)
     logger.debug("Pool Recycle: %ss", settings.pg_pool_recycle)
@@ -308,7 +308,7 @@ if not USE_PGLITE and settings.mirix_pg_uri_no_default:
     # create engine
     engine = create_engine(
         settings.mirix_pg_uri,
-        pool_size=settings.pg_pool_size,
+        pool_size=settings.pg_pool_size_per_worker,
         max_overflow=settings.pg_max_overflow,
         pool_timeout=settings.pg_pool_timeout,
         pool_recycle=settings.pg_pool_recycle,
