@@ -299,7 +299,7 @@ class Mirix:
             if user_id is None:
                 # Clear all messages except system messages (original behavior)
                 # Get agent state first, then get messages
-                agent_state = self._client.server.agent_manager.get_agent_by_id(
+                agent_state = self._client.server.agent_manager._sync_get_agent_by_id(
                     agent_id=self._meta_agent.id,
                     actor=self._client.client,
                 )
@@ -335,7 +335,7 @@ class Mirix:
 
                 # Clear messages for specific user (same as FastAPI server implementation)
                 # Get current message count for this specific user for reporting
-                agent_state = self._client.server.agent_manager.get_agent_by_id(
+                agent_state = self._client.server.agent_manager._sync_get_agent_by_id(
                     agent_id=self._meta_agent.id,
                     actor=self._client.client,
                 )
@@ -548,7 +548,7 @@ class Mirix:
         # Apply tool to all existing agents if requested
         if apply_to_agents:
             # Get all existing agents
-            all_agents = self._client.server.agent_manager.list_agents(
+            all_agents = self._client.server.agent_manager._sync_list_agents(
                 actor=self._client.client,
                 limit=1000,  # Get all agents
             )

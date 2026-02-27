@@ -55,22 +55,23 @@ class OrganizationManager:
             organization = OrganizationModel.read(db_session=session, identifier=org_id)
             pydantic_org = organization.to_pydantic()
 
-            try:
-                if cache_provider:
-                    from mirix.settings import settings
+        # Cache after session is closed (no PG connection held during cache I/O)
+        try:
+            if cache_provider:
+                from mirix.settings import settings
 
-                    cache_key = f"{cache_provider.ORGANIZATION_PREFIX}{org_id}"
-                    data = pydantic_org.model_dump(mode="json")
-                    sync_cache_set_hash(
-                        cache_key,
-                        data,
-                        ttl=settings.redis_ttl_organizations,
-                    )
-                    logger.debug("Populated cache for organization %s", org_id)
-            except Exception as e:
-                logger.warning("Failed to populate cache for organization %s: %s", org_id, e)
+                cache_key = f"{cache_provider.ORGANIZATION_PREFIX}{org_id}"
+                data = pydantic_org.model_dump(mode="json")
+                sync_cache_set_hash(
+                    cache_key,
+                    data,
+                    ttl=settings.redis_ttl_organizations,
+                )
+                logger.debug("Populated cache for organization %s", org_id)
+        except Exception as e:
+            logger.warning("Failed to populate cache for organization %s: %s", org_id, e)
 
-            return pydantic_org
+        return pydantic_org
 
     @enforce_types
     def create_organization(self, pydantic_org: PydanticOrganization) -> PydanticOrganization:
@@ -113,28 +114,27 @@ class OrganizationManager:
         """Delete an organization (removes from cache)."""
         with self.session_maker() as session:
             organization = OrganizationModel.read(db_session=session, identifier=org_id)
-
-            # Remove from cache before hard delete
-            try:
-                from mirix.database.cache_provider import (
-                    get_cache_provider,
-                    sync_cache_delete,
-                )
-                from mirix.log import get_logger
-
-                logger = get_logger(__name__)
-                cache_provider = get_cache_provider()
-                if cache_provider:
-                    cache_key = f"{cache_provider.ORGANIZATION_PREFIX}{org_id}"
-                    sync_cache_delete(cache_key)
-                    logger.debug("Removed organization %s from cache", org_id)
-            except Exception as e:
-                from mirix.log import get_logger
-
-                logger = get_logger(__name__)
-                logger.warning("Failed to remove organization %s from cache: %s", org_id, e)
-
             organization.hard_delete(session)
+
+        # Cache delete after session is closed (no PG connection held during cache I/O)
+        try:
+            from mirix.database.cache_provider import (
+                get_cache_provider,
+                sync_cache_delete,
+            )
+            from mirix.log import get_logger
+
+            logger = get_logger(__name__)
+            cache_provider = get_cache_provider()
+            if cache_provider:
+                cache_key = f"{cache_provider.ORGANIZATION_PREFIX}{org_id}"
+                sync_cache_delete(cache_key)
+                logger.debug("Removed organization %s from cache", org_id)
+        except Exception as e:
+            from mirix.log import get_logger
+
+            logger = get_logger(__name__)
+            logger.warning("Failed to remove organization %s from cache: %s", org_id, e)
 
     @enforce_types
     def list_organizations(self, cursor: Optional[str] = None, limit: Optional[int] = 50) -> List[PydanticOrganization]:

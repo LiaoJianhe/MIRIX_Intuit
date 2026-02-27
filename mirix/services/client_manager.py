@@ -205,28 +205,29 @@ class ClientManager:
 
             # Soft delete using ORM's delete method (sets is_deleted=True)
             client.delete(session, actor=None)
+            result = client.to_pydantic()
 
-            # Remove from cache since it's deleted
-            try:
-                from mirix.database.cache_provider import (
-                    get_cache_provider,
-                    sync_cache_delete,
-                )
-                from mirix.log import get_logger
+        # Cache delete after session is closed (no PG connection held during cache I/O)
+        try:
+            from mirix.database.cache_provider import (
+                get_cache_provider,
+                sync_cache_delete,
+            )
+            from mirix.log import get_logger
 
-                logger = get_logger(__name__)
-                cache_provider = get_cache_provider()
-                if cache_provider:
-                    cache_key = f"{cache_provider.CLIENT_PREFIX}{client_id}"
-                    sync_cache_delete(cache_key)
-                    logger.debug("Removed soft-deleted client %s from cache", client_id)
-            except Exception as e:
-                from mirix.log import get_logger
+            logger = get_logger(__name__)
+            cache_provider = get_cache_provider()
+            if cache_provider:
+                cache_key = f"{cache_provider.CLIENT_PREFIX}{client_id}"
+                sync_cache_delete(cache_key)
+                logger.debug("Removed soft-deleted client %s from cache", client_id)
+        except Exception as e:
+            from mirix.log import get_logger
 
-                logger = get_logger(__name__)
-                logger.warning("Failed to update cache for soft-deleted client %s: %s", client_id, e)
+            logger = get_logger(__name__)
+            logger.warning("Failed to update cache for soft-deleted client %s: %s", client_id, e)
 
-            return client.to_pydantic()
+        return result
 
     @enforce_types
     async def delete_client_by_id(self, client_id: str):
@@ -481,12 +482,6 @@ class ClientManager:
                     ]
                     block_count = len(block_ids)
                     if block_count > 0:
-                        from mirix.services.block_manager import BlockManager
-
-                        block_manager = BlockManager()
-                        for block_id in block_ids:
-                            block_manager._invalidate_block_cache(block_id)
-
                         session.query(BlockModel).filter(BlockModel._created_by_id == client_id).delete(
                             synchronize_session=False
                         )
@@ -495,7 +490,15 @@ class ClientManager:
 
             block_count, block_ids = await asyncio.to_thread(_db_delete_blocks)
 
-            # Remove blocks from cache (outside session context)
+            # Remove blocks from cache after session is closed (no PG connection held during cache I/O)
+            if block_ids:
+                from mirix.services.block_manager import BlockManager
+
+                block_manager = BlockManager()
+                for block_id in block_ids:
+                    block_manager._invalidate_block_cache(block_id)
+
+            # Remove blocks from cache (async path)
             if block_ids:
                 from mirix.database.cache_provider import acache_delete_many, get_cache_provider
 
@@ -602,20 +605,21 @@ class ClientManager:
             client = ClientModel.read(db_session=session, identifier=client_id)
             pydantic_client = client.to_pydantic()
 
-            try:
-                if cache_provider:
-                    from mirix.settings import settings
+        # Cache after session is closed (no PG connection held during cache I/O)
+        try:
+            if cache_provider:
+                from mirix.settings import settings
 
-                    cache_key = f"{cache_provider.CLIENT_PREFIX}{client_id}"
-                    data = pydantic_client.model_dump(mode="json")
-                    sync_cache_set_hash(
-                        cache_key, data, ttl=settings.redis_ttl_clients
-                    )
-                    logger.debug("Populated cache for client %s", client_id)
-            except Exception as e:
-                logger.warning("Failed to populate cache for client %s: %s", client_id, e)
+                cache_key = f"{cache_provider.CLIENT_PREFIX}{client_id}"
+                data = pydantic_client.model_dump(mode="json")
+                sync_cache_set_hash(
+                    cache_key, data, ttl=settings.redis_ttl_clients
+                )
+                logger.debug("Populated cache for client %s", client_id)
+        except Exception as e:
+            logger.warning("Failed to populate cache for client %s: %s", client_id, e)
 
-            return pydantic_client
+        return pydantic_client
 
     @enforce_types
     def get_default_client(self) -> PydanticClient:

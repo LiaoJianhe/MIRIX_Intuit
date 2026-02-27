@@ -259,29 +259,29 @@ class RawMemoryManager:
                 # Validate user_id if provided
                 if user_id and pydantic_memory.user_id != user_id:
                     raise NoResultFound(f"Raw memory record with id {memory_id} not found.")
-
-                # Populate cache for next time
-                try:
-                    if cache_provider:
-                        cache_key = f"{cache_provider.RAW_MEMORY_PREFIX}{memory_id}"
-                        data = pydantic_memory.model_dump(mode="json")
-                        sync_cache_set_json(
-                            cache_key, data, ttl=settings.redis_ttl_default
-                        )
-                        logger.debug(
-                            "Populated cache for raw memory %s",
-                            memory_id,
-                        )
-                except Exception as e:
-                    logger.warning(
-                        "Failed to populate cache for raw memory %s: %s",
-                        memory_id,
-                        e,
-                    )
-
-                return pydantic_memory
             except NoResultFound:
                 raise NoResultFound(f"Raw memory record with id {memory_id} not found.")
+
+        # Cache after session is closed (no PG connection held during cache I/O)
+        try:
+            if cache_provider:
+                cache_key = f"{cache_provider.RAW_MEMORY_PREFIX}{memory_id}"
+                data = pydantic_memory.model_dump(mode="json")
+                sync_cache_set_json(
+                    cache_key, data, ttl=settings.redis_ttl_default
+                )
+                logger.debug(
+                    "Populated cache for raw memory %s",
+                    memory_id,
+                )
+        except Exception as e:
+            logger.warning(
+                "Failed to populate cache for raw memory %s: %s",
+                memory_id,
+                e,
+            )
+
+        return pydantic_memory
 
     @enforce_types
     def update_raw_memory(
@@ -411,28 +411,29 @@ class RawMemoryManager:
 
             # Commit changes
             session.commit()
+            result = raw_memory.to_pydantic()
 
-            # Invalidate cache
-            try:
-                from mirix.database.cache_provider import (
-                    get_cache_provider,
-                    sync_cache_delete,
-                )
+        # Cache delete after session is closed (no PG connection held during cache I/O)
+        try:
+            from mirix.database.cache_provider import (
+                get_cache_provider,
+                sync_cache_delete,
+            )
 
-                cache_provider = get_cache_provider()
-                if cache_provider:
-                    cache_key = f"{cache_provider.RAW_MEMORY_PREFIX}{memory_id}"
-                    sync_cache_delete(cache_key)
-                    logger.debug("Invalidated cache for memory %s", memory_id)
-            except Exception as e:
-                logger.warning(
-                    "Failed to invalidate cache for memory %s: %s",
-                    memory_id,
-                    e,
-                )
+            cache_provider = get_cache_provider()
+            if cache_provider:
+                cache_key = f"{cache_provider.RAW_MEMORY_PREFIX}{memory_id}"
+                sync_cache_delete(cache_key)
+                logger.debug("Invalidated cache for memory %s", memory_id)
+        except Exception as e:
+            logger.warning(
+                "Failed to invalidate cache for memory %s: %s",
+                memory_id,
+                e,
+            )
 
-            logger.info("Raw memory updated: id=%s", memory_id)
-            return raw_memory.to_pydantic()
+        logger.info("Raw memory updated: id=%s", memory_id)
+        return result
 
     @enforce_types
     def delete_raw_memory(
@@ -453,6 +454,7 @@ class RawMemoryManager:
             True if deleted, False if not found or user mismatch
         """
         logger.info("Deleting raw memory: id=%s", memory_id)
+        deleted = False
 
         with self.session_maker() as session:
             try:
@@ -474,33 +476,36 @@ class RawMemoryManager:
                 session.delete(raw_memory)
                 session.commit()
 
-                # Invalidate cache
-                try:
-                    from mirix.database.cache_provider import (
-                        get_cache_provider,
-                        sync_cache_delete,
-                    )
-
-                    cache_provider = get_cache_provider()
-                    if cache_provider:
-                        cache_key = f"{cache_provider.RAW_MEMORY_PREFIX}{memory_id}"
-                        sync_cache_delete(cache_key)
-                        logger.debug(
-                            "Invalidated cache for deleted memory %s",
-                            memory_id,
-                        )
-                except Exception as e:
-                    logger.warning(
-                        "Failed to invalidate cache for deleted memory %s: %s",
-                        memory_id,
-                        e,
-                    )
-
                 logger.info("Raw memory deleted: id=%s", memory_id)
-                return True
+                deleted = True
             except NoResultFound:
                 logger.warning("Raw memory not found for deletion: id=%s", memory_id)
                 return False
+
+        # Cache delete after session is closed (no PG connection held during cache I/O)
+        if deleted:
+            try:
+                from mirix.database.cache_provider import (
+                    get_cache_provider,
+                    sync_cache_delete,
+                )
+
+                cache_provider = get_cache_provider()
+                if cache_provider:
+                    cache_key = f"{cache_provider.RAW_MEMORY_PREFIX}{memory_id}"
+                    sync_cache_delete(cache_key)
+                    logger.debug(
+                        "Invalidated cache for deleted memory %s",
+                        memory_id,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "Failed to invalidate cache for deleted memory %s: %s",
+                    memory_id,
+                    e,
+                )
+            return True
+        return False
 
     @enforce_types
     def search_raw_memories(

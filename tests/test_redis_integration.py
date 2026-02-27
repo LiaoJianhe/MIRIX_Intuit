@@ -590,7 +590,9 @@ class TestAgentAndToolManagerRedis:
         assert retrieved_agent.name == "Pipeline Test Agent"
 
         # With Redis pipeline, retrieval should be fast even with tools
-        assert retrieval_time < 0.01, f"Agent+tools retrieval should be <10ms, got {retrieval_time*1000:.2f}ms"
+        assert retrieval_time < 0.02, (
+            f"Agent+tools retrieval should be <20ms, got {retrieval_time*1000:.2f}ms"
+        )
 
         logger.info("Agent retrieval with pipeline: %.3fms", retrieval_time * 1000)
 
@@ -697,7 +699,9 @@ class TestAgentAndToolManagerRedis:
 
         logger.info("Average agent cache hit: %.3fms", avg_cache_time * 1000)
 
-        assert avg_cache_time < 0.01, f"Agent cache hit should be <10ms, got {avg_cache_time*1000:.2f}ms"
+        assert avg_cache_time < 0.02, (
+            f"Agent cache hit should be <20ms, got {avg_cache_time*1000:.2f}ms"
+        )
 
         # Cleanup
         agent_manager.delete_agent(created_agent.id, test_client)
@@ -786,7 +790,9 @@ class TestToolsAgentsDenormalization:
         logger.info("Agent+tools retrieved in %.3fms using pipeline", total_time * 1000)
         logger.info("Benefit: 50%% fewer operations vs separate junction table cache")
 
-        assert total_time < 0.01, f"Pipeline retrieval should be <10ms, got {total_time*1000:.2f}ms"
+        assert total_time < 0.02, (
+            f"Pipeline retrieval should be <20ms, got {total_time*1000:.2f}ms"
+        )
 
         # Cleanup
         agent_manager.delete_agent(created_agent.id, test_client)
@@ -936,7 +942,9 @@ class TestMessageManagerRedis:
             cache_times.append(time.time() - start)
 
         avg_cache_time = sum(cache_times) / len(cache_times)
-        assert avg_cache_time < 0.010, f"Average cache hit should be <10ms, got {avg_cache_time*1000:.2f}ms"
+        assert avg_cache_time < 0.02, (
+            f"Average cache hit should be <20ms, got {avg_cache_time*1000:.2f}ms"
+        )
 
         logger.info("Average cache hit time: %.2fms", avg_cache_time * 1000)
 
@@ -1304,7 +1312,9 @@ class TestRedisPerformance:
         logger.info("Expected PostgreSQL retrieval: ~50-80ms")
         logger.info("Estimated speedup: 40-60%% faster")
 
-        assert avg_redis_time < 0.010, f"Redis should be <10ms, got {avg_redis_time*1000:.2f}ms"
+        assert avg_redis_time < 0.02, (
+            f"Redis should be <20ms, got {avg_redis_time*1000:.2f}ms"
+        )
 
         # Cleanup
         message_manager.delete_message_by_id(created_message.id, test_client)

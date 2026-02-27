@@ -52,24 +52,25 @@ class MessageManager:
             try:
                 message = MessageModel.read(db_session=session, identifier=message_id, actor=actor)
                 pydantic_message = message.to_pydantic()
-
-                try:
-                    if cache_provider:
-                        from mirix.settings import settings
-
-                        cache_key = f"{cache_provider.MESSAGE_PREFIX}{message_id}"
-                        data = pydantic_message.model_dump(mode="json")
-                        sync_cache_set_hash(
-                            cache_key,
-                            data,
-                            ttl=settings.redis_ttl_messages,
-                        )
-                except Exception as e:
-                    logger.warning("Failed to populate cache for message %s: %s", message_id, e)
-
-                return pydantic_message
             except NoResultFound:
                 return None
+
+        # Cache after session is closed (no PG connection held during cache I/O)
+        try:
+            if cache_provider:
+                from mirix.settings import settings
+
+                cache_key = f"{cache_provider.MESSAGE_PREFIX}{message_id}"
+                data = pydantic_message.model_dump(mode="json")
+                sync_cache_set_hash(
+                    cache_key,
+                    data,
+                    ttl=settings.redis_ttl_messages,
+                )
+        except Exception as e:
+            logger.warning("Failed to populate cache for message %s: %s", message_id, e)
+
+        return pydantic_message
 
     @update_timezone
     @enforce_types
@@ -183,6 +184,11 @@ class MessageManager:
     @enforce_types
     def delete_message_by_id(self, message_id: str, actor: PydanticClient) -> bool:
         """Delete a message (removes from cache)."""
+        from mirix.database.cache_provider import (
+            get_cache_provider,
+            sync_cache_delete,
+        )
+
         with self.session_maker() as session:
             try:
                 msg = MessageModel.read(
@@ -190,19 +196,15 @@ class MessageManager:
                     identifier=message_id,
                     actor=actor,
                 )
-                # Remove from cache before hard delete
-                from mirix.database.cache_provider import (
-                    get_cache_provider,
-                    sync_cache_delete,
-                )
-
-                cache_provider = get_cache_provider()
-                if cache_provider:
-                    cache_key = f"{cache_provider.MESSAGE_PREFIX}{message_id}"
-                    sync_cache_delete(cache_key)
                 msg.hard_delete(session, actor=actor)
             except NoResultFound:
                 raise ValueError(f"Message with id {message_id} not found.")
+
+        # Cache delete after session is closed (no PG connection held during cache I/O)
+        cache_provider = get_cache_provider()
+        if cache_provider:
+            cache_key = f"{cache_provider.MESSAGE_PREFIX}{message_id}"
+            sync_cache_delete(cache_key)
 
     @enforce_types
     async def delete_by_client_id(self, actor: PydanticClient) -> int:
@@ -544,24 +546,25 @@ class MessageManager:
 
             # Identify detached messages (not in current message_ids)
             detached_messages = [msg for msg in all_messages if msg.id not in current_message_ids]
+            deleted_ids = [msg.id for msg in detached_messages]
 
-            # Delete detached messages (and clean up cache)
-            deleted_count = 0
-            from mirix.database.cache_provider import (
-                get_cache_provider,
-                sync_cache_delete,
-            )
-
-            cache_provider = get_cache_provider()
             for msg in detached_messages:
-                if cache_provider:
-                    redis_key = f"{cache_provider.MESSAGE_PREFIX}{msg.id}"
-                    sync_cache_delete(redis_key)
                 msg.hard_delete(session, actor=actor)
-                deleted_count += 1
-
             session.commit()
-            return deleted_count
+            deleted_count = len(deleted_ids)
+
+        # Cache delete after session is closed (no PG connection held during cache I/O)
+        from mirix.database.cache_provider import (
+            get_cache_provider,
+            sync_cache_delete,
+        )
+
+        cache_provider = get_cache_provider()
+        if cache_provider:
+            for msg_id in deleted_ids:
+                redis_key = f"{cache_provider.MESSAGE_PREFIX}{msg_id}"
+                sync_cache_delete(redis_key)
+        return deleted_count
 
     @enforce_types
     def cleanup_all_detached_messages(self, actor: PydanticClient) -> Dict[str, int]:
@@ -583,6 +586,7 @@ class MessageManager:
             cleanup_results = {}
             total_deleted = 0
 
+            all_deleted_ids: List[str] = []
             for agent in agents:
                 # Get current message_ids for this agent
                 current_message_ids = set(agent.message_ids or [])
@@ -597,24 +601,27 @@ class MessageManager:
 
                 # Identify and delete detached messages
                 detached_messages = [msg for msg in all_messages if msg.id not in current_message_ids]
+                deleted_ids = [msg.id for msg in detached_messages]
+                all_deleted_ids.extend(deleted_ids)
 
-                deleted_count = 0
-                from mirix.database.cache_provider import (
-                    get_cache_provider,
-                    sync_cache_delete,
-                )
-
-                cache_provider = get_cache_provider()
                 for msg in detached_messages:
-                    if cache_provider:
-                        redis_key = f"{cache_provider.MESSAGE_PREFIX}{msg.id}"
-                        sync_cache_delete(redis_key)
                     msg.hard_delete(session)
-                    deleted_count += 1
-
+                deleted_count = len(deleted_ids)
                 cleanup_results[agent.id] = deleted_count
                 total_deleted += deleted_count
 
             session.commit()
             cleanup_results["total"] = total_deleted
-            return cleanup_results
+
+        # Cache delete after session is closed (no PG connection held during cache I/O)
+        from mirix.database.cache_provider import (
+            get_cache_provider,
+            sync_cache_delete,
+        )
+
+        cache_provider = get_cache_provider()
+        if cache_provider:
+            for msg_id in all_deleted_ids:
+                redis_key = f"{cache_provider.MESSAGE_PREFIX}{msg_id}"
+                sync_cache_delete(redis_key)
+        return cleanup_results

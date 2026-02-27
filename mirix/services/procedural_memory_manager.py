@@ -429,22 +429,23 @@ class ProceduralMemoryManager:
             try:
                 item = ProceduralMemoryItem.read(db_session=session, identifier=item_id, user=user)
                 pydantic_item = item.to_pydantic()
-
-                try:
-                    if cache_provider:
-                        from mirix.settings import settings
-
-                        cache_key = f"{cache_provider.PROCEDURAL_PREFIX}{item_id}"
-                        data = pydantic_item.model_dump(mode="json")
-                        sync_cache_set_json(
-                            cache_key, data, ttl=settings.redis_ttl_default
-                        )
-                except Exception as e:
-                    logger.warning("Failed to populate cache: %s", e)
-
-                return pydantic_item
             except NoResultFound:
                 raise NoResultFound(f"Procedural memory item with id {item_id} not found.")
+
+        # Cache after session is closed (no PG connection held during cache I/O)
+        try:
+            if cache_provider:
+                from mirix.settings import settings
+
+                cache_key = f"{cache_provider.PROCEDURAL_PREFIX}{item_id}"
+                data = pydantic_item.model_dump(mode="json")
+                sync_cache_set_json(
+                    cache_key, data, ttl=settings.redis_ttl_default
+                )
+        except Exception as e:
+            logger.warning("Failed to populate cache: %s", e)
+
+        return pydantic_item
 
     @update_timezone
     @enforce_types
@@ -947,22 +948,23 @@ class ProceduralMemoryManager:
 
     def delete_procedure_by_id(self, procedure_id: str, actor: PydanticClient) -> None:
         """Delete a procedural memory item by ID (removes from cache)."""
+        from mirix.database.cache_provider import (
+            get_cache_provider,
+            sync_cache_delete,
+        )
+
         with self.session_maker() as session:
             try:
                 item = ProceduralMemoryItem.read(db_session=session, identifier=procedure_id, actor=actor)
-                # Remove from cache
-                from mirix.database.cache_provider import (
-                    get_cache_provider,
-                    sync_cache_delete,
-                )
-
-                cache_provider = get_cache_provider()
-                if cache_provider:
-                    cache_key = f"{cache_provider.PROCEDURAL_PREFIX}{procedure_id}"
-                    sync_cache_delete(cache_key)
                 item.hard_delete(session)
             except NoResultFound:
                 raise NoResultFound(f"Procedural memory item with id {procedure_id} not found.")
+
+        # Cache delete after session is closed (no PG connection held during cache I/O)
+        cache_provider = get_cache_provider()
+        if cache_provider:
+            cache_key = f"{cache_provider.PROCEDURAL_PREFIX}{procedure_id}"
+            sync_cache_delete(cache_key)
 
     @enforce_types
     async def delete_by_client_id(self, actor: PydanticClient) -> int:

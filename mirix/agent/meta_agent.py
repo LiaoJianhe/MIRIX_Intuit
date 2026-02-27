@@ -241,7 +241,7 @@ class MetaAgent(BaseAgent):
         Either loads existing agents from server or creates new ones.
         """
         # Check if agents already exist
-        existing_agents = self.server.agent_manager.list_agents(actor=self.actor)
+        existing_agents = self.server.agent_manager._sync_list_agents(actor=self.actor)
 
         printv(f"[Mirix.Agent.{self.agent_state.name}] INFO: Found {len(existing_agents)} existing agents")
 
@@ -537,7 +537,7 @@ class MetaAgent(BaseAgent):
         Refresh all agent states from the server.
         Useful after external modifications to agent configurations.
         """
-        existing_agents = self.server.agent_manager.list_agents(actor=self.actor)
+        existing_agents = self.server.agent_manager._sync_list_agents(actor=self.actor)
         self._load_existing_agents(existing_agents)
         self._initialize_agent_instances()
         printv(f"[Mirix.Agent.{self.agent_state.name}] INFO: Refreshed all memory agent states")

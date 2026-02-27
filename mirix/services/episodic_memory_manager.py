@@ -175,28 +175,29 @@ class EpisodicMemoryManager:
                     db_session=session, identifier=episodic_memory_id, actor=actor
                 )
                 pydantic_event = episodic_memory_item.to_pydantic()
-
-                try:
-                    if cache_provider:
-                        from mirix.settings import settings
-
-                        cache_key = f"{cache_provider.EPISODIC_PREFIX}{episodic_memory_id}"
-                        data = pydantic_event.model_dump(mode="json")
-                        cache_provider.set_json(cache_key, data, ttl=settings.redis_ttl_default)
-                        logger.debug(
-                            "Populated cache for episodic memory %s",
-                            episodic_memory_id,
-                        )
-                except Exception as e:
-                    logger.warning(
-                        "Failed to populate cache for episodic memory %s: %s",
-                        episodic_memory_id,
-                        e,
-                    )
-
-                return pydantic_event
             except NoResultFound:
                 raise NoResultFound(f"Episodic episodic_memory record with id {episodic_memory_id} not found.")
+
+        # Cache after session is closed (no PG connection held during cache I/O)
+        try:
+            if cache_provider:
+                from mirix.settings import settings
+
+                cache_key = f"{cache_provider.EPISODIC_PREFIX}{episodic_memory_id}"
+                data = pydantic_event.model_dump(mode="json")
+                cache_provider.set_json(cache_key, data, ttl=settings.redis_ttl_default)
+                logger.debug(
+                    "Populated cache for episodic memory %s",
+                    episodic_memory_id,
+                )
+        except Exception as e:
+            logger.warning(
+                "Failed to populate cache for episodic memory %s: %s",
+                episodic_memory_id,
+                e,
+            )
+
+        return pydantic_event
 
     @update_timezone
     @enforce_types
@@ -318,22 +319,23 @@ class EpisodicMemoryManager:
         """
         Delete an episodic memory record by ID (removes from Redis cache).
         """
+        from mirix.database.cache_provider import (
+            get_cache_provider,
+            sync_cache_delete,
+        )
+
         with self.session_maker() as session:
             try:
                 episodic_memory_item = EpisodicEvent.read(db_session=session, identifier=id, actor=actor)
-                # Remove from cache before hard delete
-                from mirix.database.cache_provider import (
-                    get_cache_provider,
-                    sync_cache_delete,
-                )
-
-                cache_provider = get_cache_provider()
-                if cache_provider:
-                    cache_key = f"{cache_provider.EPISODIC_PREFIX}{id}"
-                    sync_cache_delete(cache_key)
                 episodic_memory_item.hard_delete(session)
             except NoResultFound:
                 raise NoResultFound(f"Episodic episodic_memory record with id {id} not found.")
+
+        # Cache delete after session is closed (no PG connection held during cache I/O)
+        cache_provider = get_cache_provider()
+        if cache_provider:
+            cache_key = f"{cache_provider.EPISODIC_PREFIX}{id}"
+            sync_cache_delete(cache_key)
 
     @enforce_types
     async def delete_by_client_id(self, actor: PydanticClient) -> int:

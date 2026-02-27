@@ -382,20 +382,21 @@ class UserManager:
             user = UserModel.read(db_session=session, identifier=user_id)
             pydantic_user = user.to_pydantic()
 
-            try:
-                if cache_provider:
-                    from mirix.settings import settings
+        # Cache after session is closed (no PG connection held during cache I/O)
+        try:
+            if cache_provider:
+                from mirix.settings import settings
 
-                    cache_key = f"{cache_provider.USER_PREFIX}{user_id}"
-                    data = pydantic_user.model_dump(mode="json")
-                    sync_cache_set_hash(
-                        cache_key, data, ttl=settings.redis_ttl_users
-                    )
-                    logger.debug("Populated cache for user %s", user_id)
-            except Exception as e:
-                logger.warning("Failed to populate cache for user %s: %s", user_id, e)
+                cache_key = f"{cache_provider.USER_PREFIX}{user_id}"
+                data = pydantic_user.model_dump(mode="json")
+                sync_cache_set_hash(
+                    cache_key, data, ttl=settings.redis_ttl_users
+                )
+                logger.debug("Populated cache for user %s", user_id)
+        except Exception as e:
+            logger.warning("Failed to populate cache for user %s: %s", user_id, e)
 
-            return pydantic_user
+        return pydantic_user
 
     @enforce_types
     def get_admin_user(self) -> PydanticUser:
@@ -450,22 +451,40 @@ class UserManager:
 
         try:
             # Try to get by ID first (in case it exists with that ID)
-            return self.get_user_by_id(default_user_id)
+            cached_user = self.get_user_by_id(default_user_id)
+            # Guard against stale cache: verify the user actually exists in the DB.
+            # When a remote cache (e.g. IPS Cache) retains data across DB rebuilds,
+            # the cache can return a user that no longer exists in PostgreSQL.
+            with self.session_maker() as verify_session:
+                db_check = verify_session.query(UserModel).filter(UserModel.id == default_user_id).first()
+                if db_check is None:
+                    logger.warning(
+                        "Stale cache detected for user %s — exists in cache but not in DB. Proceeding to create.",
+                        default_user_id,
+                    )
+                    raise NoResultFound("Stale cache - user not in DB")
+            return cached_user
         except NoResultFound:
             pass
 
-        # Create the default user
-        with self.session_maker() as session:
-            user = UserModel(
-                id=default_user_id,
-                name=self.DEFAULT_USER_NAME,
-                status="active",
-                timezone=self.DEFAULT_TIME_ZONE,
-                organization_id=org_id,
-            )
-            user.create(session)
-            logger.info("Created default template user %s for organization %s", default_user_id, org_id)
-            return user.to_pydantic()
+        # Create the default user, handling the race where another thread creates it first.
+        try:
+            with self.session_maker() as session:
+                user = UserModel(
+                    id=default_user_id,
+                    name=self.DEFAULT_USER_NAME,
+                    status="active",
+                    timezone=self.DEFAULT_TIME_ZONE,
+                    organization_id=org_id,
+                )
+                user.create(session)
+                logger.info("Created default template user %s for organization %s", default_user_id, org_id)
+                return user.to_pydantic()
+        except Exception as e:
+            if "unique" in str(e).lower() or "duplicate" in str(e).lower():
+                logger.info("Default user %s created by another thread, reading from DB", default_user_id)
+                return self.get_user_by_id(default_user_id, use_cache=False)
+            raise
 
     @enforce_types
     def get_user_or_admin(self, user_id: Optional[str] = None):

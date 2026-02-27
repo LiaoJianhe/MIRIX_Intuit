@@ -202,16 +202,15 @@ class BlockManager:
 
         with self.session_maker() as session:
             block = BlockModel.read(db_session=session, identifier=block_id)
-
-            cache_provider = get_cache_provider()
-            if cache_provider:
-                cache_key = f"{cache_provider.BLOCK_PREFIX}{block_id}"
-                sync_cache_delete(cache_key)
-
-            self._invalidate_block_cache(block_id)
-
             block.hard_delete(db_session=session, actor=actor)
-            return block.to_pydantic()
+
+        # Cache delete after session is closed (no PG connection held during cache I/O)
+        cache_provider = get_cache_provider()
+        if cache_provider:
+            cache_key = f"{cache_provider.BLOCK_PREFIX}{block_id}"
+            sync_cache_delete(cache_key)
+        self._invalidate_block_cache(block_id)
+        return block.to_pydantic()
 
     @enforce_types
     def get_blocks(
@@ -454,22 +453,23 @@ class BlockManager:
                     access_type=AccessType.USER,
                 )
                 pydantic_block = block.to_pydantic()
-
-                try:
-                    if cache_provider:
-                        from mirix.settings import settings
-
-                        cache_key = f"{cache_provider.BLOCK_PREFIX}{block_id}"
-                        data = pydantic_block.model_dump(mode="json")
-                        sync_cache_set_hash(
-                            cache_key, data, ttl=settings.redis_ttl_blocks
-                        )
-                except Exception as e:
-                    logger.warning("Failed to populate cache for block %s: %s", block_id, e)
-
-                return pydantic_block
             except NoResultFound:
                 return None
+
+        # Cache after session is closed (no PG connection held during cache I/O)
+        try:
+            if cache_provider:
+                from mirix.settings import settings
+
+                cache_key = f"{cache_provider.BLOCK_PREFIX}{block_id}"
+                data = pydantic_block.model_dump(mode="json")
+                sync_cache_set_hash(
+                    cache_key, data, ttl=settings.redis_ttl_blocks
+                )
+        except Exception as e:
+            logger.warning("Failed to populate cache for block %s: %s", block_id, e)
+
+        return pydantic_block
 
     @enforce_types
     def get_all_blocks_by_ids(self, block_ids: List[str], user: Optional[PydanticUser] = None) -> List[PydanticBlock]:
@@ -489,7 +489,7 @@ class BlockManager:
         Returns:
             Number of records soft deleted
         """
-        from mirix.database.cache_provider import acache_delete, acache_update_hash_field, get_cache_provider
+        from mirix.database.cache_provider import acache_delete_many, get_cache_provider
 
         def _db_soft_delete():
             with self.session_maker() as session:
@@ -517,11 +517,8 @@ class BlockManager:
 
         cache_provider = get_cache_provider()
         if cache_provider:
-            for block_id in block_ids:
-                redis_key = f"{cache_provider.BLOCK_PREFIX}{block_id}"
-                ok = await acache_update_hash_field(redis_key, "is_deleted", "true")
-                if not ok:
-                    await acache_delete(redis_key)
+            redis_keys = [f"{cache_provider.BLOCK_PREFIX}{block_id}" for block_id in block_ids]
+            await acache_delete_many(redis_keys)
 
         return count
 
@@ -545,8 +542,6 @@ class BlockManager:
                 count = len(block_ids)
                 if count == 0:
                     return 0, []
-                for block_id in block_ids:
-                    self._invalidate_block_cache(block_id)
                 session.query(BlockModel).filter(BlockModel.user_id == user_id).delete(
                     synchronize_session=False
                 )
@@ -556,6 +551,10 @@ class BlockManager:
         count, block_ids = await asyncio.to_thread(_db_delete)
         if count == 0:
             return 0
+
+        # Cache invalidate after session is closed (no PG connection held during cache I/O)
+        for block_id in block_ids:
+            self._invalidate_block_cache(block_id)
 
         cache_provider = get_cache_provider()
         if cache_provider and block_ids:

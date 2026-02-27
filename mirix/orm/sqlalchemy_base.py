@@ -683,15 +683,6 @@ class SqlalchemyBase(CommonSqlalchemyMetaMixins, Base):
                 session.add(self)
                 session.commit()
                 session.refresh(self)
-
-                # Conditional cache write
-                if use_cache:
-                    self._update_redis_cache(operation="create", actor=actor)
-                    logger.debug("Cached %s to cache", self.__class__.__name__)
-                else:
-                    logger.debug("Skipped cache for %s (use_cache=False)", self.__class__.__name__)
-
-                return self
             except (DBAPIError, IntegrityError) as e:
                 session.rollback()
                 logger.error(f"Failed to create {self.__class__.__name__} with ID {self.id}: {e}")
@@ -701,18 +692,26 @@ class SqlalchemyBase(CommonSqlalchemyMetaMixins, Base):
                 logger.error(f"Unexpected error creating {self.__class__.__name__} with ID {self.id}: {e}")
                 raise
 
+        # Cache after session is closed (no PG connection held during cache I/O)
+        if use_cache:
+            self._update_redis_cache(operation="create", actor=actor)
+            logger.debug("Cached %s to cache", self.__class__.__name__)
+        else:
+            logger.debug("Skipped cache for %s (use_cache=False)", self.__class__.__name__)
+        return self
+
     @handle_db_timeout
     @transaction_retry(max_retries=5, base_delay=0.1, max_delay=3.0)
     def update_with_redis(
         self, db_session: "Session", actor: Optional["Client"] = None, use_cache: bool = True
     ) -> "SqlalchemyBase":
         """
-        Update record in PostgreSQL and optionally update cache.
+        Update record in PostgreSQL and optionally invalidate cache.
 
         Args:
             db_session: Database session
             actor: User performing the operation
-            use_cache: If True, update cache. If False, skip caching.
+            use_cache: If True, invalidate cache. If False, skip cache invalidation.
         """
         logger.debug(
             f"Updating {self.__class__.__name__} with ID: {self.id} (use_cache={use_cache}) with actor={actor}"
@@ -728,19 +727,18 @@ class SqlalchemyBase(CommonSqlalchemyMetaMixins, Base):
                 session.add(self)
                 session.commit()
                 session.refresh(self)
-
-                # Conditional cache update
-                if use_cache:
-                    self._update_redis_cache(operation="update", actor=actor)
-                    logger.debug("Updated %s in cache", self.__class__.__name__)
-                else:
-                    logger.debug("Skipped cache update for %s (use_cache=False)", self.__class__.__name__)
-
-                return self
             except Exception as e:
                 session.rollback()
                 logger.error(f"Failed to update {self.__class__.__name__} with ID {self.id}: {e}")
                 raise
+
+        # Cache invalidation after session is closed (no PG connection held during cache I/O)
+        if use_cache:
+            self._update_redis_cache(operation="update", actor=actor)
+            logger.debug("Invalidated %s in cache", self.__class__.__name__)
+        else:
+            logger.debug("Skipped cache invalidation for %s (use_cache=False)", self.__class__.__name__)
+        return self
 
     @handle_db_timeout
     @retry_db_operation(max_retries=3, base_delay=0.1, max_delay=2.0)
@@ -764,14 +762,16 @@ class SqlalchemyBase(CommonSqlalchemyMetaMixins, Base):
 
         self.is_deleted = True
 
-        # Conditional cache deletion
+        # DB update first (commit and close session inside update())
+        result = self.update(db_session)
+
+        # Cache deletion after session is closed (no PG connection held during cache I/O)
         if use_cache:
             self._update_redis_cache(operation="delete", actor=actor)
             logger.debug("Removed %s from cache", self.__class__.__name__)
         else:
             logger.debug("Skipped cache deletion for %s (use_cache=False)", self.__class__.__name__)
-
-        return self.update(db_session)
+        return result
 
     def _update_redis_cache(self, operation: str = "update", actor: Optional["Client"] = None) -> None:
         """
@@ -802,7 +802,7 @@ class SqlalchemyBase(CommonSqlalchemyMetaMixins, Base):
             # HASH-BASED CACHING (blocks and messages - NO embeddings)
             if table_name == "block":
                 cache_key = f"{cache_provider.BLOCK_PREFIX}{self.id}"
-                if operation == "delete":
+                if operation in ("delete", "update"):
                     sync_cache_delete(cache_key)
                 else:
                     data = self.to_pydantic().model_dump(mode="json")
@@ -813,7 +813,7 @@ class SqlalchemyBase(CommonSqlalchemyMetaMixins, Base):
 
             if table_name == "messages":
                 cache_key = f"{cache_provider.MESSAGE_PREFIX}{self.id}"
-                if operation == "delete":
+                if operation in ("delete", "update"):
                     sync_cache_delete(cache_key)
                 else:
                     data = self.to_pydantic().model_dump(mode="json")
@@ -825,7 +825,7 @@ class SqlalchemyBase(CommonSqlalchemyMetaMixins, Base):
             # ORGANIZATION CACHING (Hash-based)
             if table_name == "organizations":
                 cache_key = f"{cache_provider.ORGANIZATION_PREFIX}{self.id}"
-                if operation == "delete":
+                if operation in ("delete", "update"):
                     sync_cache_delete(cache_key)
                 else:
                     data = self.to_pydantic().model_dump(mode="json")
@@ -839,7 +839,7 @@ class SqlalchemyBase(CommonSqlalchemyMetaMixins, Base):
             # USER CACHING (Hash-based)
             if table_name == "users":
                 cache_key = f"{cache_provider.USER_PREFIX}{self.id}"
-                if operation == "delete":
+                if operation in ("delete", "update"):
                     sync_cache_delete(cache_key)
                 else:
                     data = self.to_pydantic().model_dump(mode="json")
@@ -853,7 +853,7 @@ class SqlalchemyBase(CommonSqlalchemyMetaMixins, Base):
                 import json
 
                 cache_key = f"{cache_provider.AGENT_PREFIX}{self.id}"
-                if operation == "delete":
+                if operation in ("delete", "update"):
                     sync_cache_delete(cache_key)
                 else:
                     data = self.to_pydantic().model_dump(mode="json")
@@ -950,7 +950,7 @@ class SqlalchemyBase(CommonSqlalchemyMetaMixins, Base):
                 import json
 
                 cache_key = f"{cache_provider.TOOL_PREFIX}{self.id}"
-                if operation == "delete":
+                if operation in ("delete", "update"):
                     sync_cache_delete(cache_key)
                 else:
                     data = self.to_pydantic().model_dump(mode="json")
@@ -981,7 +981,7 @@ class SqlalchemyBase(CommonSqlalchemyMetaMixins, Base):
                 prefix = memory_tables[table_name]
                 cache_key = f"{prefix}{self.id}"
 
-                if operation == "delete":
+                if operation in ("delete", "update"):
                     sync_cache_delete(cache_key)
                 else:
                     data = self.to_pydantic().model_dump(mode="json")

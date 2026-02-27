@@ -445,22 +445,23 @@ class KnowledgeVaultManager:
 
                 item = KnowledgeVaultItem.read(db_session=session, identifier=knowledge_vault_item_id, actor=actor)
                 pydantic_item = item.to_pydantic()
-
-                try:
-                    if cache_provider:
-                        from mirix.settings import settings
-
-                        cache_key = f"{cache_provider.KNOWLEDGE_PREFIX}{knowledge_vault_item_id}"
-                        data = pydantic_item.model_dump(mode="json")
-                        sync_cache_set_json(
-                            cache_key, data, ttl=settings.redis_ttl_default
-                        )
-                except Exception as e:
-                    logger.warning("Failed to populate cache: %s", e)
-
-                return pydantic_item
             except NoResultFound:
                 raise NoResultFound(f"Knowledge vault item with id {knowledge_vault_item_id} not found.")
+
+        # Cache after session is closed (no PG connection held during cache I/O)
+        try:
+            if cache_provider:
+                from mirix.settings import settings
+
+                cache_key = f"{cache_provider.KNOWLEDGE_PREFIX}{knowledge_vault_item_id}"
+                data = pydantic_item.model_dump(mode="json")
+                sync_cache_set_json(
+                    cache_key, data, ttl=settings.redis_ttl_default
+                )
+        except Exception as e:
+            logger.warning("Failed to populate cache: %s", e)
+
+        return pydantic_item
 
     @update_timezone
     @enforce_types
@@ -956,22 +957,23 @@ class KnowledgeVaultManager:
     @enforce_types
     def delete_knowledge_by_id(self, knowledge_vault_item_id: str, actor: PydanticClient) -> None:
         """Delete a knowledge vault item by ID (removes from cache)."""
+        from mirix.database.cache_provider import (
+            get_cache_provider,
+            sync_cache_delete,
+        )
+
         with self.session_maker() as session:
             try:
                 item = KnowledgeVaultItem.read(db_session=session, identifier=knowledge_vault_item_id, actor=actor)
-                # Remove from cache
-                from mirix.database.cache_provider import (
-                    get_cache_provider,
-                    sync_cache_delete,
-                )
-
-                cache_provider = get_cache_provider()
-                if cache_provider:
-                    cache_key = f"{cache_provider.KNOWLEDGE_PREFIX}{knowledge_vault_item_id}"
-                    sync_cache_delete(cache_key)
                 item.hard_delete(session)
             except NoResultFound:
                 raise NoResultFound(f"Knowledge vault item with id {knowledge_vault_item_id} not found.")
+
+        # Cache delete after session is closed (no PG connection held during cache I/O)
+        cache_provider = get_cache_provider()
+        if cache_provider:
+            cache_key = f"{cache_provider.KNOWLEDGE_PREFIX}{knowledge_vault_item_id}"
+            sync_cache_delete(cache_key)
 
     @enforce_types
     async def delete_by_client_id(self, actor: PydanticClient) -> int:

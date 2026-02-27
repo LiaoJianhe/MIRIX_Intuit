@@ -744,7 +744,7 @@ class AgentManager:
             if loop:
                 old_agent_state = run_sync(
                     self.get_agent_by_id(agent_id=agent_id, actor=actor),
-                    timeout=10,
+                    timeout=30,
                 )
 
         # Update agent (including system field in database)
@@ -1565,7 +1565,7 @@ class AgentManager:
         if loop:
             return run_sync(
                 self.get_agent_by_id(agent_id, actor, use_cache),
-                timeout=10,
+                timeout=30,
             )
         raise RuntimeError("No event loop available for sync get_agent_by_id")
 
@@ -1653,41 +1653,37 @@ class AgentManager:
         with self.session_maker() as session:
             # Retrieve the agent
             agent = AgentModel.read(db_session=session, identifier=agent_id, actor=actor)
-
-            # Track parent_id for cache invalidation
             parent_id = agent.parent_id
-
-            # Remove from cache before hard delete
-            try:
-                from mirix.database.cache_provider import (
-                    get_cache_provider,
-                    sync_cache_delete,
-                )
-                from mirix.log import get_logger
-
-                logger = get_logger(__name__)
-                cache_provider = get_cache_provider()
-                if cache_provider:
-                    cache_key = f"{cache_provider.AGENT_PREFIX}{agent_id}"
-                    sync_cache_delete(cache_key)
-                    logger.debug("Removed agent %s from cache", agent_id)
-            except Exception as e:
-                from mirix.log import get_logger
-
-                logger = get_logger(__name__)
-                logger.warning("Failed to remove agent %s from cache: %s", agent_id, e)
-
             agent.hard_delete(session)
 
-            # Invalidate parent cache if this was a child agent (async from sync context)
-            if parent_id:
-                from mirix.database.sync_bridge import run_sync_or_default
+        # Cache delete and parent invalidation after session is closed (no PG connection held during cache I/O)
+        try:
+            from mirix.database.cache_provider import (
+                get_cache_provider,
+                sync_cache_delete,
+            )
+            from mirix.log import get_logger
 
-                run_sync_or_default(
-                    self._invalidate_parent_cache_for_child(agent_id, parent_id),
-                    default=None,
-                    timeout=5,
-                )
+            logger = get_logger(__name__)
+            cache_provider = get_cache_provider()
+            if cache_provider:
+                cache_key = f"{cache_provider.AGENT_PREFIX}{agent_id}"
+                sync_cache_delete(cache_key)
+                logger.debug("Removed agent %s from cache", agent_id)
+        except Exception as e:
+            from mirix.log import get_logger
+
+            logger = get_logger(__name__)
+            logger.warning("Failed to remove agent %s from cache: %s", agent_id, e)
+
+        if parent_id:
+            from mirix.database.sync_bridge import run_sync_or_default
+
+            run_sync_or_default(
+                self._invalidate_parent_cache_for_child(agent_id, parent_id),
+                default=None,
+                timeout=5,
+            )
 
     # ======================================================================================================================
     # In Context Messages Management

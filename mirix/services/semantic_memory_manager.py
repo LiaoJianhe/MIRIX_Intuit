@@ -447,28 +447,29 @@ class SemanticMemoryManager:
                     db_session=session, identifier=semantic_memory_id, user=user
                 )
                 pydantic_item = semantic_memory_item.to_pydantic()
-
-                try:
-                    if cache_provider:
-                        cache_key = f"{cache_provider.SEMANTIC_PREFIX}{semantic_memory_id}"
-                        data = pydantic_item.model_dump(mode="json")
-                        sync_cache_set_json(
-                            cache_key, data, ttl=settings.redis_ttl_default
-                        )
-                        logger.debug(
-                            "Populated cache for semantic memory %s",
-                            semantic_memory_id,
-                        )
-                except Exception as e:
-                    logger.warning(
-                        "Failed to populate cache for semantic memory %s: %s",
-                        semantic_memory_id,
-                        e,
-                    )
-
-                return pydantic_item
             except NoResultFound:
                 raise NoResultFound(f"Semantic memory item with id {semantic_memory_id} not found.")
+
+        # Cache after session is closed (no PG connection held during cache I/O)
+        try:
+            if cache_provider:
+                cache_key = f"{cache_provider.SEMANTIC_PREFIX}{semantic_memory_id}"
+                data = pydantic_item.model_dump(mode="json")
+                sync_cache_set_json(
+                    cache_key, data, ttl=settings.redis_ttl_default
+                )
+                logger.debug(
+                    "Populated cache for semantic memory %s",
+                    semantic_memory_id,
+                )
+        except Exception as e:
+            logger.warning(
+                "Failed to populate cache for semantic memory %s: %s",
+                semantic_memory_id,
+                e,
+            )
+
+        return pydantic_item
 
     @update_timezone
     @enforce_types
@@ -1010,22 +1011,23 @@ class SemanticMemoryManager:
 
     def delete_semantic_item_by_id(self, semantic_memory_id: str, actor: PydanticClient) -> None:
         """Delete a semantic memory item by ID (removes from cache)."""
+        from mirix.database.cache_provider import (
+            get_cache_provider,
+            sync_cache_delete,
+        )
+
         with self.session_maker() as session:
             try:
                 item = SemanticMemoryItem.read(db_session=session, identifier=semantic_memory_id, actor=actor)
-                # Remove from cache before hard delete
-                from mirix.database.cache_provider import (
-                    get_cache_provider,
-                    sync_cache_delete,
-                )
-
-                cache_provider = get_cache_provider()
-                if cache_provider:
-                    cache_key = f"{cache_provider.SEMANTIC_PREFIX}{semantic_memory_id}"
-                    sync_cache_delete(cache_key)
                 item.hard_delete(session)
             except NoResultFound:
                 raise NoResultFound(f"Semantic memory item with id {semantic_memory_id} not found.")
+
+        # Cache delete after session is closed (no PG connection held during cache I/O)
+        cache_provider = get_cache_provider()
+        if cache_provider:
+            cache_key = f"{cache_provider.SEMANTIC_PREFIX}{semantic_memory_id}"
+            sync_cache_delete(cache_key)
 
     @enforce_types
     async def delete_by_client_id(self, actor: PydanticClient) -> int:
