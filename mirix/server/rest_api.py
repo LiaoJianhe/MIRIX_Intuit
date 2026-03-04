@@ -2092,6 +2092,7 @@ def retrieve_memories_by_keywords(
     Returns:
         Dictionary containing all memory types with their items
     """
+    scopes = client.read_scopes
     search_method = "bm25"
 
     # Log temporal filtering for monitoring
@@ -2116,30 +2117,32 @@ def retrieve_memories_by_keywords(
 
         # Get recent episodic memories with temporal filter
         recent_episodic = episodic_manager.list_episodic_memory(
-            agent_state=agent_state,  # Not accessed during BM25 search
+            agent_state=agent_state,
             user=user,
             limit=limit,
             timezone_str=timezone_str,
             filter_tags=filter_tags,
+            scopes=scopes,
             use_cache=use_cache,
-            start_date=start_date,  # NEW: Temporal filtering
-            end_date=end_date,  # NEW: Temporal filtering
+            start_date=start_date,
+            end_date=end_date,
         )
 
         # Get relevant episodic memories based on keywords with temporal filter
         relevant_episodic = []
         if key_words:
             relevant_episodic = episodic_manager.list_episodic_memory(
-                agent_state=agent_state,  # Not accessed during BM25 search
+                agent_state=agent_state,
                 user=user,
                 query=key_words,
                 search_field="details",
                 search_method=search_method,
                 limit=limit,
                 timezone_str=timezone_str,
-                filter_tags=filter_tags,  # Include filter_tags for consistency
-                start_date=start_date,  # NEW: Temporal filtering
-                end_date=end_date,  # NEW: Temporal filtering
+                filter_tags=filter_tags,
+                scopes=scopes,
+                start_date=start_date,
+                end_date=end_date,
             )
 
         memories["episodic"] = {
@@ -2172,7 +2175,7 @@ def retrieve_memories_by_keywords(
         semantic_manager = server.semantic_memory_manager
 
         semantic_items = semantic_manager.list_semantic_items(
-            agent_state=agent_state,  # Not accessed during BM25 search
+            agent_state=agent_state,
             user=user,
             query=key_words,
             search_field="details",
@@ -2180,6 +2183,7 @@ def retrieve_memories_by_keywords(
             limit=limit,
             timezone_str=timezone_str,
             filter_tags=filter_tags,
+            scopes=scopes,
             use_cache=use_cache,
         )
 
@@ -2204,7 +2208,7 @@ def retrieve_memories_by_keywords(
         resource_manager = server.resource_memory_manager
 
         resources = resource_manager.list_resources(
-            agent_state=agent_state,  # Not accessed during BM25 search
+            agent_state=agent_state,
             user=user,
             query=key_words,
             search_field="summary",
@@ -2212,6 +2216,7 @@ def retrieve_memories_by_keywords(
             limit=limit,
             timezone_str=timezone_str,
             filter_tags=filter_tags,
+            scopes=scopes,
             use_cache=use_cache,
         )
 
@@ -2236,7 +2241,7 @@ def retrieve_memories_by_keywords(
         procedural_manager = server.procedural_memory_manager
 
         procedures = procedural_manager.list_procedures(
-            agent_state=agent_state,  # Not accessed during BM25 search
+            agent_state=agent_state,
             user=user,
             query=key_words,
             search_field="summary",
@@ -2244,6 +2249,7 @@ def retrieve_memories_by_keywords(
             limit=limit,
             timezone_str=timezone_str,
             filter_tags=filter_tags,
+            scopes=scopes,
             use_cache=use_cache,
         )
 
@@ -2349,16 +2355,7 @@ async def retrieve_memory_with_conversation(
         user_id = ClientAuthManager.get_admin_user_id_for_client(client.id)
         logger.debug("No user_id provided, using admin user: %s", user_id)
 
-    # Add client read_scopes to filter_tags for memory retrieval
-    if request.filter_tags is not None:
-        # Create a copy to avoid modifying the original request
-        filter_tags = dict(request.filter_tags)
-    else:
-        # Create new filter_tags if not provided
-        filter_tags = {}
-
-    # Add read_scopes for filtering - memories are readable if scope IN client.read_scopes
-    filter_tags["read_scopes"] = client.read_scopes
+    filter_tags = dict(request.filter_tags) if request.filter_tags is not None else {}
 
     # Get all agents for this client (automatically filtered by client via apply_access_predicate)
     all_agents = server.agent_manager.list_agents(actor=client, limit=1000)
@@ -2470,8 +2467,8 @@ async def retrieve_memory_with_conversation(
         limit=request.limit,
         filter_tags=filter_tags,
         use_cache=request.use_cache,
-        start_date=start_date,  # NEW: Temporal filtering
-        end_date=end_date,  # NEW: Temporal filtering
+        start_date=start_date,
+        end_date=end_date,
     )
 
     return {
@@ -2535,13 +2532,8 @@ async def retrieve_memory_with_topic(
                 "memories": {},
             }
 
-    # Add client read_scopes to filter_tags for memory retrieval
     if parsed_filter_tags is None:
-        # Create new filter_tags if not provided
         parsed_filter_tags = {}
-
-    # Add read_scopes for filtering - memories are readable if scope IN client.read_scopes
-    parsed_filter_tags["read_scopes"] = client.read_scopes
 
     # Get all agents for this client (automatically filtered by client via apply_access_predicate)
     all_agents = server.agent_manager.list_agents(actor=client, limit=1000)
@@ -2718,12 +2710,9 @@ async def search_memory(
                 "count": 0,
             }
 
-    # Add client read_scopes to filter_tags for memory retrieval
     if parsed_filter_tags is None:
         parsed_filter_tags = {}
-
-    # Add read_scopes for filtering - memories are readable if scope IN client.read_scopes
-    parsed_filter_tags["read_scopes"] = client.read_scopes
+    scopes = client.read_scopes
 
     # Parse temporal filtering parameters
     parsed_start_date: Optional[datetime] = None
@@ -2793,6 +2782,7 @@ async def search_memory(
                     limit=limit,
                     timezone_str=timezone_str,
                     filter_tags=parsed_filter_tags,
+                    scopes=scopes,
                     start_date=parsed_start_date,
                     end_date=parsed_end_date,
                     similarity_threshold=similarity_threshold,
@@ -2830,6 +2820,7 @@ async def search_memory(
                     limit=limit,
                     timezone_str=timezone_str,
                     filter_tags=parsed_filter_tags,
+                    scopes=scopes,
                     similarity_threshold=similarity_threshold,
                 )
                 return [
@@ -2860,6 +2851,7 @@ async def search_memory(
                     limit=limit,
                     timezone_str=timezone_str,
                     filter_tags=parsed_filter_tags,
+                    scopes=scopes,
                     similarity_threshold=similarity_threshold,
                 )
                 return [
@@ -2889,6 +2881,7 @@ async def search_memory(
                     limit=limit,
                     timezone_str=timezone_str,
                     filter_tags=parsed_filter_tags,
+                    scopes=scopes,
                     similarity_threshold=similarity_threshold,
                 )
                 return [
@@ -2920,6 +2913,7 @@ async def search_memory(
                     limit=limit,
                     timezone_str=timezone_str,
                     filter_tags=parsed_filter_tags,
+                    scopes=scopes,
                     similarity_threshold=similarity_threshold,
                 )
                 return [
@@ -2961,6 +2955,7 @@ async def search_memory(
                 limit=limit,
                 timezone_str=timezone_str,
                 filter_tags=parsed_filter_tags,
+                scopes=scopes,
                 start_date=parsed_start_date,
                 end_date=parsed_end_date,
                 similarity_threshold=similarity_threshold,
@@ -2999,6 +2994,7 @@ async def search_memory(
                 limit=limit,
                 timezone_str=timezone_str,
                 filter_tags=parsed_filter_tags,
+                scopes=scopes,
                 similarity_threshold=similarity_threshold,
             )
             all_results.extend(
@@ -3030,6 +3026,7 @@ async def search_memory(
                 limit=limit,
                 timezone_str=timezone_str,
                 filter_tags=parsed_filter_tags,
+                scopes=scopes,
                 similarity_threshold=similarity_threshold,
             )
             all_results.extend(
@@ -3060,6 +3057,7 @@ async def search_memory(
                 limit=limit,
                 timezone_str=timezone_str,
                 filter_tags=parsed_filter_tags,
+                scopes=scopes,
                 similarity_threshold=similarity_threshold,
             )
             all_results.extend(
@@ -3092,6 +3090,7 @@ async def search_memory(
                 limit=limit,
                 timezone_str=timezone_str,
                 filter_tags=parsed_filter_tags,
+                scopes=scopes,
                 similarity_threshold=similarity_threshold,
             )
             all_results.extend(
@@ -3214,15 +3213,13 @@ async def search_memory_all_users(
     else:
         filter_tags_dict = {}
 
-    # Add client read_scopes to filter_tags for memory retrieval
-    # This filters memories where memory.filter_tags["scope"] IN client.read_scopes
-    filter_tags_dict["read_scopes"] = client.read_scopes
+    scopes = client.read_scopes
 
     logger.info(
-        "Cross-user search: client=%s, org=%s, read_scopes=%s, filter_tags=%s, similarity_threshold=%s, include_core_memory=%s, block_filter_tags=%s",
+        "Cross-user search: client=%s, org=%s, scopes=%s, filter_tags=%s, similarity_threshold=%s, include_core_memory=%s, block_filter_tags=%s",
         effective_client_id,
         effective_org_id,
-        client.read_scopes,
+        scopes,
         filter_tags_dict,
         similarity_threshold,
         include_core_memory,
@@ -3310,6 +3307,7 @@ async def search_memory_all_users(
                     limit=limit,
                     timezone_str="UTC",
                     filter_tags=filter_tags_dict,
+                    scopes=scopes,
                     start_date=parsed_start_date,
                     end_date=parsed_end_date,
                     similarity_threshold=similarity_threshold,
@@ -3348,6 +3346,7 @@ async def search_memory_all_users(
                     limit=limit,
                     timezone_str="UTC",
                     filter_tags=filter_tags_dict,
+                    scopes=scopes,
                     similarity_threshold=similarity_threshold,
                 )
                 return [
@@ -3379,6 +3378,7 @@ async def search_memory_all_users(
                     limit=limit,
                     timezone_str="UTC",
                     filter_tags=filter_tags_dict,
+                    scopes=scopes,
                     similarity_threshold=similarity_threshold,
                 )
                 return [
@@ -3409,6 +3409,7 @@ async def search_memory_all_users(
                     limit=limit,
                     timezone_str="UTC",
                     filter_tags=filter_tags_dict,
+                    scopes=scopes,
                     similarity_threshold=similarity_threshold,
                 )
                 return [
@@ -3441,6 +3442,7 @@ async def search_memory_all_users(
                     limit=limit,
                     timezone_str="UTC",
                     filter_tags=filter_tags_dict,
+                    scopes=scopes,
                     similarity_threshold=similarity_threshold,
                 )
                 return [
@@ -3483,6 +3485,7 @@ async def search_memory_all_users(
                 limit=limit,
                 timezone_str="UTC",
                 filter_tags=filter_tags_dict,
+                scopes=scopes,
                 start_date=parsed_start_date,
                 end_date=parsed_end_date,
                 similarity_threshold=similarity_threshold,
@@ -3522,6 +3525,7 @@ async def search_memory_all_users(
                 limit=limit,
                 timezone_str="UTC",
                 filter_tags=filter_tags_dict,
+                scopes=scopes,
                 similarity_threshold=similarity_threshold,
             )
             all_results.extend(
@@ -3554,6 +3558,7 @@ async def search_memory_all_users(
                 limit=limit,
                 timezone_str="UTC",
                 filter_tags=filter_tags_dict,
+                scopes=scopes,
                 similarity_threshold=similarity_threshold,
             )
             all_results.extend(
@@ -3585,6 +3590,7 @@ async def search_memory_all_users(
                 limit=limit,
                 timezone_str="UTC",
                 filter_tags=filter_tags_dict,
+                scopes=scopes,
                 similarity_threshold=similarity_threshold,
             )
             all_results.extend(
@@ -3618,6 +3624,7 @@ async def search_memory_all_users(
                 limit=limit,
                 timezone_str="UTC",
                 filter_tags=filter_tags_dict,
+                scopes=scopes,
                 similarity_threshold=similarity_threshold,
             )
             all_results.extend(
@@ -4641,10 +4648,8 @@ async def search_raw_memory(
         except NoResultFound:
             raise HTTPException(status_code=404, detail=f"User {user_id} not found")
 
-    # Process filter_tags: use client's read_scopes for filtering
     filter_tags = dict[str, Any](request.filter_tags) if request.filter_tags is not None else {}
-    # Add read_scopes for filtering - memories are readable if scope IN client.read_scopes
-    filter_tags["read_scopes"] = client.read_scopes
+    scopes = client.read_scopes
 
     # Parse time_range from request, converting to UTC and stripping timezone for DB comparison
     time_range_dict = None
@@ -4714,6 +4719,7 @@ async def search_raw_memory(
             organization_id=client.organization_id,
             user_id=user_id,
             filter_tags=filter_tags,
+            scopes=scopes,
             sort=request.sort,
             cursor=request.cursor,
             time_range=time_range_dict,
