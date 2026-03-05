@@ -373,6 +373,7 @@ class Agent(BaseAgent):
                     block_id=block.id,
                     new_filter_tags=desired,
                     actor=self.actor,
+                    user=self.user,
                 )
         return blocks
 

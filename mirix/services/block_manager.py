@@ -193,13 +193,14 @@ class BlockManager:
         block_id: str,
         new_filter_tags: Dict[str, Any],
         actor: PydanticClient,
+        user: Optional["PydanticUser"] = None,
     ) -> None:
         """
         Update only the filter_tags on a block and persist to DB + cache.
         """
         with self.session_maker() as session:
             block = BlockModel.read(
-                db_session=session, identifier=block_id, actor=actor, access_type=AccessType.USER
+                db_session=session, identifier=block_id, actor=actor, user=user, access_type=AccessType.USER
             )
             block.filter_tags = new_filter_tags
             block.update_with_redis(db_session=session, actor=actor)
