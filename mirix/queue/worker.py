@@ -295,6 +295,12 @@ class QueueWorker:
                 except Exception as e:
                     raise ValueError("block_filter_tags was provided but could not be parsed as a dict") from e
 
+            block_filter_tags_update_mode = (
+                message.block_filter_tags_update_mode
+                if message.HasField("block_filter_tags_update_mode")
+                else "merge"
+            )
+
             # Log the processing
             logger.info(
                 "Processing message via server: agent_id=%s, client_id=%s (from actor), user_id=%s, input_messages_count=%s, use_cache=%s, filter_tags=%s, occurred_at=%s",
@@ -317,6 +323,7 @@ class QueueWorker:
                     user=user,
                     filter_tags=filter_tags,
                     block_filter_tags=block_filter_tags,
+                    block_filter_tags_update_mode=block_filter_tags_update_mode,
                     use_cache=use_cache,
                     occurred_at=occurred_at,
                 )

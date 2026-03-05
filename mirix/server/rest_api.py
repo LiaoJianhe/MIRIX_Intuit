@@ -977,6 +977,7 @@ class SendMessageRequest(BaseModel):
     block_filter_tags: Optional[Dict[str, Any]] = (
         None  # Applied only when blocks are created (e.g. from default template)
     )
+    block_filter_tags_update_mode: Optional[str] = "merge"  # "merge" or "replace"
     use_cache: bool = True  # Control Redis cache behavior
 
 
@@ -1011,6 +1012,10 @@ async def send_message_to_agent(
 
     if request.block_filter_tags is not None and not isinstance(request.block_filter_tags, dict):
         raise HTTPException(status_code=400, detail="block_filter_tags must be a dict when provided")
+    if request.block_filter_tags is not None:
+        request.block_filter_tags.pop("scope", None)
+    if request.block_filter_tags_update_mode not in ("merge", "replace"):
+        raise HTTPException(status_code=400, detail="block_filter_tags_update_mode must be 'merge' or 'replace'")
 
     try:
         # Prepare the message
@@ -1029,6 +1034,7 @@ async def send_message_to_agent(
             user_id=request.user_id,  # Pass user_id to queue
             filter_tags=request.filter_tags,  # Pass filter_tags to queue
             block_filter_tags=request.block_filter_tags,
+            block_filter_tags_update_mode=request.block_filter_tags_update_mode,
             use_cache=request.use_cache,  # Pass use_cache to queue
         )
 
@@ -1926,6 +1932,7 @@ class AddMemoryRequest(BaseModel):
     block_filter_tags: Optional[Dict[str, Any]] = (
         None  # Applied only when blocks are created (e.g. from default template)
     )
+    block_filter_tags_update_mode: Optional[str] = "merge"  # "merge" or "replace"
     use_cache: bool = True  # Control Redis cache behavior
     occurred_at: Optional[str] = None  # Optional ISO 8601 timestamp string for episodic memory
 
@@ -2014,6 +2021,10 @@ async def add_memory(
 
     if request.block_filter_tags is not None and not isinstance(request.block_filter_tags, dict):
         raise HTTPException(status_code=400, detail="block_filter_tags must be a dict when provided")
+    if request.block_filter_tags is not None:
+        request.block_filter_tags.pop("scope", None)
+    if request.block_filter_tags_update_mode not in ("merge", "replace"):
+        raise HTTPException(status_code=400, detail="block_filter_tags_update_mode must be 'merge' or 'replace'")
 
     # Add or update the "scope" key with the client's write_scope for memory creation
     # Memories are written with the client's write_scope
@@ -2033,6 +2044,7 @@ async def add_memory(
         verbose=request.verbose,
         filter_tags=filter_tags,
         block_filter_tags=request.block_filter_tags,
+        block_filter_tags_update_mode=request.block_filter_tags_update_mode,
         use_cache=request.use_cache,
         occurred_at=request.occurred_at,  # Optional timestamp for episodic memory
     )
