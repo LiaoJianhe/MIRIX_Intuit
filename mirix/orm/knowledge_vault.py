@@ -199,6 +199,5 @@ class KnowledgeVaultItem(SqlalchemyBase, OrganizationMixin, UserMixin):
             "caption_embedding": self.caption_embedding,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
-            "is_deleted": self.is_deleted,
         }
         return self.__pydantic_model__(**state)

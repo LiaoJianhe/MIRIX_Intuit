@@ -95,7 +95,7 @@ class Agent(SqlalchemyBase, OrganizationMixin):
 
         # For tools: if already loaded, use them; otherwise use empty list
         # tools has lazy="selectin" so should be loaded, but this handles edge cases
-        if insp.attrs.tools.loaded_value is not insp.attrs.tools.NO_VALUE:
+        if "tools" in insp.dict:
             tools = self.tools
         else:
             # Tools not loaded (detached instance or session closed)

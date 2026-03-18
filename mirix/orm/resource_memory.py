@@ -185,6 +185,5 @@ class ResourceMemoryItem(SqlalchemyBase, OrganizationMixin, UserMixin):
             "summary_embedding": self.summary_embedding,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
-            "is_deleted": self.is_deleted,
         }
         return self.__pydantic_model__(**state)
