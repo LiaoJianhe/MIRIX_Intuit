@@ -24,8 +24,6 @@ from logging import Logger
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
-    Any,
-    Dict,
     List,
     Optional,
     Union,
@@ -37,13 +35,13 @@ from typing import (
 from urllib.parse import urljoin, urlparse
 
 import demjson3 as demjson
-import pytz
 import httpx
+import pytz
 import tiktoken
 from pathvalidate import sanitize_filename as pathvalidate_sanitize_filename
 
 import mirix
-from mirix.client.utils import get_utc_time, json_dumps  # Re-export from client
+from mirix.client.utils import json_dumps  # Re-export from client
 from mirix.constants import (
     CLI_WARNING_PREFIX,
     CORE_MEMORY_HUMAN_CHAR_LIMIT,
