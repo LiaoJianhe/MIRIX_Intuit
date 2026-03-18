@@ -41,7 +41,7 @@ import tiktoken
 from pathvalidate import sanitize_filename as pathvalidate_sanitize_filename
 
 import mirix
-from mirix.client.utils import json_dumps  # Re-export from client
+from mirix.client.utils import get_utc_time, json_dumps  # Re-export from client
 from mirix.constants import (
     CLI_WARNING_PREFIX,
     CORE_MEMORY_HUMAN_CHAR_LIMIT,
@@ -943,9 +943,6 @@ def get_local_time(timezone=None):
         time_str = local_time.strftime("%Y-%m-%d %I:%M:%S %p %Z%z")
 
     return time_str.strip()
-
-
-# get_utc_time is imported from mirix.client.utils
 
 
 def format_datetime(dt):
