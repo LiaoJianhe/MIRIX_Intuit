@@ -709,7 +709,6 @@ class CreateAgentRequest(BaseModel):
     include_meta_memory_tools: Optional[bool] = False
     metadata: Optional[Dict] = None
     description: Optional[str] = None
-    initial_message_sequence: Optional[List[Message]] = None
     tags: Optional[List[str]] = None
 
 
@@ -747,7 +746,6 @@ async def create_agent(
         "agent_type": request.agent_type,
         "llm_config": request.llm_config,
         "embedding_config": request.embedding_config,
-        "initial_message_sequence": request.initial_message_sequence,
         "tags": request.tags,
     }
 
@@ -802,7 +800,6 @@ class UpdateAgentRequest(BaseModel):
     metadata: Optional[Dict] = None
     llm_config: Optional[LLMConfig] = None
     embedding_config: Optional[EmbeddingConfig] = None
-    message_ids: Optional[List[str]] = None
     memory: Optional[Memory] = None
     tags: Optional[List[str]] = None
 
@@ -957,8 +954,7 @@ async def update_agent_system_prompt(
     The update process:
     1. Updates the agent.system field in PostgreSQL
     2. Updates the agent.system field in Redis cache
-    3. Creates a new system message
-    4. Updates message_ids[0] to reference the new system message
+    3. Updates agent.system in DB and cache
 
     Args:
         agent_id: ID of the agent to update (e.g., "agent-123")
@@ -2039,6 +2035,8 @@ async def add_memory(
                 raise ValueError(f"Invalid content type: {type(content)}")
         message = new_message
 
+    # N.b. This function converts to Mirix format and also packs all messages into a single MessageCreate object
+    # so, there will be only one MessageCreate object in the list
     input_messages = convert_message_to_mirix_message(message)
 
     # Add client scope to filter_tags (create if not provided)
