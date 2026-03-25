@@ -29,10 +29,9 @@ class EpisodicEventForLLM(EpisodicEventBase):
     Schema for creating a new episodic memory record.
     """
 
-    # TODO: make `occurred_at` optional
-    occurred_at: str = Field(
-        ...,
-        description="When the event happened (it should be mentioned in the user's response and it should be in the format of 'YYYY-MM-DD HH:MM:SS')",
+    occurred_at: Optional[str] = Field(
+        default=None,
+        description="When the event happened, only if explicitly stated by the user (format: 'YYYY-MM-DD HH:MM:SS'). Leave as null if the user did not specify a time — the system will use the current time.",
     )
 
 

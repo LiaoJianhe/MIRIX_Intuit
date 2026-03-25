@@ -445,7 +445,7 @@ class Agent(BaseAgent):
                     if key in function_args:
                         # Need to change the timezone into UTC timezone
                         for item in function_args[key]:
-                            if "occurred_at" in item:
+                            if item.get("occurred_at") is not None:
                                 item["occurred_at"] = convert_timezone_to_utc(
                                     item["occurred_at"],
                                     self.user.timezone,

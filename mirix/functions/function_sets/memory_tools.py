@@ -15,6 +15,7 @@ from mirix.observability.context import (
     set_trace_context,
 )
 from mirix.observability.langfuse_client import get_langfuse_client
+from mirix.client.utils import get_utc_time
 from mirix.schemas.episodic_memory import EpisodicEventForLLM
 from mirix.schemas.knowledge_vault import KnowledgeVaultItemBase
 from mirix.schemas.mirix_message_content import TextContent
@@ -127,8 +128,9 @@ async def episodic_memory_insert(self: "Agent", items: List[EpisodicEventForLLM]
     occurred_at_override = getattr(self, "occurred_at", None)  # Optional timestamp override from API
 
     for item in items:
-        # Use occurred_at_override if provided, otherwise use LLM-extracted timestamp
-        timestamp = occurred_at_override if occurred_at_override else item["occurred_at"]
+        # Priority: API-level override > LLM-extracted timestamp > current UTC time
+        llm_timestamp = item.get("occurred_at")
+        timestamp = occurred_at_override or llm_timestamp or get_utc_time()
 
         # Convert string to datetime if needed
         if isinstance(timestamp, str):

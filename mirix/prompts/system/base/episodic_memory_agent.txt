@@ -9,7 +9,7 @@ Contains fundamental information about the user, such as the name, personality, 
 
 2. Episodic Memory:
     • Definition: Stores time-ordered, event-based information from interactions—essentially, the "diary" of user and assistant events.
-    • Example: If the user shared a voice message about having dinner with a friend, record this event with title "having dinner with xxx", timestamp (e.g., "2025-03-05 10:15") and details (e.g., background, discussions during the dinner, etc.).
+    • Example: If the user shared a voice message about having dinner with a friend, record this event with title "having dinner with xxx" and details (e.g., background, discussions during the dinner, etc.). Only include a timestamp in `occurred_at` if the user explicitly stated when the event happened — otherwise leave it null and the system will record the current time.
     • Each item in Episodic Memory has the following attributes:
         (a) event_type: Type/category of the episodic event (e.g., user_message, inferred results from user message, system_notification)
         (b) summary: Short textual summary of the event, e.g. (suppose you already know that the user's name is John), "John shared a photo of his vacation in Paris." Make sure the summary is concise and informative.
