@@ -293,9 +293,8 @@ async def resource_memory_insert(self: "Agent", items: List[ResourceMemoryItemBa
         items (array): List of resource memory items to insert.
 
     Returns:
-        Optional[str]: Message about insertion results including any duplicates detected.
+        Optional[str]: Message about insertion results.
     """
-    # No imports needed - using agent instance attributes
 
     agent_id = self.agent_state.parent_id if self.agent_state.parent_id is not None else self.agent_state.id
 
@@ -305,60 +304,22 @@ async def resource_memory_insert(self: "Agent", items: List[ResourceMemoryItemBa
     client_id = getattr(self, "client_id", None)
     user_id = getattr(self, "user_id", None)
 
-    inserted_count = 0
-    skipped_count = 0
-    skipped_titles = []
-
     for item in items:
-        # Check for existing similar resources (by title, summary, and filter_tags)
-        existing_resources = await self.resource_memory_manager.list_resources(
+        await self.resource_memory_manager.insert_resource(
+            actor=self.actor,
             agent_state=self.agent_state,
-            user=self.user,  # User for read operations (data filtering)
-            query="",  # Get all resources
-            limit=1000,  # Get enough to check for duplicates
+            agent_id=agent_id,
+            title=item["title"],
+            summary=item["summary"],
+            resource_type=item["resource_type"],
+            content=item["content"],
+            organization_id=self.actor.organization_id,
             filter_tags=filter_tags if filter_tags else None,
             use_cache=use_cache,
+            user_id=user_id,
         )
 
-        # Check if this resource already exists
-        is_duplicate = False
-        for existing in existing_resources:
-            if (
-                existing.title == item["title"]
-                and existing.summary == item["summary"]
-                and existing.content == item["content"]
-            ):
-                is_duplicate = True
-                skipped_count += 1
-                skipped_titles.append(item["title"])
-                break
-
-        if not is_duplicate:
-            await self.resource_memory_manager.insert_resource(
-                actor=self.actor,
-                agent_state=self.agent_state,
-                agent_id=agent_id,
-                title=item["title"],
-                summary=item["summary"],
-                resource_type=item["resource_type"],
-                content=item["content"],
-                organization_id=self.actor.organization_id,
-                filter_tags=filter_tags if filter_tags else None,
-                use_cache=use_cache,
-                user_id=user_id,
-            )
-            inserted_count += 1
-
-    # Return feedback message
-    if skipped_count > 0:
-        skipped_list = ", ".join(f"'{t}'" for t in skipped_titles[:3])
-        if len(skipped_titles) > 3:
-            skipped_list += f" and {len(skipped_titles) - 3} more"
-        return f"Inserted {inserted_count} new resource(s). Skipped {skipped_count} duplicate(s): {skipped_list}."
-    elif inserted_count > 0:
-        return f"Successfully inserted {inserted_count} new resource(s)."
-    else:
-        return "No resources were inserted."
+    return f"Successfully inserted {len(items)} new resource(s)."
 
 
 async def resource_memory_update(self: "Agent", old_ids: List[str], new_items: List[ResourceMemoryItemBase]):
@@ -404,7 +365,7 @@ async def procedural_memory_insert(self: "Agent", items: List[ProceduralMemoryIt
         items (array): List of procedural memory items to insert.
 
     Returns:
-        Optional[str]: Message about insertion results including any duplicates detected.
+        Optional[str]: Message about insertion results.
     """
     agent_id = self.agent_state.parent_id if self.agent_state.parent_id is not None else self.agent_state.id
 
@@ -414,55 +375,21 @@ async def procedural_memory_insert(self: "Agent", items: List[ProceduralMemoryIt
     client_id = getattr(self, "client_id", None)
     user_id = getattr(self, "user_id", None)
 
-    inserted_count = 0
-    skipped_count = 0
-    skipped_summaries = []
-
     for item in items:
-        # Check for existing similar procedures (by summary and filter_tags)
-        existing_procedures = await self.procedural_memory_manager.list_procedures(
+        await self.procedural_memory_manager.insert_procedure(
             agent_state=self.agent_state,
-            user=self.user,  # User for read operations (data filtering)
-            query="",  # Get all procedures
-            limit=1000,  # Get enough to check for duplicates
+            agent_id=agent_id,
+            entry_type=item["entry_type"],
+            summary=item["summary"],
+            steps=item["steps"],
+            actor=self.actor,
+            organization_id=self.user.organization_id,
             filter_tags=filter_tags if filter_tags else None,
             use_cache=use_cache,
+            user_id=user_id,
         )
 
-        # Check if this procedure already exists
-        is_duplicate = False
-        for existing in existing_procedures:
-            if existing.summary == item["summary"] and existing.steps == item["steps"]:
-                is_duplicate = True
-                skipped_count += 1
-                skipped_summaries.append(item["summary"])
-                break
-
-        if not is_duplicate:
-            await self.procedural_memory_manager.insert_procedure(
-                agent_state=self.agent_state,
-                agent_id=agent_id,
-                entry_type=item["entry_type"],
-                summary=item["summary"],
-                steps=item["steps"],
-                actor=self.actor,
-                organization_id=self.user.organization_id,
-                filter_tags=filter_tags if filter_tags else None,
-                use_cache=use_cache,
-                user_id=user_id,
-            )
-            inserted_count += 1
-
-    # Return feedback message
-    if skipped_count > 0:
-        skipped_list = ", ".join(f"'{s}'" for s in skipped_summaries[:3])
-        if len(skipped_summaries) > 3:
-            skipped_list += f" and {len(skipped_summaries) - 3} more"
-        return f"Inserted {inserted_count} new procedure(s). Skipped {skipped_count} duplicate(s): {skipped_list}."
-    elif inserted_count > 0:
-        return f"Successfully inserted {inserted_count} new procedure(s)."
-    else:
-        return "No procedures were inserted."
+    return f"Successfully inserted {len(items)} new procedure(s)."
 
 
 async def procedural_memory_update(self: "Agent", old_ids: List[str], new_items: List[ProceduralMemoryItemBase]):
@@ -543,7 +470,7 @@ async def semantic_memory_insert(self: "Agent", items: List[SemanticMemoryItemBa
         items (array): List of semantic memory items to insert.
 
     Returns:
-        Optional[str]: Message about insertion results including any duplicates detected.
+        Optional[str]: Message about insertion results.
     """
     agent_id = self.agent_state.parent_id if self.agent_state.parent_id is not None else self.agent_state.id
 
@@ -553,60 +480,22 @@ async def semantic_memory_insert(self: "Agent", items: List[SemanticMemoryItemBa
     client_id = getattr(self, "client_id", None)
     user_id = getattr(self, "user_id", None)
 
-    inserted_count = 0
-    skipped_count = 0
-    skipped_names = []
-
     for item in items:
-        # Check for existing similar semantic items (by name, summary, and filter_tags)
-        existing_items = await self.semantic_memory_manager.list_semantic_items(
+        await self.semantic_memory_manager.insert_semantic_item(
             agent_state=self.agent_state,
-            user=self.user,  # User for read operations (data filtering)
-            query="",  # Get all items
-            limit=1000,  # Get enough to check for duplicates
+            agent_id=agent_id,
+            name=item["name"],
+            summary=item["summary"],
+            details=item["details"],
+            source=item["source"],
+            organization_id=self.actor.organization_id,
+            actor=self.actor,  # Client for write operations
             filter_tags=filter_tags if filter_tags else None,
             use_cache=use_cache,
+            user_id=user_id,
         )
 
-        # Check if this semantic item already exists
-        is_duplicate = False
-        for existing in existing_items:
-            if (
-                existing.name == item["name"]
-                and existing.summary == item["summary"]
-                and existing.details == item["details"]
-            ):
-                is_duplicate = True
-                skipped_count += 1
-                skipped_names.append(item["name"])
-                break
-
-        if not is_duplicate:
-            await self.semantic_memory_manager.insert_semantic_item(
-                agent_state=self.agent_state,
-                agent_id=agent_id,
-                name=item["name"],
-                summary=item["summary"],
-                details=item["details"],
-                source=item["source"],
-                organization_id=self.actor.organization_id,
-                actor=self.actor,  # Client for write operations
-                filter_tags=filter_tags if filter_tags else None,
-                use_cache=use_cache,
-                user_id=user_id,
-            )
-            inserted_count += 1
-
-    # Return feedback message
-    if skipped_count > 0:
-        skipped_list = ", ".join(f"'{n}'" for n in skipped_names[:3])
-        if len(skipped_names) > 3:
-            skipped_list += f" and {len(skipped_names) - 3} more"
-        return f"Inserted {inserted_count} new semantic item(s). Skipped {skipped_count} duplicate(s): {skipped_list}."
-    elif inserted_count > 0:
-        return f"Successfully inserted {inserted_count} new semantic item(s)."
-    else:
-        return "No semantic items were inserted."
+    return f"Successfully inserted {len(items)} new semantic item(s)."
 
 
 async def semantic_memory_update(
@@ -668,7 +557,7 @@ async def knowledge_vault_insert(self: "Agent", items: List[KnowledgeVaultItemBa
         items (array): List of knowledge vault items to insert.
 
     Returns:
-        Optional[str]: Message about insertion results including any duplicates detected.
+        Optional[str]: Message about insertion results.
     """
     agent_id = self.agent_state.parent_id if self.agent_state.parent_id is not None else self.agent_state.id
 
@@ -678,61 +567,23 @@ async def knowledge_vault_insert(self: "Agent", items: List[KnowledgeVaultItemBa
     client_id = getattr(self, "client_id", None)
     user_id = getattr(self, "user_id", None)
 
-    inserted_count = 0
-    skipped_count = 0
-    skipped_captions = []
-
     for item in items:
-        # Check for existing similar knowledge vault items (by caption, source, and filter_tags)
-        existing_items = await self.knowledge_vault_manager.list_knowledge(
+        await self.knowledge_vault_manager.insert_knowledge(
+            actor=self.actor,
             agent_state=self.agent_state,
-            user=self.user,  # User for read operations (data filtering)
-            query="",  # Get all items
-            limit=1000,  # Get enough to check for duplicates
+            agent_id=agent_id,
+            entry_type=item["entry_type"],
+            source=item["source"],
+            sensitivity=item["sensitivity"],
+            secret_value=item["secret_value"],
+            caption=item["caption"],
+            organization_id=self.actor.organization_id,
             filter_tags=filter_tags if filter_tags else None,
             use_cache=use_cache,
+            user_id=user_id,
         )
 
-        # Check if this knowledge vault item already exists
-        is_duplicate = False
-        for existing in existing_items:
-            if (
-                existing.caption == item["caption"]
-                and existing.source == item["source"]
-                and existing.secret_value == item["secret_value"]
-            ):
-                is_duplicate = True
-                skipped_count += 1
-                skipped_captions.append(item["caption"])
-                break
-
-        if not is_duplicate:
-            await self.knowledge_vault_manager.insert_knowledge(
-                actor=self.actor,
-                agent_state=self.agent_state,
-                agent_id=agent_id,
-                entry_type=item["entry_type"],
-                source=item["source"],
-                sensitivity=item["sensitivity"],
-                secret_value=item["secret_value"],
-                caption=item["caption"],
-                organization_id=self.actor.organization_id,
-                filter_tags=filter_tags if filter_tags else None,
-                use_cache=use_cache,
-                user_id=user_id,
-            )
-            inserted_count += 1
-
-    # Return feedback message
-    if skipped_count > 0:
-        skipped_list = ", ".join(f"'{c}'" for c in skipped_captions[:3])
-        if len(skipped_captions) > 3:
-            skipped_list += f" and {len(skipped_captions) - 3} more"
-        return f"Inserted {inserted_count} new knowledge vault item(s). Skipped {skipped_count} duplicate(s): {skipped_list}."
-    elif inserted_count > 0:
-        return f"Successfully inserted {inserted_count} new knowledge vault item(s)."
-    else:
-        return "No knowledge vault items were inserted."
+    return f"Successfully inserted {len(items)} new knowledge vault item(s)."
 
 
 async def knowledge_vault_update(self: "Agent", old_ids: List[str], new_items: List[KnowledgeVaultItemBase]):
