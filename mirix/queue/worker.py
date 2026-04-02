@@ -217,6 +217,11 @@ class QueueWorker:
                 message.block_filter_tags_update_mode if message.HasField("block_filter_tags_update_mode") else "merge"
             )
 
+            # Extract memory_source_id if present (added by S6 protobuf extension)
+            memory_source_id = (
+                message.memory_source_id if hasattr(message, "memory_source_id") and message.HasField("memory_source_id") else None
+            )
+
             # Log the processing
             logger.info(
                 "Processing message via server: agent_id=%s, client_id=%s (from actor), user_id=%s, input_messages_count=%s, use_cache=%s, filter_tags=%s, occurred_at=%s",
@@ -241,6 +246,7 @@ class QueueWorker:
                     block_filter_tags_update_mode=block_filter_tags_update_mode,
                     use_cache=use_cache,
                     occurred_at=occurred_at,
+                    memory_source_id=memory_source_id,
                 )
 
             if langfuse and trace_id:

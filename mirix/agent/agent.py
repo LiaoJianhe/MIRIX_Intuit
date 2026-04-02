@@ -1338,6 +1338,17 @@ class Agent(BaseAgent):
             llm_config=self.agent_state.llm_config,
         )
 
+        # --- Memory Source persistence (S2: VEPAGE-762) ---
+        # If memory_source_id is set on this agent instance, persist the source
+        # and its messages before running any memory extraction. This is gated on
+        # the meta_memory_agent type so sub-agents don't re-persist.
+        memory_source_id = getattr(self, "memory_source_id", None)
+        if self.agent_state.is_type(AgentType.meta_memory_agent) and memory_source_id:
+            await self._persist_memory_source(
+                memory_source_id=memory_source_id,
+                input_messages=raw_input_messages,
+            )
+
         if self.agent_state.is_type(AgentType.meta_memory_agent):
             # Extract topics from retained context + current input messages.
             try:
@@ -1472,7 +1483,115 @@ class Agent(BaseAgent):
                 keep_newest_n=retention,
             )
 
+        # --- Mark memory source as fully processed (S2: VEPAGE-762) ---
+        if self.agent_state.is_type(AgentType.meta_memory_agent) and memory_source_id:
+            try:
+                from mirix.services.memory_source_manager import MemorySourceManager
+
+                msm = MemorySourceManager()
+                await msm.mark_processing_complete(memory_source_id)
+            except Exception as e:
+                logger.warning("Failed to mark source %s complete: %s", memory_source_id, e)
+
         return MirixUsageStatistics(**total_usage.model_dump(), step_count=step_count)
+
+    async def _persist_memory_source(
+        self,
+        memory_source_id: str,
+        input_messages: list,
+    ) -> None:
+        """Persist a MemorySource and its SourceMessages at the start of meta-agent processing.
+
+        Uses INSERT ON CONFLICT DO NOTHING for idempotent redelivery.
+        Called only by meta_memory_agent before sub-agent dispatch.
+        """
+        try:
+            from mirix.services.memory_source_manager import MemorySourceManager
+            from mirix.services.source_message_manager import SourceMessageManager
+
+            msm = MemorySourceManager()
+            smm = SourceMessageManager()
+
+            # Collect source-level fields from agent instance attributes
+            external_thread_id = getattr(self, "_source_external_thread_id", None)
+            source_type = getattr(self, "_source_type", None) or "conversation"
+            source_system = getattr(self, "_source_system", None)
+            source_metadata = getattr(self, "_source_metadata", None)
+            occurred_at_str = getattr(self, "occurred_at", None)
+            summary = getattr(self, "_source_summary", None)
+            summary_source = getattr(self, "_source_summary_source", None)
+
+            # Parse occurred_at if it's a string
+            occurred_at = None
+            if occurred_at_str:
+                from datetime import datetime
+
+                if isinstance(occurred_at_str, str):
+                    try:
+                        occurred_at = datetime.fromisoformat(occurred_at_str.replace("Z", "+00:00"))
+                    except ValueError:
+                        pass
+                elif isinstance(occurred_at_str, datetime):
+                    occurred_at = occurred_at_str
+
+            await msm.create(
+                memory_source_id=memory_source_id,
+                client_id=self.client_id,
+                user_id=self.user_id,
+                organization_id=self.agent_state.organization_id,
+                source_type=source_type,
+                external_thread_id=external_thread_id,
+                source_system=source_system,
+                source_metadata=source_metadata,
+                occurred_at=occurred_at,
+                summary=summary,
+                summary_source=summary_source,
+            )
+
+            # Convert input messages to source message dicts
+            msg_dicts = []
+            for msg in input_messages:
+                role = getattr(msg, "role", None) or "user"
+                if hasattr(msg, "content"):
+                    content = msg.content
+                elif hasattr(msg, "text"):
+                    content = msg.text
+                else:
+                    content = str(msg)
+
+                # Normalize content to dict
+                if isinstance(content, str):
+                    content = {"text": content}
+                elif not isinstance(content, dict):
+                    content = {"text": str(content)}
+
+                msg_dict = {
+                    "role": role if isinstance(role, str) else role.value if hasattr(role, "value") else str(role),
+                    "content": content,
+                }
+
+                # Carry per-message fields if present
+                if hasattr(msg, "external_message_id") and msg.external_message_id:
+                    msg_dict["external_message_id"] = msg.external_message_id
+                if hasattr(msg, "message_occurred_at") and msg.message_occurred_at:
+                    msg_dict["occurred_at"] = msg.message_occurred_at
+
+                msg_dicts.append(msg_dict)
+
+            if msg_dicts:
+                await smm.bulk_insert(
+                    messages=msg_dicts,
+                    memory_source_id=memory_source_id,
+                    external_thread_id=external_thread_id,
+                )
+
+            printv(
+                f"[Mirix.Agent.{self.agent_state.name}] INFO: "
+                f"Persisted memory source {memory_source_id} with {len(msg_dicts)} messages"
+            )
+        except Exception as e:
+            # Source persistence failure should not block memory processing
+            logger.error("Failed to persist memory source %s: %s", memory_source_id, e)
 
     async def build_system_prompt_with_memories(
         self,
