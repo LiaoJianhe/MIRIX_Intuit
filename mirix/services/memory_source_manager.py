@@ -2,7 +2,7 @@
 
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Union
 
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -13,6 +13,21 @@ from mirix.schemas.memory_source import MemorySource as PydanticMemorySource
 from mirix.utils import enforce_types
 
 logger = get_logger(__name__)
+
+
+def parse_occurred_at(value: Union[str, datetime, None]) -> Optional[datetime]:
+    """Parse an occurred_at value that may be an ISO 8601 string, datetime, or None."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            logger.warning("Could not parse occurred_at value: %s", value)
+            return None
+    return None
 
 
 class MemorySourceManager:
@@ -35,7 +50,7 @@ class MemorySourceManager:
         external_thread_id: Optional[str] = None,
         source_system: Optional[str] = None,
         source_metadata: Optional[dict] = None,
-        occurred_at: Optional[datetime] = None,
+        occurred_at: Union[str, datetime, None] = None,
         summary: Optional[str] = None,
         summary_source: Optional[str] = None,
         batch_hash: Optional[str] = None,
@@ -46,6 +61,7 @@ class MemorySourceManager:
         """
         async with self.session_maker() as session:
             now = datetime.now(timezone.utc)
+            occurred_at = parse_occurred_at(occurred_at)
             values = dict(
                 id=memory_source_id,
                 client_id=client_id,

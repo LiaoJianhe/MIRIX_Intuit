@@ -1512,45 +1512,25 @@ class Agent(BaseAgent):
             msm = MemorySourceManager()
             smm = SourceMessageManager()
 
-            # Collect source-level fields from agent instance attributes
+            # Collect source-level fields from agent instance attributes.
             # These are set in _step() when S6 extends the protobuf with source fields.
             # Uses same plain naming convention as occurred_at, filter_tags, etc.
-            external_thread_id = getattr(self, "external_thread_id", None)
-            source_type = getattr(self, "source_type", None) or "conversation"
-            source_system = getattr(self, "source_system", None)
-            source_metadata = getattr(self, "source_metadata", None)
-            occurred_at_str = getattr(self, "occurred_at", None)
-            summary = getattr(self, "source_summary", None)
-            summary_source = getattr(self, "source_summary_source", None)
-
-            # Parse occurred_at if it's a string
-            occurred_at = None
-            if occurred_at_str:
-                from datetime import datetime
-
-                if isinstance(occurred_at_str, str):
-                    try:
-                        occurred_at = datetime.fromisoformat(occurred_at_str.replace("Z", "+00:00"))
-                    except ValueError:
-                        pass
-                elif isinstance(occurred_at_str, datetime):
-                    occurred_at = occurred_at_str
-
             await msm.create(
                 memory_source_id=memory_source_id,
                 client_id=self.client_id,
                 user_id=self.user_id,
                 organization_id=self.agent_state.organization_id,
-                source_type=source_type,
-                external_thread_id=external_thread_id,
-                source_system=source_system,
-                source_metadata=source_metadata,
-                occurred_at=occurred_at,
-                summary=summary,
-                summary_source=summary_source,
+                source_type=getattr(self, "source_type", None) or "conversation",
+                external_thread_id=getattr(self, "external_thread_id", None),
+                source_system=getattr(self, "source_system", None),
+                source_metadata=getattr(self, "source_metadata", None),
+                occurred_at=getattr(self, "occurred_at", None),
+                summary=getattr(self, "source_summary", None),
+                summary_source=getattr(self, "source_summary_source", None),
             )
 
             # Convert input messages to source message dicts
+            external_thread_id = getattr(self, "external_thread_id", None)
             msg_dicts = []
             for msg in input_messages:
                 role = getattr(msg, "role", None) or "user"
