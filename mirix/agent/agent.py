@@ -183,6 +183,15 @@ class Agent(BaseAgent):
         self.user = user  # Store user for end-user tracking
         self.occurred_at = None  # Optional timestamp for episodic memory, set by server if provided
 
+        # Memory source fields — set by _step() when memory_source_id is present (S2: VEPAGE-762)
+        self.memory_source_id = None
+        self.external_thread_id = None
+        self.source_type = None
+        self.source_system = None
+        self.source_metadata = None
+        self.source_summary = None
+        self.source_summary_source = None
+
         # Derive block scopes from filter_tags for block_manager.get_blocks() calls.
         # filter_tags["scope"] is the client's write_scope, set by the server when queuing work.
         scope = self.filter_tags.get("scope") if self.filter_tags else None
@@ -1342,10 +1351,9 @@ class Agent(BaseAgent):
         # If memory_source_id is set on this agent instance, persist the source
         # and its messages before running any memory extraction. This is gated on
         # the meta_memory_agent type so sub-agents don't re-persist.
-        memory_source_id = getattr(self, "memory_source_id", None)
-        if self.agent_state.is_type(AgentType.meta_memory_agent) and memory_source_id:
+        if self.agent_state.is_type(AgentType.meta_memory_agent) and self.memory_source_id:
             await self._persist_memory_source(
-                memory_source_id=memory_source_id,
+                memory_source_id=self.memory_source_id,
                 input_messages=raw_input_messages,
             )
 
@@ -1484,12 +1492,12 @@ class Agent(BaseAgent):
             )
 
         # --- Mark memory source as fully processed (S2: VEPAGE-762) ---
-        if self.agent_state.is_type(AgentType.meta_memory_agent) and memory_source_id:
+        if self.agent_state.is_type(AgentType.meta_memory_agent) and self.memory_source_id:
             try:
                 from mirix.services.memory_source_manager import MemorySourceManager
 
                 msm = MemorySourceManager()
-                await msm.mark_processing_complete(memory_source_id)
+                await msm.mark_processing_complete(self.memory_source_id)
             except Exception as e:
                 logger.warning("Failed to mark source %s complete: %s", memory_source_id, e)
 
@@ -1512,25 +1520,21 @@ class Agent(BaseAgent):
             msm = MemorySourceManager()
             smm = SourceMessageManager()
 
-            # Collect source-level fields from agent instance attributes.
-            # These are set in _step() when S6 extends the protobuf with source fields.
-            # Uses same plain naming convention as occurred_at, filter_tags, etc.
             await msm.create(
                 memory_source_id=memory_source_id,
                 client_id=self.client_id,
                 user_id=self.user_id,
                 organization_id=self.agent_state.organization_id,
-                source_type=getattr(self, "source_type", None) or "conversation",
-                external_thread_id=getattr(self, "external_thread_id", None),
-                source_system=getattr(self, "source_system", None),
-                source_metadata=getattr(self, "source_metadata", None),
-                occurred_at=getattr(self, "occurred_at", None),
-                summary=getattr(self, "source_summary", None),
-                summary_source=getattr(self, "source_summary_source", None),
+                source_type=self.source_type or "conversation",
+                external_thread_id=self.external_thread_id,
+                source_system=self.source_system,
+                source_metadata=self.source_metadata,
+                occurred_at=self.occurred_at,
+                summary=self.source_summary,
+                summary_source=self.source_summary_source,
             )
 
             # Convert input messages to source message dicts
-            external_thread_id = getattr(self, "external_thread_id", None)
             msg_dicts = []
             for msg in input_messages:
                 role = getattr(msg, "role", None) or "user"
@@ -1564,7 +1568,7 @@ class Agent(BaseAgent):
                 await smm.bulk_insert(
                     messages=msg_dicts,
                     memory_source_id=memory_source_id,
-                    external_thread_id=external_thread_id,
+                    external_thread_id=self.external_thread_id,
                 )
 
             printv(
