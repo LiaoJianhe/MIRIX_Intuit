@@ -1513,13 +1513,15 @@ class Agent(BaseAgent):
             smm = SourceMessageManager()
 
             # Collect source-level fields from agent instance attributes
-            external_thread_id = getattr(self, "_source_external_thread_id", None)
-            source_type = getattr(self, "_source_type", None) or "conversation"
-            source_system = getattr(self, "_source_system", None)
-            source_metadata = getattr(self, "_source_metadata", None)
+            # These are set in _step() when S6 extends the protobuf with source fields.
+            # Uses same plain naming convention as occurred_at, filter_tags, etc.
+            external_thread_id = getattr(self, "external_thread_id", None)
+            source_type = getattr(self, "source_type", None) or "conversation"
+            source_system = getattr(self, "source_system", None)
+            source_metadata = getattr(self, "source_metadata", None)
             occurred_at_str = getattr(self, "occurred_at", None)
-            summary = getattr(self, "_source_summary", None)
-            summary_source = getattr(self, "_source_summary_source", None)
+            summary = getattr(self, "source_summary", None)
+            summary_source = getattr(self, "source_summary_source", None)
 
             # Parse occurred_at if it's a string
             occurred_at = None
