@@ -7,12 +7,15 @@ from mirix.orm.cloud_file_mapping import CloudFileMapping
 from mirix.orm.episodic_memory import EpisodicEvent
 from mirix.orm.file import FileMetadata
 from mirix.orm.knowledge_vault import KnowledgeVaultItem
+from mirix.orm.memory_citation import MemoryCitation
+from mirix.orm.memory_source import MemorySource
 from mirix.orm.message import Message
 from mirix.orm.organization import Organization
 from mirix.orm.procedural_memory import ProceduralMemoryItem
 from mirix.orm.provider import Provider
 from mirix.orm.resource_memory import ResourceMemoryItem
 from mirix.orm.semantic_memory import SemanticMemoryItem
+from mirix.orm.source_message import SourceMessage
 from mirix.orm.step import Step
 from mirix.orm.tool import Tool
 from mirix.orm.tools_agents import ToolsAgents
@@ -28,12 +31,15 @@ __all__ = [
     "EpisodicEvent",
     "FileMetadata",
     "KnowledgeVaultItem",
+    "MemoryCitation",
+    "MemorySource",
     "Message",
     "Organization",
     "ProceduralMemoryItem",
     "Provider",
     "ResourceMemoryItem",
     "SemanticMemoryItem",
+    "SourceMessage",
     "Step",
     "Tool",
     "ToolsAgents",
