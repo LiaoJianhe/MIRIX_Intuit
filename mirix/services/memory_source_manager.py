@@ -151,7 +151,7 @@ class MemorySourceManager:
     async def mark_processing_complete(self, memory_source_id: str) -> None:
         """Set processing_complete = True after all agents finish successfully.
 
-        Updates DB then overwrites cache with the updated record.
+        Updates DB then invalidates cache. Next get_by_id will repopulate from DB.
         """
         async with self.session_maker() as session:
             await session.execute(
@@ -165,7 +165,11 @@ class MemorySourceManager:
             await session.commit()
             logger.info("Marked memory source %s as processing complete", memory_source_id)
 
-        # Read fresh from DB and overwrite cache
-        result = await self._read_from_db(memory_source_id)
-        if result:
-            await self._cache_write(result)
+        # Invalidate cache — next read will repopulate with fresh data
+        try:
+            cache_provider = self._get_cache_provider()
+            if cache_provider:
+                cache_key = f"{cache_provider.MEMORY_SOURCE_PREFIX}{memory_source_id}"
+                await cache_provider.delete(cache_key)
+        except Exception as e:
+            logger.warning("Cache invalidation failed for memory source %s: %s", memory_source_id, e)
