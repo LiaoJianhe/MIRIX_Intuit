@@ -36,6 +36,43 @@ class MemorySourceManager:
 
         self.session_maker = db_context
 
+    def _get_cache_provider(self):
+        """Get the cache provider, returning None if unavailable."""
+        try:
+            from mirix.database.cache_provider import get_cache_provider
+
+            return get_cache_provider()
+        except Exception:
+            return None
+
+    async def _cache_write(self, memory_source: PydanticMemorySource) -> None:
+        """Best-effort cache write. Never raises."""
+        try:
+            cache_provider = self._get_cache_provider()
+            if cache_provider:
+                from mirix.settings import settings
+
+                cache_key = f"{cache_provider.MEMORY_SOURCE_PREFIX}{memory_source.id}"
+                data = memory_source.model_dump(mode="json")
+                await cache_provider.set_json(cache_key, data, ttl=settings.redis_ttl_default)
+                logger.debug("Cached memory source %s", memory_source.id)
+        except Exception as e:
+            logger.warning("Cache write failed for memory source %s: %s", memory_source.id, e)
+
+    async def _read_from_db(self, memory_source_id: str) -> Optional[PydanticMemorySource]:
+        """Read directly from DB, bypassing cache."""
+        async with self.session_maker() as session:
+            result = await session.execute(
+                select(MemorySourceModel).where(
+                    MemorySourceModel.id == memory_source_id,
+                    ~MemorySourceModel.is_deleted,
+                )
+            )
+            record = result.scalar_one_or_none()
+            if record is None:
+                return None
+            return record.to_pydantic()
+
     @enforce_types
     async def create(
         self,
@@ -55,13 +92,14 @@ class MemorySourceManager:
     ) -> Optional[PydanticMemorySource]:
         """Create a memory source record using INSERT ON CONFLICT DO NOTHING.
 
-        Returns the created record, or None if it already existed (conflict).
+        Returns the record (whether just inserted or pre-existing).
+        Caches the result either way.
         """
         async with self.session_maker() as session:
             now = datetime.now(timezone.utc)
             occurred_at = parse_occurred_at(occurred_at)
 
-            inserted = await MemorySourceModel.create_or_ignore(
+            await MemorySourceModel.create_or_ignore(
                 db_session=session,
                 id=memory_source_id,
                 client_id=client_id,
@@ -82,27 +120,39 @@ class MemorySourceManager:
                 is_deleted=False,
             )
 
-            # Fetch the record (either just inserted or pre-existing)
-            return await self.get_by_id(memory_source_id)
+        # Fetch from DB and populate cache (whether just inserted or pre-existing)
+        result = await self._read_from_db(memory_source_id)
+        if result:
+            await self._cache_write(result)
+        return result
 
     @enforce_types
     async def get_by_id(self, memory_source_id: str) -> Optional[PydanticMemorySource]:
-        """Fetch a memory source by ID. Returns None if not found."""
-        async with self.session_maker() as session:
-            result = await session.execute(
-                select(MemorySourceModel).where(
-                    MemorySourceModel.id == memory_source_id,
-                    ~MemorySourceModel.is_deleted,
-                )
-            )
-            record = result.scalar_one_or_none()
-            if record is None:
-                return None
-            return record.to_pydantic()
+        """Fetch a memory source by ID with cache-aside pattern."""
+        # Try cache first
+        try:
+            cache_provider = self._get_cache_provider()
+            if cache_provider:
+                cache_key = f"{cache_provider.MEMORY_SOURCE_PREFIX}{memory_source_id}"
+                cached_data = await cache_provider.get_json(cache_key)
+                if cached_data:
+                    logger.debug("Cache HIT for memory source %s", memory_source_id)
+                    return PydanticMemorySource(**cached_data)
+        except Exception as e:
+            logger.warning("Cache read failed for memory source %s: %s", memory_source_id, e)
+
+        # Fall back to DB and populate cache
+        result = await self._read_from_db(memory_source_id)
+        if result:
+            await self._cache_write(result)
+        return result
 
     @enforce_types
     async def mark_processing_complete(self, memory_source_id: str) -> None:
-        """Set processing_complete = True after all agents finish successfully."""
+        """Set processing_complete = True after all agents finish successfully.
+
+        Updates DB then overwrites cache with the updated record.
+        """
         async with self.session_maker() as session:
             await session.execute(
                 update(MemorySourceModel)
@@ -114,3 +164,8 @@ class MemorySourceManager:
             )
             await session.commit()
             logger.info("Marked memory source %s as processing complete", memory_source_id)
+
+        # Read fresh from DB and overwrite cache
+        result = await self._read_from_db(memory_source_id)
+        if result:
+            await self._cache_write(result)

@@ -21,6 +21,31 @@ class MemoryCitationManager:
 
         self.session_maker = db_context
 
+    def _get_cache_provider(self):
+        """Get the cache provider, returning None if unavailable."""
+        try:
+            from mirix.database.cache_provider import get_cache_provider
+
+            return get_cache_provider()
+        except Exception:
+            return None
+
+    def _exists_cache_key(self, memory_source_id: str, memory_type: str, memory_id: str) -> str:
+        """Cache key for the check_exists lookup (the hot-path query in S5)."""
+        return f"citation_exists:{memory_source_id}:{memory_type}:{memory_id}"
+
+    async def _cache_exists(self, memory_source_id: str, memory_type: str, memory_id: str) -> None:
+        """Cache a positive exists result. Never raises."""
+        try:
+            cache_provider = self._get_cache_provider()
+            if cache_provider:
+                from mirix.settings import settings
+
+                key = self._exists_cache_key(memory_source_id, memory_type, memory_id)
+                await cache_provider.set_json(key, {"exists": True}, ttl=settings.redis_ttl_default)
+        except Exception as e:
+            logger.warning("Cache write failed for citation exists check: %s", e)
+
     @enforce_types
     async def create(
         self,
@@ -36,6 +61,7 @@ class MemoryCitationManager:
 
         Returns the created record, or None if it already existed (conflict on
         unique constraint: memory_source_id + memory_type + memory_id).
+        Caches the exists check for the (source, type, id) triple.
         """
         citation_id = PydanticMemoryCitation._generate_id()
         now = datetime.now(timezone.utc)
@@ -59,16 +85,19 @@ class MemoryCitationManager:
                 **values,
             )
 
-            if inserted:
-                logger.info(
-                    "Created citation %s: %s/%s -> source %s",
-                    citation_id,
-                    memory_type,
-                    memory_id,
-                    memory_source_id,
-                )
-                return PydanticMemoryCitation(**values)
-            return None
+        # Cache the exists result (whether just inserted or already existed)
+        await self._cache_exists(memory_source_id, memory_type, memory_id)
+
+        if inserted:
+            logger.info(
+                "Created citation %s: %s/%s -> source %s",
+                citation_id,
+                memory_type,
+                memory_id,
+                memory_source_id,
+            )
+            return PydanticMemoryCitation(**values)
+        return None
 
     @enforce_types
     async def check_exists(
@@ -77,7 +106,23 @@ class MemoryCitationManager:
         memory_type: str,
         memory_id: str,
     ) -> bool:
-        """Check if a citation already exists for the given (source, type, id) triple."""
+        """Check if a citation already exists for the given (source, type, id) triple.
+
+        Uses cache-aside pattern since this is the hot-path check in Layer 3 idempotency (S5).
+        """
+        # Try cache first
+        try:
+            cache_provider = self._get_cache_provider()
+            if cache_provider:
+                key = self._exists_cache_key(memory_source_id, memory_type, memory_id)
+                cached_data = await cache_provider.get_json(key)
+                if cached_data:
+                    logger.debug("Cache HIT for citation exists: %s/%s/%s", memory_source_id, memory_type, memory_id)
+                    return True
+        except Exception as e:
+            logger.warning("Cache read failed for citation exists check: %s", e)
+
+        # Fall back to DB
         async with self.session_maker() as session:
             result = await session.execute(
                 select(MemoryCitationModel.id).where(
@@ -87,7 +132,13 @@ class MemoryCitationManager:
                     ~MemoryCitationModel.is_deleted,
                 )
             )
-            return result.scalar_one_or_none() is not None
+            exists = result.scalar_one_or_none() is not None
+
+        # Populate cache on positive result
+        if exists:
+            await self._cache_exists(memory_source_id, memory_type, memory_id)
+
+        return exists
 
     @enforce_types
     async def get_max_occurred_at(
@@ -98,6 +149,7 @@ class MemoryCitationManager:
         """Get the most recent occurred_at for a given memory record across all citations.
 
         Used by the temporal guard to prevent backdated overwrites.
+        Not cached — called infrequently and the max changes as new citations arrive.
         """
         async with self.session_maker() as session:
             result = await session.execute(
