@@ -929,7 +929,7 @@ class SqlalchemyBase(CommonSqlalchemyMetaMixins, Base):
                     await cache_provider.set_hash(cache_key, data, ttl=settings.redis_ttl_tools)
                 return
 
-            # JSON-BASED CACHING (memory tables with embeddings)
+            # JSON-BASED CACHING (memory tables and source tracking tables)
             memory_tables = {
                 "episodic_memory": cache_provider.EPISODIC_PREFIX,
                 "semantic_memory": cache_provider.SEMANTIC_PREFIX,
@@ -937,6 +937,8 @@ class SqlalchemyBase(CommonSqlalchemyMetaMixins, Base):
                 "resource_memory": cache_provider.RESOURCE_PREFIX,
                 "knowledge_vault": cache_provider.KNOWLEDGE_PREFIX,
                 "raw_memory": cache_provider.RAW_MEMORY_PREFIX,
+                "memory_sources": cache_provider.MEMORY_SOURCE_PREFIX,
+                "memory_citations": cache_provider.MEMORY_CITATION_PREFIX,
             }
 
             if table_name in memory_tables:
