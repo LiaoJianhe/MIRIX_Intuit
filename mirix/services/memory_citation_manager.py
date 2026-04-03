@@ -21,26 +21,18 @@ class MemoryCitationManager:
 
         self.session_maker = db_context
 
-    def _get_cache_provider(self):
-        """Get the cache provider, returning None if unavailable."""
-        try:
-            from mirix.database.cache_provider import get_cache_provider
-
-            return get_cache_provider()
-        except Exception:
-            return None
-
     def _exists_cache_key(self, memory_source_id: str, memory_type: str, memory_id: str) -> str:
-        """Cache key for the check_exists lookup (the hot-path query in S5)."""
+        """Cache key for the check_exists lookup (hot-path query for citation-level dedup)."""
         return f"citation_exists:{memory_source_id}:{memory_type}:{memory_id}"
 
     async def _cache_exists(self, memory_source_id: str, memory_type: str, memory_id: str) -> None:
         """Cache a positive exists result. Never raises."""
         try:
-            cache_provider = self._get_cache_provider()
-            if cache_provider:
-                from mirix.settings import settings
+            from mirix.database.cache_provider import get_cache_provider
+            from mirix.settings import settings
 
+            cache_provider = get_cache_provider()
+            if cache_provider:
                 key = self._exists_cache_key(memory_source_id, memory_type, memory_id)
                 await cache_provider.set_json(key, {"exists": True}, ttl=settings.redis_ttl_default)
         except Exception as e:
@@ -56,12 +48,13 @@ class MemoryCitationManager:
         external_thread_id: Optional[str] = None,
         occurred_at: Optional[datetime] = None,
         message_ids: Optional[List[str]] = None,
+        use_cache: bool = True,
     ) -> Optional[PydanticMemoryCitation]:
         """Create a citation record using INSERT ON CONFLICT DO NOTHING.
 
-        Returns the created record, or None if it already existed (conflict on
-        unique constraint: memory_source_id + memory_type + memory_id).
-        Caches the exists check for the (source, type, id) triple.
+        Returns the created record, or None if it already existed.
+        Cache write for the citation record handled by ORM via create_or_ignore_with_redis.
+        Also caches the exists check for the (source, type, id) triple.
         """
         citation_id = PydanticMemoryCitation._generate_id()
         now = datetime.now(timezone.utc)
@@ -80,13 +73,15 @@ class MemoryCitationManager:
         )
 
         async with self.session_maker() as session:
-            inserted = await MemoryCitationModel.create_or_ignore(
+            inserted = await MemoryCitationModel.create_or_ignore_with_redis(
                 db_session=session,
+                use_cache=use_cache,
                 **values,
             )
 
         # Cache the exists result (whether just inserted or already existed)
-        await self._cache_exists(memory_source_id, memory_type, memory_id)
+        if use_cache:
+            await self._cache_exists(memory_source_id, memory_type, memory_id)
 
         if inserted:
             logger.info(
@@ -105,22 +100,26 @@ class MemoryCitationManager:
         memory_source_id: str,
         memory_type: str,
         memory_id: str,
+        use_cache: bool = True,
     ) -> bool:
         """Check if a citation already exists for the given (source, type, id) triple.
 
-        Uses cache-aside pattern since this is the hot-path check in Layer 3 idempotency (S5).
+        Uses cache-aside pattern since this is the hot-path check for citation-level dedup.
         """
         # Try cache first
-        try:
-            cache_provider = self._get_cache_provider()
-            if cache_provider:
-                key = self._exists_cache_key(memory_source_id, memory_type, memory_id)
-                cached_data = await cache_provider.get_json(key)
-                if cached_data:
-                    logger.debug("Cache HIT for citation exists: %s/%s/%s", memory_source_id, memory_type, memory_id)
-                    return True
-        except Exception as e:
-            logger.warning("Cache read failed for citation exists check: %s", e)
+        if use_cache:
+            try:
+                from mirix.database.cache_provider import get_cache_provider
+
+                cache_provider = get_cache_provider()
+                if cache_provider:
+                    key = self._exists_cache_key(memory_source_id, memory_type, memory_id)
+                    cached_data = await cache_provider.get_json(key)
+                    if cached_data:
+                        logger.debug("Cache HIT for citation exists: %s/%s/%s", memory_source_id, memory_type, memory_id)
+                        return True
+            except Exception as e:
+                logger.warning("Cache read failed for citation exists check: %s", e)
 
         # Fall back to DB
         async with self.session_maker() as session:
@@ -135,7 +134,7 @@ class MemoryCitationManager:
             exists = result.scalar_one_or_none() is not None
 
         # Populate cache on positive result
-        if exists:
+        if exists and use_cache:
             await self._cache_exists(memory_source_id, memory_type, memory_id)
 
         return exists
