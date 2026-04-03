@@ -183,7 +183,7 @@ class Agent(BaseAgent):
         self.user = user  # Store user for end-user tracking
         self.occurred_at = None  # Optional timestamp for episodic memory, set by server if provided
 
-        # Memory source fields — set by _step() when memory_source_id is present (S2: VEPAGE-762)
+        # Memory source fields — set by _step() when memory_source_id is present
         self.memory_source_id = None
         self.external_thread_id = None
         self.source_type = None
@@ -240,7 +240,7 @@ class Agent(BaseAgent):
         self.block_manager = BlockManager()
         self.agent_manager = AgentManager()
 
-        # Memory source managers (S2: VEPAGE-762)
+        # Memory source managers
         from mirix.services.memory_source_manager import MemorySourceManager
         from mirix.services.source_message_manager import SourceMessageManager
 
@@ -1354,7 +1354,7 @@ class Agent(BaseAgent):
             llm_config=self.agent_state.llm_config,
         )
 
-        # --- Memory Source persistence (S2: VEPAGE-762) ---
+        # Persist memory source and messages before sub-agent dispatch
         # If memory_source_id is set on this agent instance, persist the source
         # and its messages before running any memory extraction. This is gated on
         # the meta_memory_agent type so sub-agents don't re-persist.
@@ -1498,7 +1498,7 @@ class Agent(BaseAgent):
                 keep_newest_n=retention,
             )
 
-        # --- Mark memory source as fully processed (S2: VEPAGE-762) ---
+        # Mark memory source as fully processed after all agents complete
         if self.agent_state.is_type(AgentType.meta_memory_agent) and self.memory_source_id:
             try:
                 await self.memory_source_manager.mark_processing_complete(self.memory_source_id)

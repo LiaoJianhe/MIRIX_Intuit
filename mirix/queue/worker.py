@@ -217,7 +217,7 @@ class QueueWorker:
                 message.block_filter_tags_update_mode if message.HasField("block_filter_tags_update_mode") else "merge"
             )
 
-            # Extract memory_source_id if present (added by S6 protobuf extension)
+            # Extract memory_source_id if present on the protobuf message
             memory_source_id = (
                 message.memory_source_id if hasattr(message, "memory_source_id") and message.HasField("memory_source_id") else None
             )
