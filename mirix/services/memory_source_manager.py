@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 from typing import Optional, Union
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 
 from mirix.log import get_logger
 from mirix.orm.memory_source import MemorySource as MemorySourceModel
@@ -140,27 +140,10 @@ class MemorySourceManager:
     async def mark_processing_complete(self, memory_source_id: str) -> None:
         """Set processing_complete = True after all agents finish successfully.
 
-        Updates DB then invalidates cache. Next get_by_id will repopulate from DB.
+        Uses ORM update_with_redis for consistent cache handling.
         """
         async with self.session_maker() as session:
-            await session.execute(
-                update(MemorySourceModel)
-                .where(MemorySourceModel.id == memory_source_id)
-                .values(
-                    processing_complete=True,
-                    updated_at=datetime.now(timezone.utc),
-                )
-            )
-            await session.commit()
+            record = await MemorySourceModel.read(db_session=session, identifier=memory_source_id)
+            record.processing_complete = True
+            await record.update_with_redis(session)
             logger.info("Marked memory source %s as processing complete", memory_source_id)
-
-        # Invalidate cache — next read will repopulate with fresh data
-        try:
-            from mirix.database.cache_provider import get_cache_provider
-
-            cache_provider = get_cache_provider()
-            if cache_provider:
-                cache_key = f"{cache_provider.MEMORY_SOURCE_PREFIX}{memory_source_id}"
-                await cache_provider.delete(cache_key)
-        except Exception as e:
-            logger.warning("Cache invalidation failed for memory source %s: %s", memory_source_id, e)
