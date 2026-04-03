@@ -1,10 +1,9 @@
 """Manager for MemoryCitation CRUD operations."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from sqlalchemy import func, select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from mirix.log import get_logger
 from mirix.orm.memory_citation import MemoryCitation as MemoryCitationModel
@@ -39,30 +38,28 @@ class MemoryCitationManager:
         unique constraint: memory_source_id + memory_type + memory_id).
         """
         citation_id = PydanticMemoryCitation._generate_id()
+        now = datetime.now(timezone.utc)
+        values = dict(
+            id=citation_id,
+            memory_source_id=memory_source_id,
+            memory_type=memory_type,
+            memory_id=memory_id,
+            citation_type=citation_type,
+            external_thread_id=external_thread_id,
+            occurred_at=occurred_at,
+            message_ids=message_ids,
+            created_at=now,
+            updated_at=now,
+            is_deleted=False,
+        )
 
         async with self.session_maker() as session:
-            from datetime import timezone
-
-            now = datetime.now(timezone.utc)
-            values = dict(
-                id=citation_id,
-                memory_source_id=memory_source_id,
-                memory_type=memory_type,
-                memory_id=memory_id,
-                citation_type=citation_type,
-                external_thread_id=external_thread_id,
-                occurred_at=occurred_at,
-                message_ids=message_ids,
-                created_at=now,
-                updated_at=now,
-                is_deleted=False,
+            inserted = await MemoryCitationModel.create_or_ignore(
+                db_session=session,
+                **values,
             )
 
-            stmt = pg_insert(MemoryCitationModel).values(**values).on_conflict_do_nothing()
-            result = await session.execute(stmt)
-            await session.commit()
-
-            if result.rowcount and result.rowcount > 0:
+            if inserted:
                 logger.info(
                     "Created citation %s: %s/%s -> source %s",
                     citation_id,

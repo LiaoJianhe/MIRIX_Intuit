@@ -2,11 +2,8 @@
 
 import hashlib
 import json
-import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
-
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from typing import Any, Dict, List, Optional, Union
 
 from mirix.log import get_logger
 from mirix.orm.source_message import SourceMessage as SourceMessageModel
@@ -33,6 +30,41 @@ def compute_content_hash(role: str, content: Any) -> str:
     return h.hexdigest()
 
 
+def normalize_message(msg) -> Dict[str, Any]:
+    """Convert a Message or MessageCreate object into a dict suitable for source message storage.
+
+    Handles role extraction (str or enum), content normalization (str -> dict),
+    and optional per-message fields (external_message_id, message_occurred_at).
+    """
+    role = getattr(msg, "role", None) or "user"
+    if hasattr(role, "value"):
+        role = role.value
+    role = str(role)
+
+    if hasattr(msg, "content"):
+        content = msg.content
+    elif hasattr(msg, "text"):
+        content = msg.text
+    else:
+        content = str(msg)
+
+    # Normalize content to dict
+    if isinstance(content, str):
+        content = {"text": content}
+    elif not isinstance(content, dict):
+        content = {"text": str(content)}
+
+    result = {"role": role, "content": content}
+
+    # Carry per-message fields if present
+    if hasattr(msg, "external_message_id") and msg.external_message_id:
+        result["external_message_id"] = msg.external_message_id
+    if hasattr(msg, "message_occurred_at") and msg.message_occurred_at:
+        result["occurred_at"] = msg.message_occurred_at
+
+    return result
+
+
 class SourceMessageManager:
     """Manager for source message persistence with INSERT ON CONFLICT DO NOTHING semantics."""
 
@@ -48,7 +80,7 @@ class SourceMessageManager:
         memory_source_id: str,
         external_thread_id: Optional[str] = None,
     ) -> int:
-        """Insert source messages in bulk using INSERT ON CONFLICT DO NOTHING.
+        """Insert source messages in bulk using ORM bulk_create_or_ignore.
 
         Each message dict should have: role, content, and optionally
         external_message_id and occurred_at.
@@ -83,10 +115,10 @@ class SourceMessageManager:
             )
 
         async with self.session_maker() as session:
-            stmt = pg_insert(SourceMessageModel).values(rows).on_conflict_do_nothing()
-            result = await session.execute(stmt)
-            await session.commit()
-            inserted = result.rowcount if result.rowcount else 0
+            inserted = await SourceMessageModel.bulk_create_or_ignore(
+                db_session=session,
+                rows=rows,
+            )
             logger.info(
                 "Bulk inserted %d/%d source messages for source %s",
                 inserted,
@@ -94,3 +126,21 @@ class SourceMessageManager:
                 memory_source_id,
             )
             return inserted
+
+    @enforce_types
+    async def bulk_insert_from_messages(
+        self,
+        input_messages: list,
+        memory_source_id: str,
+        external_thread_id: Optional[str] = None,
+    ) -> int:
+        """Convert raw Message/MessageCreate objects and bulk insert as source messages.
+
+        Handles message normalization (role extraction, content conversion) internally.
+        """
+        msg_dicts = [normalize_message(msg) for msg in input_messages]
+        return await self.bulk_insert(
+            messages=msg_dicts,
+            memory_source_id=memory_source_id,
+            external_thread_id=external_thread_id,
+        )

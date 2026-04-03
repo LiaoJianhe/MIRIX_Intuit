@@ -1,11 +1,9 @@
 """Manager for MemorySource CRUD operations."""
 
-import logging
 from datetime import datetime, timezone
 from typing import Optional, Union
 
 from sqlalchemy import select, update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from mirix.log import get_logger
 from mirix.orm.memory_source import MemorySource as MemorySourceModel
@@ -62,7 +60,9 @@ class MemorySourceManager:
         async with self.session_maker() as session:
             now = datetime.now(timezone.utc)
             occurred_at = parse_occurred_at(occurred_at)
-            values = dict(
+
+            inserted = await MemorySourceModel.create_or_ignore(
+                db_session=session,
                 id=memory_source_id,
                 client_id=client_id,
                 user_id=user_id,
@@ -81,10 +81,6 @@ class MemorySourceManager:
                 updated_at=now,
                 is_deleted=False,
             )
-
-            stmt = pg_insert(MemorySourceModel).values(**values).on_conflict_do_nothing()
-            await session.execute(stmt)
-            await session.commit()
 
             # Fetch the record (either just inserted or pre-existing)
             return await self.get_by_id(memory_source_id)

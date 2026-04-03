@@ -240,6 +240,13 @@ class Agent(BaseAgent):
         self.block_manager = BlockManager()
         self.agent_manager = AgentManager()
 
+        # Memory source managers (S2: VEPAGE-762)
+        from mirix.services.memory_source_manager import MemorySourceManager
+        from mirix.services.source_message_manager import SourceMessageManager
+
+        self.memory_source_manager = MemorySourceManager()
+        self.source_message_manager = SourceMessageManager()
+
         # Interface must implement:
         # - internal_monologue
         # - assistant_message
@@ -1494,12 +1501,9 @@ class Agent(BaseAgent):
         # --- Mark memory source as fully processed (S2: VEPAGE-762) ---
         if self.agent_state.is_type(AgentType.meta_memory_agent) and self.memory_source_id:
             try:
-                from mirix.services.memory_source_manager import MemorySourceManager
-
-                msm = MemorySourceManager()
-                await msm.mark_processing_complete(self.memory_source_id)
+                await self.memory_source_manager.mark_processing_complete(self.memory_source_id)
             except Exception as e:
-                logger.warning("Failed to mark source %s complete: %s", memory_source_id, e)
+                logger.warning("Failed to mark source %s complete: %s", self.memory_source_id, e)
 
         return MirixUsageStatistics(**total_usage.model_dump(), step_count=step_count)
 
@@ -1514,13 +1518,7 @@ class Agent(BaseAgent):
         Called only by meta_memory_agent before sub-agent dispatch.
         """
         try:
-            from mirix.services.memory_source_manager import MemorySourceManager
-            from mirix.services.source_message_manager import SourceMessageManager
-
-            msm = MemorySourceManager()
-            smm = SourceMessageManager()
-
-            await msm.create(
+            await self.memory_source_manager.create(
                 memory_source_id=memory_source_id,
                 client_id=self.client_id,
                 user_id=self.user_id,
@@ -1534,46 +1532,17 @@ class Agent(BaseAgent):
                 summary_source=self.source_summary_source,
             )
 
-            # Convert input messages to source message dicts
-            msg_dicts = []
-            for msg in input_messages:
-                role = getattr(msg, "role", None) or "user"
-                if hasattr(msg, "content"):
-                    content = msg.content
-                elif hasattr(msg, "text"):
-                    content = msg.text
-                else:
-                    content = str(msg)
-
-                # Normalize content to dict
-                if isinstance(content, str):
-                    content = {"text": content}
-                elif not isinstance(content, dict):
-                    content = {"text": str(content)}
-
-                msg_dict = {
-                    "role": role if isinstance(role, str) else role.value if hasattr(role, "value") else str(role),
-                    "content": content,
-                }
-
-                # Carry per-message fields if present
-                if hasattr(msg, "external_message_id") and msg.external_message_id:
-                    msg_dict["external_message_id"] = msg.external_message_id
-                if hasattr(msg, "message_occurred_at") and msg.message_occurred_at:
-                    msg_dict["occurred_at"] = msg.message_occurred_at
-
-                msg_dicts.append(msg_dict)
-
-            if msg_dicts:
-                await smm.bulk_insert(
-                    messages=msg_dicts,
+            if input_messages:
+                await self.source_message_manager.bulk_insert_from_messages(
+                    input_messages=input_messages,
                     memory_source_id=memory_source_id,
                     external_thread_id=self.external_thread_id,
                 )
 
-            printv(
-                f"[Mirix.Agent.{self.agent_state.name}] INFO: "
-                f"Persisted memory source {memory_source_id} with {len(msg_dicts)} messages"
+            logger.info(
+                "Persisted memory source %s with %d messages",
+                memory_source_id,
+                len(input_messages),
             )
         except Exception as e:
             # Source persistence failure should not block memory processing
