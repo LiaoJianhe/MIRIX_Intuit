@@ -140,7 +140,12 @@ class MemorySourceManager:
     async def mark_processing_complete(self, memory_source_id: str) -> None:
         """Set processing_complete = True after all agents finish successfully.
 
-        Uses ORM update_with_redis for consistent cache handling.
+        Uses read-then-update via ORM for consistent cache handling.
+        Safe from lost updates because:
+        - processing_complete is a one-way flag (False → True), so concurrent
+          writers always converge to the same value
+        - SQLAlchemy only UPDATEs dirty columns, so this won't overwrite
+          concurrent changes to other fields (e.g. summary)
         """
         async with self.session_maker() as session:
             record = await MemorySourceModel.read(db_session=session, identifier=memory_source_id)
