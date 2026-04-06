@@ -187,12 +187,10 @@ class TestProtobufSchema:
 
 
 class TestWorkerExtraction:
-    """Test that the worker correctly extracts new fields from protobuf."""
+    """Test that the worker correctly extracts source_messages from protobuf as dicts."""
 
-    def test_convert_proto_message_carries_per_message_fields(self):
+    def test_convert_source_message_preserves_all_fields(self):
         from mirix.queue.worker import QueueWorker
-
-        worker = QueueWorker.__new__(QueueWorker)
 
         proto_msg = ProtoMessageCreate()
         proto_msg.role = ProtoMessageCreate.ROLE_USER
@@ -200,13 +198,41 @@ class TestWorkerExtraction:
         proto_msg.external_message_id = "ext-msg-abc"
         proto_msg.message_occurred_at = "2026-01-15T14:30:00Z"
 
-        pydantic_msg = worker._convert_proto_message_to_pydantic(proto_msg)
+        result = QueueWorker._convert_proto_source_message_to_dict(proto_msg)
 
-        assert pydantic_msg.content == "hello world"
-        assert pydantic_msg.external_message_id == "ext-msg-abc"
-        assert pydantic_msg.message_occurred_at == "2026-01-15T14:30:00Z"
+        assert result["role"] == "user"
+        assert result["content"] == "hello world"
+        assert result["external_message_id"] == "ext-msg-abc"
+        assert result["message_occurred_at"] == "2026-01-15T14:30:00Z"
 
-    def test_convert_proto_message_without_per_message_fields(self):
+    def test_convert_source_message_preserves_assistant_role(self):
+        """Assistant role must survive the protobuf round-trip as 'assistant', not 'user'."""
+        from mirix.queue.worker import QueueWorker
+
+        proto_msg = ProtoMessageCreate()
+        proto_msg.role = ProtoMessageCreate.ROLE_ASSISTANT
+        proto_msg.text_content = "I can help with that"
+
+        result = QueueWorker._convert_proto_source_message_to_dict(proto_msg)
+
+        assert result["role"] == "assistant"
+
+    def test_convert_source_message_without_optional_fields(self):
+        from mirix.queue.worker import QueueWorker
+
+        proto_msg = ProtoMessageCreate()
+        proto_msg.role = ProtoMessageCreate.ROLE_USER
+        proto_msg.text_content = "hello"
+
+        result = QueueWorker._convert_proto_source_message_to_dict(proto_msg)
+
+        assert result["role"] == "user"
+        assert result["content"] == "hello"
+        assert "external_message_id" not in result
+        assert "message_occurred_at" not in result
+
+    def test_pydantic_conversion_still_works_for_input_messages(self):
+        """_convert_proto_message_to_pydantic is still used for input_messages (agent processing)."""
         from mirix.queue.worker import QueueWorker
 
         worker = QueueWorker.__new__(QueueWorker)
@@ -214,49 +240,63 @@ class TestWorkerExtraction:
         proto_msg = ProtoMessageCreate()
         proto_msg.role = ProtoMessageCreate.ROLE_USER
         proto_msg.text_content = "hello"
+        proto_msg.external_message_id = "ext-1"
 
         pydantic_msg = worker._convert_proto_message_to_pydantic(proto_msg)
 
         assert pydantic_msg.content == "hello"
-        assert pydantic_msg.external_message_id is None
-        assert pydantic_msg.message_occurred_at is None
+        assert pydantic_msg.external_message_id == "ext-1"
 
 
 class TestSourceMessageNormalization:
-    """Test that normalize_message extracts per-message fields from converted messages."""
+    """Test that normalize_message handles both dicts and Pydantic objects."""
 
-    def test_normalize_with_per_message_fields(self):
-        from mirix.queue.worker import QueueWorker
+    def test_normalize_dict_with_per_message_fields(self):
         from mirix.services.source_message_manager import normalize_message
 
-        worker = QueueWorker.__new__(QueueWorker)
+        msg = {
+            "role": "assistant",
+            "content": "I can help",
+            "external_message_id": "ext-msg-1",
+            "message_occurred_at": "2026-01-15T10:00:00Z",
+        }
+        normalized = normalize_message(msg)
 
-        proto_msg = ProtoMessageCreate()
-        proto_msg.role = ProtoMessageCreate.ROLE_USER
-        proto_msg.text_content = "hello"
-        proto_msg.external_message_id = "ext-msg-1"
-        proto_msg.message_occurred_at = "2026-01-15T10:00:00Z"
-
-        pydantic_msg = worker._convert_proto_message_to_pydantic(proto_msg)
-        normalized = normalize_message(pydantic_msg)
-
-        assert normalized["role"] == "user"
-        assert normalized["content"] == {"text": "hello"}
+        assert normalized["role"] == "assistant"
+        assert normalized["content"] == {"text": "I can help"}
         assert normalized["external_message_id"] == "ext-msg-1"
         assert normalized["occurred_at"] == "2026-01-15T10:00:00Z"
 
-    def test_normalize_without_per_message_fields(self):
-        from mirix.queue.worker import QueueWorker
+    def test_normalize_dict_without_optional_fields(self):
         from mirix.services.source_message_manager import normalize_message
 
-        worker = QueueWorker.__new__(QueueWorker)
+        msg = {"role": "user", "content": "hello"}
+        normalized = normalize_message(msg)
 
-        proto_msg = ProtoMessageCreate()
-        proto_msg.role = ProtoMessageCreate.ROLE_USER
-        proto_msg.text_content = "hello"
+        assert normalized["role"] == "user"
+        assert normalized["content"] == {"text": "hello"}
+        assert "external_message_id" not in normalized
+        assert "occurred_at" not in normalized
 
-        pydantic_msg = worker._convert_proto_message_to_pydantic(proto_msg)
-        normalized = normalize_message(pydantic_msg)
+    def test_normalize_pydantic_object(self):
+        """normalize_message still works with Pydantic MessageCreate (backward compat)."""
+        from mirix.schemas.message import MessageCreate
+        from mirix.services.source_message_manager import normalize_message
+
+        msg = MessageCreate(role="user", content="hello", external_message_id="ext-1", message_occurred_at="2026-01-15T10:00:00Z")
+        normalized = normalize_message(msg)
+
+        assert normalized["role"] == "user"
+        assert normalized["content"] == {"text": "hello"}
+        assert normalized["external_message_id"] == "ext-1"
+        assert normalized["occurred_at"] == "2026-01-15T10:00:00Z"
+
+    def test_normalize_pydantic_object_without_optional_fields(self):
+        from mirix.schemas.message import MessageCreate
+        from mirix.services.source_message_manager import normalize_message
+
+        msg = MessageCreate(role="user", content="hello")
+        normalized = normalize_message(msg)
 
         assert normalized["role"] == "user"
         assert "external_message_id" not in normalized

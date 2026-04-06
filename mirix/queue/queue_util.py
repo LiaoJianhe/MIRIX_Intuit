@@ -211,9 +211,23 @@ async def put_messages(
     if summarize:
         queue_msg.summarize = summarize
 
-    # Serialize original per-turn messages for source_message persistence.
-    # These carry per-message metadata (external_message_id, occurred_at) that is
-    # lost during the message packing in input_messages.
+    # WHY TWO MESSAGE ARRAYS (source_messages vs input_messages)?
+    #
+    # input_messages (field 3) carries the PACKED message for agent processing.
+    # The add_memory handler flattens all conversation turns into a single
+    # MessageCreate with [USER]/[ASSISTANT] text markers — this is what the
+    # MetaAgent and sub-agents consume. Per-message identity (role, external_message_id,
+    # occurred_at) is lost during that flattening.
+    #
+    # source_messages (field 24) carries the ORIGINAL per-turn messages so that
+    # _persist_memory_source() can store them individually in the source_messages
+    # DB table with their per-message metadata intact. These are never used for
+    # agent processing.
+    #
+    # This duplication exists because the flattening happens before enqueue and
+    # we can't change that without reworking how agents consume messages. A future
+    # refactor could move the flattening into the MetaAgent itself, eliminating
+    # the need for two copies.
     if source_messages:
         for msg_dict in source_messages:
             proto_src_msg = ProtoMessageCreate()
@@ -222,6 +236,8 @@ async def put_messages(
                 proto_src_msg.role = ProtoMessageCreate.ROLE_USER
             elif role == "system":
                 proto_src_msg.role = ProtoMessageCreate.ROLE_SYSTEM
+            elif role == "assistant":
+                proto_src_msg.role = ProtoMessageCreate.ROLE_ASSISTANT
             else:
                 proto_src_msg.role = ProtoMessageCreate.ROLE_UNSPECIFIED
 

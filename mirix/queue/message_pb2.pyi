@@ -87,9 +87,11 @@ class MessageCreate(_message.Message):
         ROLE_UNSPECIFIED: _ClassVar[MessageCreate.Role]
         ROLE_USER: _ClassVar[MessageCreate.Role]
         ROLE_SYSTEM: _ClassVar[MessageCreate.Role]
+        ROLE_ASSISTANT: _ClassVar[MessageCreate.Role]
     ROLE_UNSPECIFIED: MessageCreate.Role
     ROLE_USER: MessageCreate.Role
     ROLE_SYSTEM: MessageCreate.Role
+    ROLE_ASSISTANT: MessageCreate.Role
     ROLE_FIELD_NUMBER: _ClassVar[int]
     TEXT_CONTENT_FIELD_NUMBER: _ClassVar[int]
     STRUCTURED_CONTENT_FIELD_NUMBER: _ClassVar[int]

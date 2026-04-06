@@ -106,6 +106,7 @@ message MessageCreate {
     ROLE_UNSPECIFIED = 0;
     ROLE_USER = 1;
     ROLE_SYSTEM = 2;
+    ROLE_ASSISTANT = 3;
   }
 
   // The role of the participant

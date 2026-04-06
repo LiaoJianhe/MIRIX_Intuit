@@ -195,7 +195,13 @@ class Agent(BaseAgent):
         self.source_summary = None
         self.source_summary_source = None
         self.summarize = False
-        self.source_messages = None  # Original per-turn messages for source_message persistence
+        # Original per-turn messages (as plain dicts) for source_message persistence.
+        # These exist separately from the packed input_messages because the add_memory
+        # handler flattens all turns into a single MessageCreate with [USER]/[ASSISTANT]
+        # markers for agent processing, which loses per-message identity. source_messages
+        # preserves the original role, external_message_id, and occurred_at per turn.
+        # See the comment in queue_util.py put_messages() for the full explanation.
+        self.source_messages = None
 
         # Derive block scopes from filter_tags for block_manager.get_blocks() calls.
         # filter_tags["scope"] is the client's write_scope, set by the server when queuing work.
@@ -1538,8 +1544,11 @@ class Agent(BaseAgent):
         )
 
         try:
-            # Prefer original per-turn source_messages (with per-message metadata) over
-            # the packed input_messages which lose per-message fields during flattening.
+            # Prefer source_messages (original per-turn dicts with role, external_message_id,
+            # occurred_at intact) over the packed input_messages which lost per-message
+            # fields when the add_memory handler flattened turns into [USER]/[ASSISTANT]
+            # markers. Falls back to input_messages for backward compat (e.g. callers
+            # that don't set source_messages).
             messages_for_persistence = self.source_messages if self.source_messages else input_messages
 
             # Normalize messages once — reused for hash computation and persistence

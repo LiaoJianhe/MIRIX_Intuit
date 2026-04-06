@@ -2016,9 +2016,17 @@ async def add_memory(
 
     message = request.messages
 
-    # Preserve original per-turn messages for source_message persistence.
-    # These carry per-message metadata (external_message_id, occurred_at) that is
-    # lost during the flattening below.
+    # WHY original_messages?
+    #
+    # The flattening below destroys per-message identity: it merges all turns into
+    # a flat content list with [USER]/[ASSISTANT] text markers, then packs them into
+    # a single MessageCreate. Per-message metadata (role, external_message_id,
+    # occurred_at) is lost.
+    #
+    # original_messages preserves the raw per-turn dicts so they can travel through
+    # protobuf (as QueueMessage.source_messages, field 24) to the MetaAgent's
+    # _persist_memory_source(), which stores them individually in the source_messages
+    # DB table. See the parallel comment in queue_util.py put_messages().
     original_messages = request.messages
 
     if isinstance(message, list) and "role" in message[0].keys():

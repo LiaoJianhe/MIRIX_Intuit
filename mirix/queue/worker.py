@@ -107,6 +107,36 @@ class QueueWorker:
             **kwargs,
         )
 
+    @staticmethod
+    def _convert_proto_source_message_to_dict(proto_msg) -> dict:
+        """Convert a protobuf MessageCreate from source_messages to a plain dict.
+
+        Unlike _convert_proto_message_to_pydantic (which produces Pydantic
+        MessageCreate objects for agent processing), this returns a plain dict
+        because source_messages need to preserve the "assistant" role which
+        Pydantic MessageCreate doesn't allow (its role field is
+        Literal["user", "system"]).
+
+        The returned dict is consumed by _persist_memory_source() →
+        normalize_message() which accepts dicts with any string role.
+        """
+        _ROLE_MAP = {
+            proto_msg.ROLE_USER: "user",
+            proto_msg.ROLE_SYSTEM: "system",
+            proto_msg.ROLE_ASSISTANT: "assistant",
+        }
+        role = _ROLE_MAP.get(proto_msg.role, "user")
+        content = proto_msg.text_content if proto_msg.HasField("text_content") else ""
+
+        result = {"role": role, "content": content}
+
+        if hasattr(proto_msg, "external_message_id") and proto_msg.HasField("external_message_id"):
+            result["external_message_id"] = proto_msg.external_message_id
+        if hasattr(proto_msg, "message_occurred_at") and proto_msg.HasField("message_occurred_at"):
+            result["message_occurred_at"] = proto_msg.message_occurred_at
+
+        return result
+
     def set_server(self, server: Any) -> None:
         """Set or update the server instance."""
         self._server = server
@@ -253,10 +283,15 @@ class QueueWorker:
                 message.summarize if hasattr(message, "summarize") and message.HasField("summarize") else False
             )
 
-            # Extract original per-turn messages for source_message persistence
+            # Extract original per-turn messages for source_message persistence.
+            #
+            # These are converted to plain dicts (not Pydantic MessageCreate) because
+            # MessageCreate.role is Literal["user", "system"] and can't hold "assistant".
+            # The dicts go straight to _persist_memory_source() → normalize_message()
+            # which accepts dicts with string roles.
             source_messages = None
             if hasattr(message, "source_messages") and message.source_messages:
-                source_messages = [self._convert_proto_message_to_pydantic(msg) for msg in message.source_messages]
+                source_messages = [self._convert_proto_source_message_to_dict(msg) for msg in message.source_messages]
 
             # Log the processing
             logger.info(

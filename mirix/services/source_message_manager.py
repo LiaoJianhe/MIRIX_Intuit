@@ -68,22 +68,33 @@ def derive_external_id_from_message_ids(message_ids: List[str]) -> str:
     return f"auto-{h.hexdigest()}"
 
 
+def _get(msg, key, default=None):
+    """Read a field from a dict or an object attribute."""
+    if isinstance(msg, dict):
+        return msg.get(key, default)
+    return getattr(msg, key, default)
+
+
 def normalize_message(msg) -> Dict[str, Any]:
-    """Convert a Message or MessageCreate object into a dict suitable for source message storage.
+    """Convert a Message, MessageCreate, or plain dict into a dict for source message storage.
+
+    Accepts three input shapes:
+      - Pydantic MessageCreate objects (from agent processing path)
+      - Plain dicts (from source_messages deserialization in the worker)
+      - Message ORM objects
 
     Handles role extraction (str or enum), content normalization (str -> dict),
     and optional per-message fields (external_message_id, message_occurred_at).
     """
-    role = getattr(msg, "role", None) or "user"
+    role = _get(msg, "role") or "user"
     if hasattr(role, "value"):
         role = role.value
     role = str(role)
 
-    if hasattr(msg, "content"):
-        content = msg.content
-    elif hasattr(msg, "text"):
-        content = msg.text
-    else:
+    content = _get(msg, "content")
+    if content is None:
+        content = _get(msg, "text")
+    if content is None:
         content = str(msg)
 
     # Normalize content to dict
@@ -95,10 +106,13 @@ def normalize_message(msg) -> Dict[str, Any]:
     result = {"role": role, "content": content}
 
     # Carry per-message fields if present
-    if hasattr(msg, "external_message_id") and msg.external_message_id:
-        result["external_message_id"] = msg.external_message_id
-    if hasattr(msg, "message_occurred_at") and msg.message_occurred_at:
-        result["occurred_at"] = msg.message_occurred_at
+    ext_msg_id = _get(msg, "external_message_id")
+    if ext_msg_id:
+        result["external_message_id"] = ext_msg_id
+
+    occurred = _get(msg, "message_occurred_at") or _get(msg, "occurred_at")
+    if occurred:
+        result["occurred_at"] = occurred
 
     return result
 
