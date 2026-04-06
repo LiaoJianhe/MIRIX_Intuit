@@ -187,6 +187,7 @@ class Agent(BaseAgent):
 
         # Memory source fields — set by _step() when memory_source_id is present
         self.memory_source_id = None
+        self.external_id = None
         self.external_thread_id = None
         self.source_type = None
         self.source_system = None
@@ -1515,25 +1516,58 @@ class Agent(BaseAgent):
 
         Uses INSERT ON CONFLICT DO NOTHING for idempotent redelivery.
         Called only by meta_memory_agent before sub-agent dispatch.
+
+        Before persisting, computes batch_hash and auto-derives external_id
+        so that duplicate submissions are caught by the partial unique indexes
+        on memory_sources.
         """
+        from mirix.services.source_message_manager import (
+            compute_batch_hash,
+            derive_external_id_from_message_ids,
+            normalize_message,
+        )
+
         try:
+            # Normalize messages once — reused for hash computation and persistence
+            msg_dicts = [normalize_message(msg) for msg in input_messages] if input_messages else []
+
+            # Compute dedup keys for source-level idempotency
+            external_id = self.external_id
+            batch_hash = None
+
+            if not external_id and msg_dicts:
+                # Auto-derive external_id if all messages have external_message_ids
+                ext_msg_ids = [m["external_message_id"] for m in msg_dicts if m.get("external_message_id")]
+                if len(ext_msg_ids) == len(msg_dicts):
+                    external_id = derive_external_id_from_message_ids(ext_msg_ids)
+
+            if not external_id and msg_dicts:
+                # Fallback: compute batch_hash for content-based dedup
+                batch_hash = compute_batch_hash(
+                    external_thread_id=self.external_thread_id,
+                    occurred_at=self.occurred_at,
+                    messages=msg_dicts,
+                )
+
             await self.memory_source_manager.create(
                 memory_source_id=memory_source_id,
                 client_id=self.client_id,
                 user_id=self.user_id,
                 organization_id=self.agent_state.organization_id,
                 source_type=self.source_type or "conversation",
+                external_id=external_id,
                 external_thread_id=self.external_thread_id,
                 source_system=self.source_system,
                 source_metadata=self.source_metadata,
                 occurred_at=self.occurred_at,
                 summary=self.source_summary,
                 summary_source=self.source_summary_source,
+                batch_hash=batch_hash,
             )
 
-            if input_messages:
-                await self.source_message_manager.bulk_insert_from_messages(
-                    input_messages=input_messages,
+            if msg_dicts:
+                await self.source_message_manager.bulk_insert(
+                    messages=msg_dicts,
                     memory_source_id=memory_source_id,
                     external_thread_id=self.external_thread_id,
                 )

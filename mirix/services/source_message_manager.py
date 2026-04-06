@@ -30,6 +30,44 @@ def compute_content_hash(role: str, content: Any) -> str:
     return h.hexdigest()
 
 
+def compute_batch_hash(
+    external_thread_id: Optional[str],
+    occurred_at: Optional[str],
+    messages: List[Dict[str, Any]],
+) -> str:
+    """Compute deterministic SHA-256 hash of an entire message batch for dedup.
+
+    Uses length-prefixed encoding to prevent boundary collisions.
+    Messages should already be normalized via normalize_message().
+    """
+    h = hashlib.sha256()
+    for field in [external_thread_id or "", occurred_at or ""]:
+        encoded = field.encode("utf-8")
+        h.update(len(encoded).to_bytes(4, "big"))
+        h.update(encoded)
+    for msg in messages:
+        for part in [msg["role"], json.dumps(msg["content"], sort_keys=True, ensure_ascii=False)]:
+            encoded = part.encode("utf-8")
+            h.update(len(encoded).to_bytes(4, "big"))
+            h.update(encoded)
+    return h.hexdigest()
+
+
+def derive_external_id_from_message_ids(message_ids: List[str]) -> str:
+    """Auto-derive an external_id from sorted external_message_id values.
+
+    Returns a deterministic "auto-{sha256}" string when all messages in a batch
+    have external_message_ids, giving clients implicit dedup even without
+    providing an explicit external_id.
+    """
+    h = hashlib.sha256()
+    for mid in sorted(message_ids):
+        encoded = mid.encode("utf-8")
+        h.update(len(encoded).to_bytes(4, "big"))
+        h.update(encoded)
+    return f"auto-{h.hexdigest()}"
+
+
 def normalize_message(msg) -> Dict[str, Any]:
     """Convert a Message or MessageCreate object into a dict suitable for source message storage.
 
