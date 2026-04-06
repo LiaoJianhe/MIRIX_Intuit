@@ -1364,6 +1364,14 @@ class Agent(BaseAgent):
                 input_messages=raw_input_messages,
             )
 
+            # Skip processing if this source was already fully processed.
+            # On redelivery the INSERT above is a no-op, so the existing record's
+            # processing_complete flag tells us whether all agents already succeeded.
+            source = await self.memory_source_manager.get_by_id(self.memory_source_id)
+            if source and source.processing_complete:
+                logger.info("Source %s already processed, skipping", self.memory_source_id)
+                return MirixUsageStatistics(step_count=0)
+
         if self.agent_state.is_type(AgentType.meta_memory_agent):
             # Extract topics from retained context + current input messages.
             try:
