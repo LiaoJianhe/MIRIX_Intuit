@@ -90,6 +90,12 @@ class QueueWorker:
 
         content = proto_msg.text_content if proto_msg.HasField("text_content") else ""
 
+        kwargs = {}
+        if hasattr(proto_msg, "external_message_id") and proto_msg.HasField("external_message_id"):
+            kwargs["external_message_id"] = proto_msg.external_message_id
+        if hasattr(proto_msg, "message_occurred_at") and proto_msg.HasField("message_occurred_at"):
+            kwargs["message_occurred_at"] = proto_msg.message_occurred_at
+
         return MessageCreate(
             role=role,
             content=content,
@@ -98,6 +104,7 @@ class QueueWorker:
             sender_id=proto_msg.sender_id if proto_msg.HasField("sender_id") else None,
             group_id=proto_msg.group_id if proto_msg.HasField("group_id") else None,
             filter_tags=None,
+            **kwargs,
         )
 
     def set_server(self, server: Any) -> None:
@@ -217,10 +224,39 @@ class QueueWorker:
                 message.block_filter_tags_update_mode if message.HasField("block_filter_tags_update_mode") else "merge"
             )
 
-            # Extract memory_source_id if present on the protobuf message
+            # Extract memory source fields if present on the protobuf message
             memory_source_id = (
                 message.memory_source_id if hasattr(message, "memory_source_id") and message.HasField("memory_source_id") else None
             )
+            external_id = (
+                message.external_id if hasattr(message, "external_id") and message.HasField("external_id") else None
+            )
+            external_thread_id = (
+                message.external_thread_id if hasattr(message, "external_thread_id") and message.HasField("external_thread_id") else None
+            )
+            source_type = (
+                message.source_type if hasattr(message, "source_type") and message.HasField("source_type") else None
+            )
+            source_system = (
+                message.source_system if hasattr(message, "source_system") and message.HasField("source_system") else None
+            )
+            source_metadata = None
+            if hasattr(message, "source_metadata") and message.source_metadata:
+                try:
+                    source_metadata = MessageToDict(message.source_metadata)
+                except Exception:
+                    pass
+            summary = (
+                message.summary if hasattr(message, "summary") and message.HasField("summary") else None
+            )
+            summarize = (
+                message.summarize if hasattr(message, "summarize") and message.HasField("summarize") else False
+            )
+
+            # Extract original per-turn messages for source_message persistence
+            source_messages = None
+            if hasattr(message, "source_messages") and message.source_messages:
+                source_messages = [self._convert_proto_message_to_pydantic(msg) for msg in message.source_messages]
 
             # Log the processing
             logger.info(
@@ -247,6 +283,14 @@ class QueueWorker:
                     use_cache=use_cache,
                     occurred_at=occurred_at,
                     memory_source_id=memory_source_id,
+                    external_id=external_id,
+                    external_thread_id=external_thread_id,
+                    source_type=source_type,
+                    source_system=source_system,
+                    source_metadata=source_metadata,
+                    summary=summary,
+                    summarize=summarize,
+                    source_messages=source_messages,
                 )
 
             if langfuse and trace_id:

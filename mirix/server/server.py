@@ -698,6 +698,14 @@ class AsyncServer(Server):
         use_cache: bool = True,
         occurred_at: Optional[str] = None,
         memory_source_id: Optional[str] = None,
+        external_id: Optional[str] = None,
+        external_thread_id: Optional[str] = None,
+        source_type: Optional[str] = None,
+        source_system: Optional[str] = None,
+        source_metadata: Optional[dict] = None,
+        summary: Optional[str] = None,
+        summarize: bool = False,
+        source_messages: Optional[list] = None,
     ) -> MirixUsageStatistics:
         """Send the input message through the agent"""
         logger.debug("Got input messages: %s", input_messages)
@@ -723,9 +731,26 @@ class AsyncServer(Server):
             if occurred_at is not None:
                 mirix_agent.occurred_at = occurred_at
 
-            # Store memory_source_id on agent instance for source/citation tracking
+            # Store memory source fields on agent instance for source/citation tracking
             if memory_source_id is not None:
                 mirix_agent.memory_source_id = memory_source_id
+            if external_id is not None:
+                mirix_agent.external_id = external_id
+            if external_thread_id is not None:
+                mirix_agent.external_thread_id = external_thread_id
+            if source_type is not None:
+                mirix_agent.source_type = source_type
+            if source_system is not None:
+                mirix_agent.source_system = source_system
+            if source_metadata is not None:
+                mirix_agent.source_metadata = source_metadata
+            if summary is not None:
+                mirix_agent.source_summary = summary
+                mirix_agent.source_summary_source = "client"
+            if summarize:
+                mirix_agent.summarize = summarize
+            if source_messages is not None:
+                mirix_agent.source_messages = source_messages
 
             # Determine whether or not to token stream based on the capability of the interface
             token_streaming = (
@@ -1029,6 +1054,14 @@ class AsyncServer(Server):
         use_cache: bool = True,
         occurred_at: Optional[str] = None,
         memory_source_id: Optional[str] = None,
+        external_id: Optional[str] = None,
+        external_thread_id: Optional[str] = None,
+        source_type: Optional[str] = None,
+        source_system: Optional[str] = None,
+        source_metadata: Optional[dict] = None,
+        summary: Optional[str] = None,
+        summarize: bool = False,
+        source_messages: Optional[list] = None,
     ) -> MirixUsageStatistics:
         """Send a list of messages to the agent.
 
@@ -1073,6 +1106,14 @@ class AsyncServer(Server):
                 use_cache=use_cache,
                 occurred_at=occurred_at,
                 memory_source_id=memory_source_id,
+                external_id=external_id,
+                external_thread_id=external_thread_id,
+                source_type=source_type,
+                source_system=source_system,
+                source_metadata=source_metadata,
+                summary=summary,
+                summarize=summarize,
+                source_messages=source_messages,
             )
         finally:
             # No cleanup needed - context automatically isolated per request
