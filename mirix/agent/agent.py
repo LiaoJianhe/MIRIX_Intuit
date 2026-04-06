@@ -1547,8 +1547,8 @@ class Agent(BaseAgent):
             # Prefer source_messages (original per-turn dicts with role, external_message_id,
             # occurred_at intact) over the packed input_messages which lost per-message
             # fields when the add_memory handler flattened turns into [USER]/[ASSISTANT]
-            # markers. Falls back to input_messages for backward compat (e.g. callers
-            # that don't set source_messages).
+            # markers. Falls back to input_messages for callers that pass memory_source_id
+            # without source_messages (nobody does today, but the two params aren't coupled).
             messages_for_persistence = self.source_messages if self.source_messages else input_messages
 
             # Normalize messages once — reused for hash computation and persistence
