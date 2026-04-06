@@ -1517,9 +1517,9 @@ class Agent(BaseAgent):
         Uses INSERT ON CONFLICT DO NOTHING for idempotent redelivery.
         Called only by meta_memory_agent before sub-agent dispatch.
 
-        Layer 1 idempotency: before persisting, computes batch_hash and
-        auto-derives external_id so that duplicate submissions are caught by the
-        partial unique indexes on memory_sources.
+        Before persisting, computes batch_hash and auto-derives external_id
+        so that duplicate submissions are caught by the partial unique indexes
+        on memory_sources.
         """
         from mirix.services.source_message_manager import (
             compute_batch_hash,
@@ -1531,7 +1531,7 @@ class Agent(BaseAgent):
             # Normalize messages once — reused for hash computation and persistence
             msg_dicts = [normalize_message(msg) for msg in input_messages] if input_messages else []
 
-            # Layer 1 idempotency: compute dedup keys
+            # Compute dedup keys for source-level idempotency
             external_id = self.external_id
             batch_hash = None
 

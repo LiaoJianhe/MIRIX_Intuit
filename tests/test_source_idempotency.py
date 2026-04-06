@@ -1,12 +1,4 @@
-"""Tests for Layer 1 idempotency: batch_hash computation and external_id auto-derivation.
-
-Covers:
-- Same external_id submitted twice: second INSERT is silently skipped (integration)
-- Same content, same thread, same time: batch_hash catches duplicate
-- Same content, different thread: batch_hash differs (no false positive)
-- All external_message_ids provided: external_id auto-derived from sorted hash
-- Length-prefixed hashing prevents boundary collisions
-"""
+"""Tests for source-level idempotency: batch_hash computation and external_id auto-derivation."""
 
 from mirix.services.source_message_manager import (
     compute_batch_hash,
