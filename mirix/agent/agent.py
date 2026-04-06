@@ -1517,7 +1517,7 @@ class Agent(BaseAgent):
         Uses INSERT ON CONFLICT DO NOTHING for idempotent redelivery.
         Called only by meta_memory_agent before sub-agent dispatch.
 
-        Layer 1 idempotency (S3): before persisting, computes batch_hash and
+        Layer 1 idempotency: before persisting, computes batch_hash and
         auto-derives external_id so that duplicate submissions are caught by the
         partial unique indexes on memory_sources.
         """
