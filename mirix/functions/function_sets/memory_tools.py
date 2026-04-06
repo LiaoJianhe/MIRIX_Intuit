@@ -25,6 +25,33 @@ from mirix.schemas.semantic_memory import SemanticMemoryItemBase
 logger = get_logger(__name__)
 
 
+async def _write_citation(agent: "Agent", memory_type: str, memory_id: str, citation_type: str) -> None:
+    """Write a citation record linking a memory write to its source.
+
+    No-op if memory_source_id is not set on the agent.
+    """
+    memory_source_id = getattr(agent, "memory_source_id", None)
+    if not memory_source_id:
+        return
+
+    from mirix.services.memory_citation_manager import MemoryCitationManager
+
+    citation_mgr = MemoryCitationManager()
+    use_cache = getattr(agent, "use_cache", True)
+    external_thread_id = getattr(agent, "external_thread_id", None)
+    occurred_at = getattr(agent, "occurred_at", None)
+
+    await citation_mgr.create(
+        memory_source_id=memory_source_id,
+        memory_type=memory_type,
+        memory_id=memory_id,
+        citation_type=citation_type,
+        external_thread_id=external_thread_id,
+        occurred_at=occurred_at,
+        use_cache=use_cache,
+    )
+
+
 async def core_memory_append(
     self: "Agent", blocks_in_memory: "Memory", label: str, content: str
 ) -> Optional[str]:  # type: ignore
@@ -66,6 +93,8 @@ async def core_memory_append(
 
     # If within limit, perform the append
     blocks_in_memory.update_block_value(label=label, value=new_value)
+
+    await _write_citation(self, "core", current_block.id, "updated")
     return None
 
 
@@ -100,6 +129,8 @@ async def core_memory_rewrite(
     # Only update if the content actually changed
     if current_value != new_value:
         blocks_in_memory.update_block_value(label=label, value=new_value)
+
+        await _write_citation(self, "core", current_block.id, "updated")
         # Provide feedback on the operation
         percentage = int((new_length / limit) * 100)
         return f"Successfully rewrote '{label}' block: {new_length}/{limit} characters ({percentage}% full)."
@@ -136,7 +167,7 @@ async def episodic_memory_insert(self: "Agent", items: List[EpisodicEventForLLM]
 
             timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
 
-        await self.episodic_memory_manager.insert_event(
+        event = await self.episodic_memory_manager.insert_event(
             actor=self.actor,
             agent_state=self.agent_state,
             agent_id=agent_id,
@@ -150,6 +181,8 @@ async def episodic_memory_insert(self: "Agent", items: List[EpisodicEventForLLM]
             use_cache=use_cache,
             user_id=user_id,
         )
+        await _write_citation(self, "episodic", event.id, "created")
+
     response = "Events inserted! Now you need to check if there are repeated events shown in the system prompt."
     return response
 
@@ -180,6 +213,9 @@ async def episodic_memory_merge(
         agent_state=self.agent_state,
         update_mode="replace",
     )
+
+    await _write_citation(self, "episodic", episodic_memory.id, "updated")
+
     response = (
         "These are the `summary` and the `details` of the updated event:\n",
         str(
@@ -234,7 +270,7 @@ async def episodic_memory_replace(self: "Agent", event_ids: List[str], new_items
 
             timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
 
-        await self.episodic_memory_manager.insert_event(
+        event = await self.episodic_memory_manager.insert_event(
             actor=self.actor,
             agent_state=self.agent_state,
             agent_id=agent_id,
@@ -248,6 +284,7 @@ async def episodic_memory_replace(self: "Agent", event_ids: List[str], new_items
             use_cache=use_cache,
             user_id=user_id,
         )
+        await _write_citation(self, "episodic", event.id, "created")
 
 
 async def check_episodic_memory(self: "Agent", event_ids: List[str], timezone_str: str) -> List[EpisodicEventForLLM]:
@@ -305,7 +342,7 @@ async def resource_memory_insert(self: "Agent", items: List[ResourceMemoryItemBa
     user_id = getattr(self, "user_id", None)
 
     for item in items:
-        await self.resource_memory_manager.insert_resource(
+        resource = await self.resource_memory_manager.insert_resource(
             actor=self.actor,
             agent_state=self.agent_state,
             agent_id=agent_id,
@@ -318,6 +355,7 @@ async def resource_memory_insert(self: "Agent", items: List[ResourceMemoryItemBa
             use_cache=use_cache,
             user_id=user_id,
         )
+        await _write_citation(self, "resource", resource.id, "created")
 
     return f"Successfully inserted {len(items)} new resource(s)."
 
@@ -342,7 +380,7 @@ async def resource_memory_update(self: "Agent", old_ids: List[str], new_items: L
         await self.resource_memory_manager.delete_resource_by_id(resource_id=old_id, actor=self.actor)
 
     for item in new_items:
-        await self.resource_memory_manager.insert_resource(
+        resource = await self.resource_memory_manager.insert_resource(
             actor=self.actor,
             agent_state=self.agent_state,
             agent_id=agent_id,
@@ -355,6 +393,7 @@ async def resource_memory_update(self: "Agent", old_ids: List[str], new_items: L
             use_cache=use_cache,
             user_id=user_id,
         )
+        await _write_citation(self, "resource", resource.id, "created")
 
 
 async def procedural_memory_insert(self: "Agent", items: List[ProceduralMemoryItemBase]):
@@ -376,7 +415,7 @@ async def procedural_memory_insert(self: "Agent", items: List[ProceduralMemoryIt
     user_id = getattr(self, "user_id", None)
 
     for item in items:
-        await self.procedural_memory_manager.insert_procedure(
+        procedure = await self.procedural_memory_manager.insert_procedure(
             agent_state=self.agent_state,
             agent_id=agent_id,
             entry_type=item["entry_type"],
@@ -388,6 +427,7 @@ async def procedural_memory_insert(self: "Agent", items: List[ProceduralMemoryIt
             use_cache=use_cache,
             user_id=user_id,
         )
+        await _write_citation(self, "procedural", procedure.id, "created")
 
     return f"Successfully inserted {len(items)} new procedure(s)."
 
@@ -415,7 +455,7 @@ async def procedural_memory_update(self: "Agent", old_ids: List[str], new_items:
         await self.procedural_memory_manager.delete_procedure_by_id(procedure_id=old_id, actor=self.actor)
 
     for item in new_items:
-        await self.procedural_memory_manager.insert_procedure(
+        procedure = await self.procedural_memory_manager.insert_procedure(
             agent_state=self.agent_state,
             agent_id=agent_id,
             entry_type=item["entry_type"],
@@ -427,6 +467,7 @@ async def procedural_memory_update(self: "Agent", old_ids: List[str], new_items:
             use_cache=use_cache,
             user_id=user_id,
         )
+        await _write_citation(self, "procedural", procedure.id, "created")
 
 
 async def check_semantic_memory(
@@ -481,7 +522,7 @@ async def semantic_memory_insert(self: "Agent", items: List[SemanticMemoryItemBa
     user_id = getattr(self, "user_id", None)
 
     for item in items:
-        await self.semantic_memory_manager.insert_semantic_item(
+        semantic_item = await self.semantic_memory_manager.insert_semantic_item(
             agent_state=self.agent_state,
             agent_id=agent_id,
             name=item["name"],
@@ -494,6 +535,7 @@ async def semantic_memory_insert(self: "Agent", items: List[SemanticMemoryItemBa
             use_cache=use_cache,
             user_id=user_id,
         )
+        await _write_citation(self, "semantic", semantic_item.id, "created")
 
     return f"Successfully inserted {len(items)} new semantic item(s)."
 
@@ -540,6 +582,7 @@ async def semantic_memory_update(
             user_id=user_id,
         )
         new_ids.append(inserted_item.id)
+        await _write_citation(self, "semantic", inserted_item.id, "created")
 
     message_to_return = (
         "Semantic memory with the following ids have been deleted: "
@@ -568,7 +611,7 @@ async def knowledge_vault_insert(self: "Agent", items: List[KnowledgeVaultItemBa
     user_id = getattr(self, "user_id", None)
 
     for item in items:
-        await self.knowledge_vault_manager.insert_knowledge(
+        kv_item = await self.knowledge_vault_manager.insert_knowledge(
             actor=self.actor,
             agent_state=self.agent_state,
             agent_id=agent_id,
@@ -582,6 +625,7 @@ async def knowledge_vault_insert(self: "Agent", items: List[KnowledgeVaultItemBa
             use_cache=use_cache,
             user_id=user_id,
         )
+        await _write_citation(self, "knowledge_vault", kv_item.id, "created")
 
     return f"Successfully inserted {len(items)} new knowledge vault item(s)."
 
@@ -609,7 +653,7 @@ async def knowledge_vault_update(self: "Agent", old_ids: List[str], new_items: L
         await self.knowledge_vault_manager.delete_knowledge_by_id(knowledge_vault_item_id=old_id, actor=self.actor)
 
     for item in new_items:
-        await self.knowledge_vault_manager.insert_knowledge(
+        kv_item = await self.knowledge_vault_manager.insert_knowledge(
             actor=self.actor,
             agent_state=self.agent_state,
             agent_id=agent_id,
@@ -623,6 +667,7 @@ async def knowledge_vault_update(self: "Agent", old_ids: List[str], new_items: L
             use_cache=use_cache,
             user_id=user_id,
         )
+        await _write_citation(self, "knowledge_vault", kv_item.id, "created")
 
 
 async def trigger_memory_update_with_instruction(
@@ -809,6 +854,14 @@ async def trigger_memory_update(self: "Agent", user_message: object, memory_type
             # Set occurred_at on the child agent so it can use it during memory operations
             if occurred_at is not None:
                 memory_agent.occurred_at = occurred_at
+
+            # Propagate memory source fields for citation-level dedup (S5)
+            memory_source_id = getattr(self, "memory_source_id", None)
+            if memory_source_id is not None:
+                memory_agent.memory_source_id = memory_source_id
+            external_thread_id = getattr(self, "external_thread_id", None)
+            if external_thread_id is not None:
+                memory_agent.external_thread_id = external_thread_id
 
             # Work on a copy of the user message so parallel updates do not interfere
             if "message" not in user_message:
