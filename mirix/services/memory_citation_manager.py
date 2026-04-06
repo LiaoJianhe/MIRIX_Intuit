@@ -91,7 +91,8 @@ class MemoryCitationManager:
                 memory_id,
                 memory_source_id,
             )
-            return PydanticMemoryCitation(**values)
+            pydantic_values = {k: v for k, v in values.items() if k != "is_deleted"}
+            return PydanticMemoryCitation(**pydantic_values)
         return None
 
     @enforce_types
