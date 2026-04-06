@@ -1363,8 +1363,8 @@ class Agent(BaseAgent):
                 input_messages=raw_input_messages,
             )
 
-            # Layer 2 idempotency: skip processing if this source was already fully processed.
-            # On Kafka redelivery the INSERT above is a no-op, so the existing record's
+            # Skip processing if this source was already fully processed.
+            # On redelivery the INSERT above is a no-op, so the existing record's
             # processing_complete flag tells us whether all agents already succeeded.
             source = await self.memory_source_manager.get_by_id(self.memory_source_id)
             if source and source.processing_complete:

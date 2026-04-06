@@ -1,4 +1,4 @@
-"""Unit tests for Layer 2 idempotency: processing-level skip.
+"""Unit tests for processing-level idempotency skip.
 
 Verifies that the meta_memory_agent's step() returns early when a memory
 source has already been fully processed (processing_complete=True).
