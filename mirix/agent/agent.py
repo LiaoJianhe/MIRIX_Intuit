@@ -60,10 +60,12 @@ from mirix.services.block_manager import BlockManager
 from mirix.services.episodic_memory_manager import EpisodicMemoryManager
 from mirix.services.helpers.agent_manager_helper import check_supports_structured_output
 from mirix.services.knowledge_vault_manager import KnowledgeVaultManager
+from mirix.services.memory_source_manager import MemorySourceManager
 from mirix.services.message_manager import MessageManager
 from mirix.services.procedural_memory_manager import ProceduralMemoryManager
 from mirix.services.resource_memory_manager import ResourceMemoryManager
 from mirix.services.semantic_memory_manager import SemanticMemoryManager
+from mirix.services.source_message_manager import SourceMessageManager
 from mirix.services.step_manager import StepManager
 from mirix.services.tool_execution_sandbox import ToolExecutionSandbox
 from mirix.services.user_manager import UserManager
@@ -241,9 +243,6 @@ class Agent(BaseAgent):
         self.agent_manager = AgentManager()
 
         # Memory source managers
-        from mirix.services.memory_source_manager import MemorySourceManager
-        from mirix.services.source_message_manager import SourceMessageManager
-
         self.memory_source_manager = MemorySourceManager()
         self.source_message_manager = SourceMessageManager()
 
