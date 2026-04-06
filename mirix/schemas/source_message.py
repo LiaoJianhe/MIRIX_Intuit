@@ -24,5 +24,6 @@ class SourceMessage(SourceMessageBase):
     occurred_at: Optional[datetime] = Field(None, description="Per-message timestamp")
     sequence_num: int = Field(..., description="Ordering within the source")
     content_hash: str = Field(..., description="SHA-256 of (role, content) for dedup")
+    message_metadata: Optional[Dict[str, Any]] = Field(None, description="Client-provided per-message property bag")
     created_at: Optional[datetime] = Field(None, description="When the record was created")
     updated_at: Optional[datetime] = Field(None, description="When the record was last updated")

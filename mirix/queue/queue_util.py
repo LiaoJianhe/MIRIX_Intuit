@@ -252,6 +252,8 @@ async def put_messages(
                 proto_src_msg.external_message_id = msg_dict["external_message_id"]
             if msg_dict.get("occurred_at"):
                 proto_src_msg.message_occurred_at = msg_dict["occurred_at"]
+            if msg_dict.get("metadata"):
+                proto_src_msg.message_metadata.update(msg_dict["metadata"])
 
             queue_msg.source_messages.append(proto_src_msg)
 

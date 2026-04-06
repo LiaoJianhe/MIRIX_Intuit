@@ -1593,6 +1593,7 @@ class Agent(BaseAgent):
                     messages=msg_dicts,
                     memory_source_id=memory_source_id,
                     external_thread_id=self.external_thread_id,
+                    fallback_occurred_at=self.occurred_at,
                 )
 
             logger.info(

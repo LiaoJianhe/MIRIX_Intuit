@@ -136,6 +136,9 @@ message MessageCreate {
 
   // Per-message timestamp (ISO 8601 string)
   optional string message_occurred_at = 9;
+
+  // Client-provided per-message property bag
+  google.protobuf.Struct message_metadata = 10;
 }
 
 // List of message content parts (for structured content)

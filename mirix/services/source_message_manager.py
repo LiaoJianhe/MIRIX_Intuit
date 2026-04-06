@@ -114,6 +114,10 @@ def normalize_message(msg) -> Dict[str, Any]:
     if occurred:
         result["occurred_at"] = occurred
 
+    metadata = _get(msg, "metadata")
+    if metadata:
+        result["metadata"] = metadata
+
     return result
 
 
@@ -131,11 +135,16 @@ class SourceMessageManager:
         messages: List[Dict[str, Any]],
         memory_source_id: str,
         external_thread_id: Optional[str] = None,
+        fallback_occurred_at: Optional[str] = None,
     ) -> int:
         """Insert source messages in bulk using ORM bulk_create_or_ignore.
 
         Each message dict should have: role, content, and optionally
-        external_message_id and occurred_at.
+        external_message_id, occurred_at, and metadata.
+
+        Args:
+            fallback_occurred_at: Top-level occurred_at from the request. Used when
+                a message doesn't have its own per-message occurred_at.
 
         Returns the number of rows actually inserted (excludes conflicts).
         """
@@ -157,9 +166,10 @@ class SourceMessageManager:
                     external_message_id=msg.get("external_message_id"),
                     role=role,
                     content=content if isinstance(content, dict) else {"text": content},
-                    occurred_at=msg.get("occurred_at"),
+                    occurred_at=msg.get("occurred_at") or fallback_occurred_at,
                     sequence_num=seq,
                     content_hash=content_hash,
+                    message_metadata=msg.get("metadata"),
                     created_at=now,
                     updated_at=now,
                     is_deleted=False,

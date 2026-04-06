@@ -134,6 +134,8 @@ class QueueWorker:
             result["external_message_id"] = proto_msg.external_message_id
         if hasattr(proto_msg, "message_occurred_at") and proto_msg.HasField("message_occurred_at"):
             result["message_occurred_at"] = proto_msg.message_occurred_at
+        if hasattr(proto_msg, "message_metadata") and proto_msg.message_metadata:
+            result["metadata"] = MessageToDict(proto_msg.message_metadata)
 
         return result
 
