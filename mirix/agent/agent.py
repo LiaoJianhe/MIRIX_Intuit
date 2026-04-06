@@ -183,6 +183,15 @@ class Agent(BaseAgent):
         self.user = user  # Store user for end-user tracking
         self.occurred_at = None  # Optional timestamp for episodic memory, set by server if provided
 
+        # Memory source fields — set by _step() when memory_source_id is present
+        self.memory_source_id = None
+        self.external_thread_id = None
+        self.source_type = None
+        self.source_system = None
+        self.source_metadata = None
+        self.source_summary = None
+        self.source_summary_source = None
+
         # Derive block scopes from filter_tags for block_manager.get_blocks() calls.
         # filter_tags["scope"] is the client's write_scope, set by the server when queuing work.
         scope = self.filter_tags.get("scope") if self.filter_tags else None
@@ -230,6 +239,13 @@ class Agent(BaseAgent):
         # state managers
         self.block_manager = BlockManager()
         self.agent_manager = AgentManager()
+
+        # Memory source managers
+        from mirix.services.memory_source_manager import MemorySourceManager
+        from mirix.services.source_message_manager import SourceMessageManager
+
+        self.memory_source_manager = MemorySourceManager()
+        self.source_message_manager = SourceMessageManager()
 
         # Interface must implement:
         # - internal_monologue
@@ -1338,6 +1354,16 @@ class Agent(BaseAgent):
             llm_config=self.agent_state.llm_config,
         )
 
+        # Persist memory source and messages before sub-agent dispatch
+        # If memory_source_id is set on this agent instance, persist the source
+        # and its messages before running any memory extraction. This is gated on
+        # the meta_memory_agent type so sub-agents don't re-persist.
+        if self.agent_state.is_type(AgentType.meta_memory_agent) and self.memory_source_id:
+            await self._persist_memory_source(
+                memory_source_id=self.memory_source_id,
+                input_messages=raw_input_messages,
+            )
+
         if self.agent_state.is_type(AgentType.meta_memory_agent):
             # Extract topics from retained context + current input messages.
             try:
@@ -1472,7 +1498,55 @@ class Agent(BaseAgent):
                 keep_newest_n=retention,
             )
 
+        # Mark memory source as fully processed after all agents complete
+        if self.agent_state.is_type(AgentType.meta_memory_agent) and self.memory_source_id:
+            try:
+                await self.memory_source_manager.mark_processing_complete(self.memory_source_id)
+            except Exception as e:
+                logger.warning("Failed to mark source %s complete: %s", self.memory_source_id, e)
+
         return MirixUsageStatistics(**total_usage.model_dump(), step_count=step_count)
+
+    async def _persist_memory_source(
+        self,
+        memory_source_id: str,
+        input_messages: list,
+    ) -> None:
+        """Persist a MemorySource and its SourceMessages at the start of meta-agent processing.
+
+        Uses INSERT ON CONFLICT DO NOTHING for idempotent redelivery.
+        Called only by meta_memory_agent before sub-agent dispatch.
+        """
+        try:
+            await self.memory_source_manager.create(
+                memory_source_id=memory_source_id,
+                client_id=self.client_id,
+                user_id=self.user_id,
+                organization_id=self.agent_state.organization_id,
+                source_type=self.source_type or "conversation",
+                external_thread_id=self.external_thread_id,
+                source_system=self.source_system,
+                source_metadata=self.source_metadata,
+                occurred_at=self.occurred_at,
+                summary=self.source_summary,
+                summary_source=self.source_summary_source,
+            )
+
+            if input_messages:
+                await self.source_message_manager.bulk_insert_from_messages(
+                    input_messages=input_messages,
+                    memory_source_id=memory_source_id,
+                    external_thread_id=self.external_thread_id,
+                )
+
+            logger.info(
+                "Persisted memory source %s with %d messages",
+                memory_source_id,
+                len(input_messages),
+            )
+        except Exception as e:
+            # Source persistence failure should not block memory processing
+            logger.error("Failed to persist memory source %s: %s", memory_source_id, e)
 
     async def build_system_prompt_with_memories(
         self,

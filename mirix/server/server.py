@@ -697,6 +697,7 @@ class AsyncServer(Server):
         block_filter_tags_update_mode: Optional[str] = "merge",
         use_cache: bool = True,
         occurred_at: Optional[str] = None,
+        memory_source_id: Optional[str] = None,
     ) -> MirixUsageStatistics:
         """Send the input message through the agent"""
         logger.debug("Got input messages: %s", input_messages)
@@ -721,6 +722,10 @@ class AsyncServer(Server):
             # Store occurred_at on agent instance for use during memory extraction
             if occurred_at is not None:
                 mirix_agent.occurred_at = occurred_at
+
+            # Store memory_source_id on agent instance for source/citation tracking
+            if memory_source_id is not None:
+                mirix_agent.memory_source_id = memory_source_id
 
             # Determine whether or not to token stream based on the capability of the interface
             token_streaming = (
@@ -1023,6 +1028,7 @@ class AsyncServer(Server):
         block_filter_tags_update_mode: Optional[str] = "merge",
         use_cache: bool = True,
         occurred_at: Optional[str] = None,
+        memory_source_id: Optional[str] = None,
     ) -> MirixUsageStatistics:
         """Send a list of messages to the agent.
 
@@ -1038,6 +1044,7 @@ class AsyncServer(Server):
             block_filter_tags_update_mode: "merge" (default) or "replace" for existing block filter_tags
             use_cache: Control Redis cache behavior (default: True)
             occurred_at: Optional ISO 8601 timestamp for episodic memory (default: None)
+            memory_source_id: Optional pre-generated source ID for citation tracking (default: None)
 
         Returns:
             MirixUsageStatistics containing usage information
@@ -1065,6 +1072,7 @@ class AsyncServer(Server):
                 block_filter_tags_update_mode=block_filter_tags_update_mode,
                 use_cache=use_cache,
                 occurred_at=occurred_at,
+                memory_source_id=memory_source_id,
             )
         finally:
             # No cleanup needed - context automatically isolated per request
