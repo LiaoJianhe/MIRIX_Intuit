@@ -21,6 +21,12 @@ class FileManager:
     @enforce_types
     async def create_file_metadata(self, pydantic_file: PydanticFileMetadata) -> PydanticFileMetadata:
         """Create new file metadata."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            result = await provider.create("files", pydantic_file.model_dump())
+            return PydanticFileMetadata(**result)
         async with self.session_maker() as session:
             file_metadata = FileMetadataModel(**pydantic_file.model_dump())
             await file_metadata.create(session)
@@ -29,6 +35,16 @@ class FileManager:
     @enforce_types
     async def get_file_metadata_by_id(self, file_id: str) -> PydanticFileMetadata:
         """Get file metadata by ID."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            result = await provider.read("files", file_id)
+            if result is None:
+                from mirix.orm.errors import NoResultFound
+
+                raise NoResultFound(f"File {file_id} not found")
+            return PydanticFileMetadata(**result)
         async with self.session_maker() as session:
             file_metadata = await FileMetadataModel.read(db_session=session, identifier=file_id)
             return file_metadata.to_pydantic()
@@ -41,6 +57,16 @@ class FileManager:
         limit: Optional[int] = 50,
     ) -> List[PydanticFileMetadata]:
         """Get all files for a specific organization."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            results = await provider.list(
+                "files",
+                organization_id=organization_id,
+                limit=limit,
+            )
+            return [PydanticFileMetadata(**r) for r in results]
         async with self.session_maker() as session:
             results = await FileMetadataModel.list(
                 db_session=session,
@@ -53,6 +79,13 @@ class FileManager:
     @enforce_types
     async def update_file_metadata(self, file_id: str, **kwargs) -> PydanticFileMetadata:
         """Update file metadata."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            update_data = {k: v for k, v in kwargs.items() if v is not None}
+            result = await provider.update("files", file_id, update_data)
+            return PydanticFileMetadata(**result)
         async with self.session_maker() as session:
             file_metadata = await FileMetadataModel.read(db_session=session, identifier=file_id)
             for key, value in kwargs.items():
@@ -65,6 +98,12 @@ class FileManager:
     @enforce_types
     async def delete_file_metadata(self, file_id: str) -> None:
         """Delete file metadata by ID."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            await provider.hard_delete("files", file_id)
+            return
         async with self.session_maker() as session:
             file_metadata = await FileMetadataModel.read(db_session=session, identifier=file_id)
             await file_metadata.hard_delete(session)
@@ -72,6 +111,12 @@ class FileManager:
     @enforce_types
     async def list_files(self, cursor: Optional[str] = None, limit: Optional[int] = 50) -> List[PydanticFileMetadata]:
         """List all files with pagination."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            results = await provider.list("files", limit=limit)
+            return [PydanticFileMetadata(**r) for r in results]
         async with self.session_maker() as session:
             results = await FileMetadataModel.list(db_session=session, cursor=cursor, limit=limit)
             return [f.to_pydantic() for f in results]

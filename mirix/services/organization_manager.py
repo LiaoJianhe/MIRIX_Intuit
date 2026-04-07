@@ -46,6 +46,25 @@ class OrganizationManager:
         except Exception as e:
             logger.warning("Cache read failed for organization %s: %s", org_id, e)
 
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            result = await provider.read("organizations", org_id)
+            if result is None:
+                raise NoResultFound(f"Organization {org_id} not found")
+            pydantic_org = PydanticOrganization(**result)
+            try:
+                if cache_provider:
+                    from mirix.settings import settings
+
+                    cache_key = f"{cache_provider.ORGANIZATION_PREFIX}{org_id}"
+                    data = pydantic_org.model_dump(mode="json")
+                    await cache_provider.set_hash(cache_key, data, ttl=settings.redis_ttl_organizations)
+            except Exception as e:
+                logger.warning("Failed to populate cache for organization %s: %s", org_id, e)
+            return pydantic_org
+
         async with self.session_maker() as session:
             organization = await OrganizationModel.read(db_session=session, identifier=org_id)
             pydantic_org = organization.to_pydantic()
@@ -74,6 +93,16 @@ class OrganizationManager:
 
     @enforce_types
     async def _create_organization(self, pydantic_org: PydanticOrganization) -> PydanticOrganization:
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            org_data = pydantic_org.model_dump()
+            if org_data.get("name") is None:
+                org_data["name"] = create_random_username()
+            result = await provider.create("organizations", org_data)
+            return PydanticOrganization(**result)
+
         async with self.session_maker() as session:
             org_data = pydantic_org.model_dump()
             if org_data.get("name") is None:
@@ -91,6 +120,16 @@ class OrganizationManager:
     @enforce_types
     async def update_organization_name_using_id(self, org_id: str, name: Optional[str] = None) -> PydanticOrganization:
         """Update an organization (with cache invalidation)."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            update_data = {}
+            if name:
+                update_data["name"] = name
+            result = await provider.update("organizations", org_id, update_data)
+            return PydanticOrganization(**result)
+
         async with self.session_maker() as session:
             org = await OrganizationModel.read(db_session=session, identifier=org_id)
             if name:
@@ -101,6 +140,22 @@ class OrganizationManager:
     @enforce_types
     async def delete_organization_by_id(self, org_id: str) -> None:
         """Delete an organization (removes from cache)."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            await provider.hard_delete("organizations", org_id)
+            try:
+                from mirix.database.cache_provider import get_cache_provider
+
+                cache_provider = get_cache_provider()
+                if cache_provider:
+                    cache_key = f"{cache_provider.ORGANIZATION_PREFIX}{org_id}"
+                    await cache_provider.delete(cache_key)
+            except Exception:
+                pass
+            return
+
         async with self.session_maker() as session:
             organization = await OrganizationModel.read(db_session=session, identifier=org_id)
 
@@ -127,6 +182,13 @@ class OrganizationManager:
         self, cursor: Optional[str] = None, limit: Optional[int] = 50
     ) -> List[PydanticOrganization]:
         """List organizations with pagination based on cursor (org_id) and limit."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            results = await provider.list("organizations", limit=limit)
+            return [PydanticOrganization(**r) for r in results]
+
         async with self.session_maker() as session:
             results = await OrganizationModel.list(db_session=session, cursor=cursor, limit=limit)
             return [org.to_pydantic() for org in results]

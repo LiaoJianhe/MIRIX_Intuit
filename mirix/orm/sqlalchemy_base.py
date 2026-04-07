@@ -640,7 +640,7 @@ class SqlalchemyBase(CommonSqlalchemyMetaMixins, Base):
         return self.to_pydantic()
 
     # ========================================================================
-    # REDIS INTEGRATION METHODS (Hybrid: Hash for blocks/messages, JSON for memory)
+    # REDIS INTEGRATION METHODS (Hybrid: Hash for no-embedding tables, JSON+Vector for memory tables with embeddings)
     # ========================================================================
 
     @handle_db_timeout
@@ -760,16 +760,6 @@ class SqlalchemyBase(CommonSqlalchemyMetaMixins, Base):
             if not table_name:
                 return
 
-            # HASH-BASED CACHING (blocks and messages - NO embeddings)
-            if table_name == "block":
-                cache_key = f"{cache_provider.BLOCK_PREFIX}{self.id}"
-                if operation == "delete":
-                    await cache_provider.delete(cache_key)
-                else:
-                    data = self.to_pydantic().model_dump(mode="json")
-                    await cache_provider.set_hash(cache_key, data, ttl=settings.redis_ttl_blocks)
-                return
-
             if table_name == "messages":
                 cache_key = f"{cache_provider.MESSAGE_PREFIX}{self.id}"
                 if operation == "delete":
@@ -881,7 +871,18 @@ class SqlalchemyBase(CommonSqlalchemyMetaMixins, Base):
                     await cache_provider.set_hash(cache_key, data, ttl=settings.redis_ttl_tools)
                 return
 
-            # JSON-BASED CACHING (memory tables with embeddings)
+            # MEMORY TABLE CACHING
+            # block uses Hash (no embedding fields); other memory tables use JSON+Vector.
+            if table_name == "block":
+                cache_key = f"{cache_provider.BLOCK_PREFIX}{self.id}"
+                if operation == "delete":
+                    await cache_provider.delete(cache_key)
+                else:
+                    data = self.to_pydantic().model_dump(mode="json")
+                    await cache_provider.set_hash(cache_key, data, ttl=settings.redis_ttl_blocks)
+                return
+
+            # JSON+Vector caching for memory tables that have embedding fields.
             memory_tables = {
                 "episodic_memory": cache_provider.EPISODIC_PREFIX,
                 "semantic_memory": cache_provider.SEMANTIC_PREFIX,

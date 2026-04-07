@@ -419,6 +419,15 @@ class KnowledgeVaultManager:
         self, knowledge_vault_item_id: str, user: PydanticUser, timezone_str: str
     ) -> Optional[PydanticKnowledgeVaultItem]:
         """Fetch a knowledge vault item by ID (with cache - Redis or IPS Cache)."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            result = await provider.read("knowledge_vault", knowledge_vault_item_id)
+            if result is None:
+                raise NoResultFound(f"Knowledge vault item with id {knowledge_vault_item_id} not found.")
+            return PydanticKnowledgeVaultItem(**result)
+
         cache_provider = None
         try:
             from mirix.database.cache_provider import get_cache_provider
@@ -503,6 +512,20 @@ class KnowledgeVaultManager:
             user_id: End-user identifier (optional)
             use_cache: If True, cache in Redis. If False, skip caching.
         """
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            item_data = knowledge_vault_item.model_dump()
+            required_fields = ["entry_type", "secret_value", "sensitivity"]
+            for field in required_fields:
+                if field not in item_data:
+                    raise ValueError(f"Required field '{field}' missing from knowledge vault item data")
+            item_data["client_id"] = client_id
+            item_data["user_id"] = user_id
+            item_data.setdefault("organization_id", actor.organization_id)
+            result = await provider.create("knowledge_vault", item_data)
+            return PydanticKnowledgeVaultItem(**result)
 
         # Ensure ID is set before model_dump
         if not knowledge_vault_item.id:
@@ -559,6 +582,44 @@ class KnowledgeVaultManager:
     ):
         """Insert knowledge into the knowledge vault."""
         try:
+            from mirix.services.user_manager import UserManager
+
+            client_id = actor.id
+            if user_id is None:
+                user_id = UserManager.ADMIN_USER_ID
+
+            from mirix.database.relational_provider import get_relational_provider
+
+            provider = get_relational_provider()
+            if provider:
+                from datetime import datetime, timezone
+
+                data_dict = {
+                    "user_id": user_id,
+                    "agent_id": agent_id,
+                    "entry_type": entry_type,
+                    "source": source,
+                    "caption": caption,
+                    "sensitivity": sensitivity,
+                    "secret_value": secret_value,
+                    "organization_id": organization_id,
+                    "filter_tags": filter_tags or {},
+                    "client_id": client_id,
+                }
+                if BUILD_EMBEDDINGS_FOR_MEMORY:
+                    embed_model = await embedding_model(agent_state.embedding_config)
+                    data_dict["caption_embedding"] = await embed_model.get_text_embedding(caption)
+                    data_dict["embedding_config"] = agent_state.embedding_config
+                else:
+                    data_dict["caption_embedding"] = None
+                    data_dict["embedding_config"] = None
+                data_dict["last_modify"] = {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "operation": "created",
+                }
+                result = await provider.create("knowledge_vault", data_dict)
+                return PydanticKnowledgeVaultItem(**result)
+
             # Conditionally calculate embeddings based on BUILD_EMBEDDINGS_FOR_MEMORY flag
             if BUILD_EMBEDDINGS_FOR_MEMORY:
                 embed_model = await embedding_model(agent_state.embedding_config)
@@ -567,13 +628,6 @@ class KnowledgeVaultManager:
             else:
                 caption_embedding = None
                 embedding_config = None
-
-            # Set client_id from actor, user_id with fallback to DEFAULT_USER_ID
-            from mirix.services.user_manager import UserManager
-
-            client_id = actor.id  # Always derive from actor
-            if user_id is None:
-                user_id = UserManager.ADMIN_USER_ID
 
             knowledge = await self.create_item(
                 PydanticKnowledgeVaultItem(
@@ -601,6 +655,31 @@ class KnowledgeVaultManager:
 
     async def get_total_number_of_items(self, user: PydanticUser) -> int:
         """Get the total number of items in the knowledge vault for the user."""
+        from mirix.database.search_provider import get_search_provider
+
+        search_provider = get_search_provider()
+        if search_provider:
+            from mirix.database.call_context import CALL_ORIGIN_CLIENT_API, get_call_origin
+            from mirix.database.relational_provider import get_relational_provider
+
+            call_origin = get_call_origin()
+            if call_origin == CALL_ORIGIN_CLIENT_API:
+                return await search_provider.count(
+                    "knowledge_vault",
+                    user_id=user.id,
+                    organization_id=user.organization_id,
+                )
+            from mirix.services.hybrid_search_helper import hybrid_count
+
+            relational_provider = get_relational_provider()
+            return await hybrid_count(
+                table="knowledge_vault",
+                search_provider=search_provider,
+                relational_provider=relational_provider,
+                user_id=user.id,
+                organization_id=user.organization_id,
+            )
+
         async with self.session_maker() as session:
             query = select(func.count(KnowledgeVaultItem.id)).where(KnowledgeVaultItem.user_id == user.id)
             result = await session.execute(query)
@@ -660,6 +739,51 @@ class KnowledgeVaultManager:
 
         # Extract organization_id from user for multi-tenant isolation
         organization_id = user.organization_id
+
+        from mirix.database.search_provider import get_search_provider
+
+        search_provider = get_search_provider()
+        if search_provider:
+            from mirix.database.call_context import CALL_ORIGIN_CLIENT_API, get_call_origin
+            from mirix.database.relational_provider import get_relational_provider
+
+            call_origin = get_call_origin()
+            if call_origin == CALL_ORIGIN_CLIENT_API:
+                results, _cursor = await search_provider.search(
+                    "knowledge_vault",
+                    query_text=query,
+                    query_embedding=embedded_text,
+                    search_method=search_method,
+                    search_field=search_field,
+                    user_id=user.id,
+                    organization_id=organization_id,
+                    filter_tags=filter_tags,
+                    scopes=scopes,
+                    limit=limit,
+                    similarity_threshold=similarity_threshold,
+                    sensitivity=sensitivity,
+                )
+                return [PydanticKnowledgeVaultItem(**r) for r in results]
+            from mirix.services.hybrid_search_helper import hybrid_search
+
+            relational_provider = get_relational_provider()
+            results = await hybrid_search(
+                table="knowledge_vault",
+                search_provider=search_provider,
+                relational_provider=relational_provider,
+                query_text=query,
+                query_embedding=embedded_text,
+                search_method=search_method,
+                search_field=search_field,
+                user_id=user.id,
+                organization_id=organization_id,
+                filter_tags=filter_tags,
+                scopes=scopes,
+                limit=limit,
+                similarity_threshold=similarity_threshold,
+                sensitivity=sensitivity,
+            )
+            return [PydanticKnowledgeVaultItem(**r) for r in results]
 
         # Try Redis Search first (if cache enabled and Redis is available)
         from mirix.database.redis_client import get_redis_client
@@ -948,6 +1072,13 @@ class KnowledgeVaultManager:
     @enforce_types
     async def delete_knowledge_by_id(self, knowledge_vault_item_id: str, actor: PydanticClient) -> None:
         """Delete a knowledge vault item by ID (removes from cache)."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            await provider.delete("knowledge_vault", knowledge_vault_item_id)
+            return
+
         async with self.session_maker() as session:
             try:
                 item = await KnowledgeVaultItem.read(
@@ -976,7 +1107,22 @@ class KnowledgeVaultManager:
         Returns:
             Number of records deleted
         """
+        from mirix.database.relational_provider import get_relational_provider
         from mirix.database.redis_client import get_redis_client
+
+        provider = get_relational_provider()
+        if provider:
+            records = await provider.list(
+                "knowledge_vault",
+                filter_tags=None,
+                limit=5000,
+                _created_by_id=actor.id,
+            )
+            ids = [r.get("id") for r in records if r.get("id")]
+            if not ids:
+                return 0
+            result = await provider.bulk_delete("knowledge_vault", ids, soft=False)
+            return int(result.get("success", 0) or 0)
 
         async with self.session_maker() as session:
             # Get IDs for Redis cleanup (only fetch IDs, not full objects)
@@ -1017,7 +1163,22 @@ class KnowledgeVaultManager:
         Returns:
             Number of records soft deleted
         """
+        from mirix.database.relational_provider import get_relational_provider
         from mirix.database.redis_client import get_redis_client
+
+        provider = get_relational_provider()
+        if provider:
+            records = await provider.list(
+                "knowledge_vault",
+                filter_tags=None,
+                limit=5000,
+                _created_by_id=actor.id,
+            )
+            ids = [r.get("id") for r in records if r.get("id")]
+            if not ids:
+                return 0
+            result = await provider.bulk_delete("knowledge_vault", ids, soft=True)
+            return int(result.get("success", 0) or 0)
 
         async with self.session_maker() as session:
             # Query all non-deleted records for this client (use actor.id)
@@ -1064,7 +1225,22 @@ class KnowledgeVaultManager:
         Returns:
             Number of records soft deleted
         """
+        from mirix.database.relational_provider import get_relational_provider
         from mirix.database.redis_client import get_redis_client
+
+        provider = get_relational_provider()
+        if provider:
+            records = await provider.list(
+                "knowledge_vault",
+                user_id=user_id,
+                filter_tags=None,
+                limit=5000,
+            )
+            ids = [r.get("id") for r in records if r.get("id")]
+            if not ids:
+                return 0
+            result = await provider.bulk_delete("knowledge_vault", ids, soft=True)
+            return int(result.get("success", 0) or 0)
 
         async with self.session_maker() as session:
             # Query all non-deleted records for this user
@@ -1112,7 +1288,22 @@ class KnowledgeVaultManager:
         Returns:
             Number of records deleted
         """
+        from mirix.database.relational_provider import get_relational_provider
         from mirix.database.redis_client import get_redis_client
+
+        provider = get_relational_provider()
+        if provider:
+            records = await provider.list(
+                "knowledge_vault",
+                user_id=user_id,
+                filter_tags=None,
+                limit=5000,
+            )
+            ids = [r.get("id") for r in records if r.get("id")]
+            if not ids:
+                return 0
+            result = await provider.bulk_delete("knowledge_vault", ids, soft=False)
+            return int(result.get("success", 0) or 0)
 
         async with self.session_maker() as session:
             # Get IDs for Redis cleanup (only fetch IDs, not full objects)
@@ -1159,6 +1350,51 @@ class KnowledgeVaultManager:
         similarity_threshold: Optional[float] = None,
     ) -> List[PydanticKnowledgeVaultItem]:
         """List knowledge vault items across ALL users in an organization."""
+        from mirix.database.search_provider import get_search_provider
+
+        search_provider = get_search_provider()
+        if search_provider:
+            from mirix.database.call_context import CALL_ORIGIN_CLIENT_API, get_call_origin
+            from mirix.database.relational_provider import get_relational_provider
+
+            call_origin = get_call_origin()
+            if call_origin == CALL_ORIGIN_CLIENT_API:
+                results, _cursor = await search_provider.search(
+                    "knowledge_vault",
+                    query_text=query,
+                    query_embedding=embedded_text,
+                    search_method=search_method,
+                    search_field=search_field,
+                    user_id=None,
+                    organization_id=organization_id,
+                    filter_tags=filter_tags,
+                    scopes=scopes,
+                    limit=limit,
+                    similarity_threshold=similarity_threshold,
+                    sensitivity=sensitivity,
+                )
+                return [PydanticKnowledgeVaultItem(**r) for r in results]
+            from mirix.services.hybrid_search_helper import hybrid_search
+
+            relational_provider = get_relational_provider()
+            results = await hybrid_search(
+                table="knowledge_vault",
+                search_provider=search_provider,
+                relational_provider=relational_provider,
+                query_text=query,
+                query_embedding=embedded_text,
+                search_method=search_method,
+                search_field=search_field,
+                user_id=None,
+                organization_id=organization_id,
+                filter_tags=filter_tags,
+                scopes=scopes,
+                limit=limit,
+                similarity_threshold=similarity_threshold,
+                sensitivity=sensitivity,
+            )
+            return [PydanticKnowledgeVaultItem(**r) for r in results]
+
         from mirix.database.redis_client import get_redis_client
 
         redis_client = get_redis_client()

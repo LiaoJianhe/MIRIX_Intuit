@@ -57,6 +57,18 @@ class ToolManager:
     @enforce_types
     async def create_tool(self, pydantic_tool: PydanticTool, actor: PydanticClient) -> PydanticTool:
         """Create a new tool (async)."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            pydantic_tool.organization_id = actor.organization_id
+            if pydantic_tool.description is None:
+                pydantic_tool.description = pydantic_tool.json_schema.get("description", None)
+            tool_data = pydantic_tool.model_dump()
+            tool_data["_created_by_id"] = actor.id
+            result = await provider.create("tools", tool_data)
+            return PydanticTool(**result)
+
         async with self.session_maker() as session:
             pydantic_tool.organization_id = actor.organization_id
             if pydantic_tool.description is None:
@@ -68,7 +80,54 @@ class ToolManager:
 
     @enforce_types
     async def get_tool_by_id(self, tool_id: str, actor: PydanticClient) -> PydanticTool:
-        """Fetch a tool by its ID (async)."""
+        """Fetch a tool by its ID (async, with read-through cache on IPS path)."""
+        from mirix.database.cache_provider import get_cache_provider
+        from mirix.database.relational_provider import get_relational_provider
+        from mirix.log import get_logger
+
+        logger = get_logger(__name__)
+        cache_provider = get_cache_provider()
+
+        if cache_provider:
+            try:
+                cache_key = f"{cache_provider.TOOL_PREFIX}{tool_id}"
+                cached = await cache_provider.get_hash(cache_key)
+                if cached:
+                    import json as _json
+
+                    if "json_schema" in cached and isinstance(cached["json_schema"], str):
+                        cached["json_schema"] = _json.loads(cached["json_schema"])
+                    if "tags" in cached and isinstance(cached["tags"], str):
+                        cached["tags"] = _json.loads(cached["tags"])
+                    return PydanticTool(**cached)
+            except Exception as e:
+                logger.warning("Cache read failed for tool %s: %s", tool_id, e)
+
+        provider = get_relational_provider()
+        if provider:
+            result = await provider.read("tools", tool_id)
+            if result is None:
+                raise NoResultFound(f"Tool {tool_id} not found")
+            tool = PydanticTool(**result)
+
+            if cache_provider:
+                try:
+                    import json as _json
+
+                    from mirix.settings import settings
+
+                    data = tool.model_dump(mode="json")
+                    if "json_schema" in data and data["json_schema"]:
+                        data["json_schema"] = _json.dumps(data["json_schema"])
+                    if "tags" in data and data["tags"]:
+                        data["tags"] = _json.dumps(data["tags"])
+                    cache_key = f"{cache_provider.TOOL_PREFIX}{tool_id}"
+                    await cache_provider.set_hash(cache_key, data, ttl=settings.redis_ttl_tools)
+                except Exception as e:
+                    logger.warning("Failed to populate cache for tool %s: %s", tool_id, e)
+
+            return tool
+
         async with self.session_maker() as session:
             tool = await ToolModel.read(db_session=session, identifier=tool_id, actor=actor)
             return tool.to_pydantic()
@@ -77,6 +136,17 @@ class ToolManager:
     async def get_tool_by_name(self, tool_name: str, actor: PydanticClient) -> Optional[PydanticTool]:
         """Retrieve a tool by name (async)."""
         try:
+            from mirix.database.relational_provider import get_relational_provider
+
+            provider = get_relational_provider()
+            if provider:
+                results = await provider.list(
+                    "tools",
+                    organization_id=actor.organization_id,
+                    limit=1,
+                    name=tool_name,
+                )
+                return PydanticTool(**results[0]) if results else None
             async with self.session_maker() as session:
                 tool = await ToolModel.read(db_session=session, name=tool_name, actor=actor)
                 return tool.to_pydantic()
@@ -91,6 +161,17 @@ class ToolManager:
         limit: Optional[int] = 50,
     ) -> List[PydanticTool]:
         """List all tools with optional pagination using cursor and limit."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            results = await provider.list(
+                "tools",
+                organization_id=actor.organization_id,
+                limit=limit,
+            )
+            return [PydanticTool(**r) for r in results]
+
         async with self.session_maker() as session:
             tools = await ToolModel.list(
                 db_session=session,
@@ -103,6 +184,17 @@ class ToolManager:
     @enforce_types
     async def update_tool_by_id(self, tool_id: str, tool_update: ToolUpdate, actor: PydanticClient) -> PydanticTool:
         """Update a tool by its ID (async)."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            update_data = tool_update.model_dump(exclude_none=True)
+            if "source_code" in update_data and "json_schema" not in update_data:
+                new_schema = derive_openai_json_schema(source_code=update_data.get("source_code"))
+                update_data["json_schema"] = new_schema
+            result = await provider.update("tools", tool_id, update_data)
+            return PydanticTool(**result)
+
         async with self.session_maker() as session:
             tool = await ToolModel.read(db_session=session, identifier=tool_id, actor=actor)
             update_data = tool_update.model_dump(exclude_none=True)
@@ -118,6 +210,13 @@ class ToolManager:
     @enforce_types
     async def delete_tool_by_id(self, tool_id: str, actor: PydanticClient) -> None:
         """Delete a tool by its ID."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            await provider.hard_delete("tools", tool_id)
+            return
+
         async with self.session_maker() as session:
             try:
                 tool = await ToolModel.read(db_session=session, identifier=tool_id, actor=actor)

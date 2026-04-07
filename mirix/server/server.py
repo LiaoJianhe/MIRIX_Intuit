@@ -366,7 +366,7 @@ if not USE_PGLITE:
 # ========================================================================
 # Initialize Redis client for caching and vector search after database setup
 # This provides:
-# - 40-60% faster operations for blocks/messages via Hash
+# - Fast Hash-based caching for block (memory) and messages (engine)
 # - 10-40x faster vector similarity search vs pgvector
 # - Hybrid text+vector search capabilities
 

@@ -50,6 +50,16 @@ class ProviderManager:
     @enforce_types
     async def create_provider(self, provider: PydanticProvider, actor: PydanticClient) -> PydanticProvider:
         """Create a new provider if it doesn't already exist."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        rp = get_relational_provider()
+        if rp:
+            provider.organization_id = actor.organization_id
+            provider.resolve_identifier()
+            provider_data = provider.model_dump(exclude_unset=True)
+            provider_data["_created_by_id"] = actor.id
+            result = await rp.create("providers", provider_data)
+            return PydanticProvider(**result)
         async with self.session_maker() as session:
             provider.organization_id = actor.organization_id
             provider.resolve_identifier()
@@ -62,6 +72,13 @@ class ProviderManager:
         self, provider_id: str, provider_update: ProviderUpdate, actor: PydanticClient
     ) -> PydanticProvider:
         """Update provider details."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        rp = get_relational_provider()
+        if rp:
+            update_data = provider_update.model_dump(exclude_unset=True, exclude_none=True)
+            result = await rp.update("providers", provider_id, update_data)
+            return PydanticProvider(**result)
         async with self.session_maker() as session:
             existing_provider = await ProviderModel.read(db_session=session, identifier=provider_id, actor=actor)
             update_data = provider_update.model_dump(exclude_unset=True, exclude_none=True)
@@ -73,6 +90,13 @@ class ProviderManager:
     @enforce_types
     async def delete_provider_by_id(self, provider_id: str, actor: PydanticClient) -> None:
         """Delete a provider."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        rp = get_relational_provider()
+        if rp:
+            await rp.update("providers", provider_id, {"api_key": None})
+            await rp.delete("providers", provider_id, soft=True)
+            return
         async with self.session_maker() as session:
             existing_provider = await ProviderModel.read(db_session=session, identifier=provider_id, actor=actor)
             existing_provider.api_key = None
@@ -88,6 +112,12 @@ class ProviderManager:
         actor: PydanticClient = None,
     ) -> List[PydanticProvider]:
         """List all providers with optional pagination."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        rp = get_relational_provider()
+        if rp:
+            results = await rp.list("providers", limit=limit)
+            return [PydanticProvider(**r) for r in results]
         async with self.session_maker() as session:
             providers = await ProviderModel.list(
                 db_session=session,

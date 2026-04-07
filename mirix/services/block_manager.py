@@ -54,6 +54,25 @@ class BlockManager:
         if "scope" not in filter_tags and actor.write_scope:
             filter_tags["scope"] = actor.write_scope
 
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            existing = await provider.read("block", block.id)
+            if existing:
+                update_data = BlockUpdate(**block.model_dump(exclude_none=True))
+                return await self.update_block(block.id, update_data, actor, user=user)
+            data = block.model_dump(
+                exclude_none=True,
+                exclude={"organization_id", "user_id", "filter_tags"},
+            )
+            final_user_id = user.id if user else None
+            data["organization_id"] = actor.organization_id
+            data["user_id"] = final_user_id
+            data["filter_tags"] = filter_tags or None
+            result = await provider.create("block", data)
+            return PydanticBlock(**result)
+
         db_block = await self.get_block_by_id(block.id, user=None)
         if db_block:
             update_data = BlockUpdate(**block.model_dump(exclude_none=True))
@@ -175,6 +194,20 @@ class BlockManager:
             actor: Client for audit trail (last_updated_by_id)
             user: Optional user if updating user field
         """
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            existing = await provider.read("block", block_id)
+            if existing is None:
+                raise NoResultFound(f"Block {block_id} not found")
+            update_data = block_update.model_dump(exclude_unset=True, exclude_none=True)
+            if user is not None:
+                update_data["user_id"] = user.id
+            update_data["last_updated_by_id"] = actor.id
+            result = await provider.update("block", block_id, update_data)
+            return PydanticBlock(**result)
+
         async with self.session_maker() as session:
             block = await BlockModel.read(
                 db_session=session, identifier=block_id, actor=actor, user=user, access_type=AccessType.USER
@@ -202,6 +235,16 @@ class BlockManager:
         """
         Update only the filter_tags on a block and persist to DB + cache.
         """
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            existing = await provider.read("block", block_id)
+            if existing is None:
+                raise NoResultFound(f"Block {block_id} not found")
+            await provider.update("block", block_id, {"filter_tags": new_filter_tags})
+            return
+
         async with self.session_maker() as session:
             block = await BlockModel.read(
                 db_session=session, identifier=block_id, actor=actor, user=user, access_type=AccessType.USER
@@ -212,6 +255,17 @@ class BlockManager:
     @enforce_types
     async def delete_block(self, block_id: str, actor: PydanticClient) -> PydanticBlock:
         """Delete a block by its ID (removes from cache)."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            existing = await provider.read("block", block_id)
+            if existing is None:
+                raise NoResultFound(f"Block {block_id} not found")
+            await provider.delete("block", block_id)
+            await self._invalidate_block_cache(block_id)
+            return PydanticBlock(**existing)
+
         from mirix.database.cache_provider import get_cache_provider
 
         async with self.session_maker() as session:
@@ -264,6 +318,125 @@ class BlockManager:
             filter_tags_set_on_create: Optional dict; applied only when new blocks are created (e.g. from
                               default user template). Existing blocks are never updated.
         """
+        from mirix.database.search_provider import get_search_provider
+
+        search_provider = get_search_provider()
+        if search_provider:
+            from mirix.database.call_context import CALL_ORIGIN_CLIENT_API, get_call_origin
+            from mirix.database.relational_provider import get_relational_provider
+
+            search_kwargs: Dict[str, Any] = {}
+            if label is not None:
+                search_kwargs["label"] = label
+            if id is not None:
+                search_kwargs["id"] = id
+            if cursor is not None:
+                search_kwargs["cursor"] = cursor
+
+            call_origin = get_call_origin()
+            effective_limit = limit or 50
+
+            if user is None:
+                if organization_id is None or any_scopes is None or not any_scopes:
+                    return []
+                if call_origin == CALL_ORIGIN_CLIENT_API:
+                    results, _next = await search_provider.search(
+                        "block",
+                        query_text="",
+                        search_method="string_match",
+                        search_field="",
+                        user_id=None,
+                        organization_id=organization_id,
+                        filter_tags=filter_tags,
+                        scopes=any_scopes,
+                        limit=effective_limit,
+                        **search_kwargs,
+                    )
+                else:
+                    from mirix.services.hybrid_search_helper import hybrid_search
+
+                    relational_provider = get_relational_provider()
+                    results = await hybrid_search(
+                        table="block",
+                        search_provider=search_provider,
+                        relational_provider=relational_provider,
+                        query_text="",
+                        search_method="string_match",
+                        search_field="",
+                        user_id=None,
+                        organization_id=organization_id,
+                        filter_tags=filter_tags,
+                        scopes=any_scopes,
+                        limit=effective_limit,
+                        **search_kwargs,
+                    )
+                return [PydanticBlock(**r) for r in results]
+
+            org_id = user.organization_id
+            if any_scopes is not None and not any_scopes:
+                return []
+
+            if any_scopes is not None:
+                scope_list = any_scopes
+            else:
+                scope_list = None
+
+            if call_origin == CALL_ORIGIN_CLIENT_API:
+                results, _next = await search_provider.search(
+                    "block",
+                    query_text="",
+                    search_method="string_match",
+                    search_field="",
+                    user_id=user.id,
+                    organization_id=org_id,
+                    filter_tags=filter_tags,
+                    scopes=scope_list,
+                    limit=effective_limit,
+                    **search_kwargs,
+                )
+            else:
+                from mirix.services.hybrid_search_helper import hybrid_search
+
+                relational_provider = get_relational_provider()
+                results = await hybrid_search(
+                    table="block",
+                    search_provider=search_provider,
+                    relational_provider=relational_provider,
+                    query_text="",
+                    search_method="string_match",
+                    search_field="",
+                    user_id=user.id,
+                    organization_id=org_id,
+                    filter_tags=filter_tags,
+                    scopes=scope_list,
+                    limit=effective_limit,
+                    **search_kwargs,
+                )
+            pydantic_blocks = [PydanticBlock(**r) for r in results]
+            if (
+                not pydantic_blocks
+                and auto_create_from_default
+                and any_scopes
+                and len(any_scopes) == 1
+            ):
+                async with self.session_maker() as session:
+                    scope = any_scopes[0]
+                    assert org_id is not None
+                    logger.debug(
+                        "No blocks found for user %s, scope %s. Creating from default user template.",
+                        user.id,
+                        scope,
+                    )
+                    blocks = await self._copy_blocks_from_default_user(
+                        session=session,
+                        target_user=user,
+                        scope=scope,
+                        organization_id=org_id,
+                        block_filter_tags=filter_tags_set_on_create,
+                    )
+                    return [b.to_pydantic() for b in blocks]
+            return pydantic_blocks
+
         async with self.session_maker() as session:
             # Org-wide path: user is None — require organization_id and any_scopes
             if user is None:
@@ -460,6 +633,15 @@ class BlockManager:
     @enforce_types
     async def get_block_by_id(self, block_id: str, user: Optional[PydanticUser] = None) -> Optional[PydanticBlock]:
         """Retrieve a block by its ID (with cache - Redis or IPS Cache)."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            result = await provider.read("block", block_id)
+            if result is None:
+                return None
+            return PydanticBlock(**result)
+
         cache_provider = None
         try:
             from mirix.database.cache_provider import get_cache_provider
@@ -520,7 +702,22 @@ class BlockManager:
         Returns:
             Number of records soft deleted
         """
+        from mirix.database.relational_provider import get_relational_provider
         from mirix.database.redis_client import get_redis_client
+
+        provider = get_relational_provider()
+        if provider:
+            records = await provider.list(
+                "block",
+                user_id=user_id,
+                filter_tags=None,
+                limit=5000,
+            )
+            ids = [r.get("id") for r in records if r.get("id")]
+            if not ids:
+                return 0
+            result = await provider.bulk_delete("block", ids, soft=True)
+            return int(result.get("success", 0) or 0)
 
         async with self.session_maker() as session:
             stmt = select(BlockModel).where(
@@ -568,7 +765,22 @@ class BlockManager:
         """
         from sqlalchemy import delete
 
+        from mirix.database.relational_provider import get_relational_provider
         from mirix.database.redis_client import get_redis_client
+
+        provider = get_relational_provider()
+        if provider:
+            records = await provider.list(
+                "block",
+                user_id=user_id,
+                filter_tags=None,
+                limit=5000,
+            )
+            ids = [r.get("id") for r in records if r.get("id")]
+            if not ids:
+                return 0
+            result = await provider.bulk_delete("block", ids, soft=False)
+            return int(result.get("success", 0) or 0)
 
         async with self.session_maker() as session:
             stmt = select(BlockModel.id).where(BlockModel.user_id == user_id)

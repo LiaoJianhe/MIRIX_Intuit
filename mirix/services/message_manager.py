@@ -44,6 +44,25 @@ class MessageManager:
         except Exception as e:
             logger.warning("Cache read failed for message %s: %s", message_id, e)
 
+        from mirix.database.relational_provider import get_relational_provider
+
+        rprovider = get_relational_provider()
+        if rprovider:
+            result = await rprovider.read("messages", message_id)
+            if result is None:
+                return None
+            pydantic_message = PydanticMessage(**result)
+            try:
+                if cache_provider:
+                    from mirix.settings import settings
+
+                    cache_key = f"{cache_provider.MESSAGE_PREFIX}{message_id}"
+                    data = pydantic_message.model_dump(mode="json")
+                    await cache_provider.set_hash(cache_key, data, ttl=settings.redis_ttl_messages)
+            except Exception as e:
+                logger.warning("Failed to populate cache for message %s: %s", message_id, e)
+            return pydantic_message
+
         # Cache MISS or no cache - fetch from PostgreSQL
         async with self.session_maker() as session:
             try:
@@ -102,6 +121,24 @@ class MessageManager:
             client_id: Optional client_id for data scoping (defaults to actor.id)
             user_id: Optional user_id for data scoping (defaults to None)
         """
+        from mirix.database.relational_provider import get_relational_provider
+
+        rprovider = get_relational_provider()
+        if rprovider:
+            pydantic_msg.organization_id = actor.organization_id
+            if client_id:
+                pydantic_msg.client_id = client_id
+            elif not pydantic_msg.client_id:
+                pydantic_msg.client_id = actor.id
+            if user_id is not None:
+                pydantic_msg.user_id = user_id
+            elif not pydantic_msg.user_id:
+                from mirix.services.user_manager import UserManager
+
+                pydantic_msg.user_id = UserManager.ADMIN_USER_ID
+            msg_data = pydantic_msg.model_dump()
+            result = await rprovider.create("messages", msg_data)
+            return PydanticMessage(**result)
         async with self.session_maker() as session:
             # Set the organization id of the Pydantic message
             pydantic_msg.organization_id = actor.organization_id
@@ -144,6 +181,13 @@ class MessageManager:
         """
         Updates an existing record in the database with values from the provided record object.
         """
+        from mirix.database.relational_provider import get_relational_provider
+
+        rprovider = get_relational_provider()
+        if rprovider:
+            update_data = message_update.model_dump(exclude_unset=True, exclude_none=True)
+            result = await rprovider.update("messages", message_id, update_data)
+            return PydanticMessage(**result)
         async with self.session_maker() as session:
             # Fetch existing message from database
             message = await MessageModel.read(
@@ -176,6 +220,18 @@ class MessageManager:
     @enforce_types
     async def delete_message_by_id(self, message_id: str, actor: PydanticClient) -> bool:
         """Delete a message (removes from cache)."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        rprovider = get_relational_provider()
+        if rprovider:
+            await rprovider.hard_delete("messages", message_id)
+            from mirix.database.cache_provider import get_cache_provider
+
+            cache_provider = get_cache_provider()
+            if cache_provider:
+                cache_key = f"{cache_provider.MESSAGE_PREFIX}{message_id}"
+                await cache_provider.delete(cache_key)
+            return
         async with self.session_maker() as session:
             try:
                 msg = await MessageModel.read(

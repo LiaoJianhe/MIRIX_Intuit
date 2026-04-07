@@ -16,6 +16,24 @@ class CloudFileMappingManager:
 
     async def add_mapping(self, cloud_file_id, local_file_id, timestamp, force_add=False):
         """Add a mapping from a cloud file to a local file."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            import uuid as _uuid
+
+            from mirix.services.organization_manager import OrganizationManager
+
+            mapping_data = {
+                "id": str(_uuid.uuid4()),
+                "cloud_file_id": cloud_file_id,
+                "local_file_id": local_file_id,
+                "status": "uploaded",
+                "timestamp": timestamp,
+                "organization_id": OrganizationManager.DEFAULT_ORG_ID,
+            }
+            result = await provider.create("cloud_file_mapping", mapping_data)
+            return PydanticCloudFileMapping(**result)
         async with self.session_maker() as session:
             try:
                 existing = await CloudFileMapping.read(db_session=session, cloud_file_id=cloud_file_id)
@@ -54,6 +72,18 @@ class CloudFileMappingManager:
 
     async def get_local_file(self, cloud_file_id):
         """Get the local file ID for a cloud file."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            results = await provider.list(
+                "cloud_file_mapping",
+                limit=1,
+                cloud_file_id=cloud_file_id,
+            )
+            if results:
+                return results[0].get("local_file_id")
+            return None
         async with self.session_maker() as session:
             try:
                 mapping = await CloudFileMapping.read(db_session=session, cloud_file_id=cloud_file_id)
@@ -63,6 +93,18 @@ class CloudFileMappingManager:
 
     async def get_cloud_file(self, local_file_id):
         """Get the cloud file ID for a local file."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            results = await provider.list(
+                "cloud_file_mapping",
+                limit=1,
+                local_file_id=local_file_id,
+            )
+            if results:
+                return results[0].get("cloud_file_id")
+            return None
         async with self.session_maker() as session:
             try:
                 mapping = await CloudFileMapping.read(db_session=session, local_file_id=local_file_id)
@@ -72,6 +114,19 @@ class CloudFileMappingManager:
 
     async def delete_mapping(self, cloud_file_id=None, local_file_id=None) -> None:
         """Delete a mapping."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            if cloud_file_id is not None:
+                results = await provider.list("cloud_file_mapping", limit=1, cloud_file_id=cloud_file_id)
+                if results:
+                    await provider.hard_delete("cloud_file_mapping", results[0]["id"])
+            if local_file_id is not None:
+                results = await provider.list("cloud_file_mapping", limit=1, local_file_id=local_file_id)
+                if results:
+                    await provider.hard_delete("cloud_file_mapping", results[0]["id"])
+            return
         async with self.session_maker() as session:
             if cloud_file_id is not None:
                 try:

@@ -31,6 +31,33 @@ class UserManager:
     @enforce_types
     async def create_admin_user(self, org_id: str = OrganizationManager.DEFAULT_ORG_ID) -> PydanticUser:
         """Create the admin user (async)."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            # Verify the organization exists in IPS Relational
+            org = await provider.read("organizations", org_id)
+            if org is None:
+                raise ValueError(f"No organization with {org_id} exists in the organization table.")
+
+            # Return existing admin user if already present
+            existing = await provider.read("users", self.ADMIN_USER_ID)
+            if existing:
+                return PydanticUser(**existing)
+
+            result = await provider.create(
+                "users",
+                {
+                    "id": self.ADMIN_USER_ID,
+                    "name": self.ADMIN_USER_NAME,
+                    "status": "active",
+                    "timezone": self.DEFAULT_TIME_ZONE,
+                    "organization_id": org_id,
+                    "is_admin": True,
+                },
+            )
+            return PydanticUser(**result)
+
         async with self.session_maker() as session:
             try:
                 await OrganizationModel.read(db_session=session, identifier=org_id)
@@ -59,6 +86,14 @@ class UserManager:
         Args:
             pydantic_user: The user data
         """
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            user_data = pydantic_user.model_dump()
+            result = await provider.create("users", user_data)
+            return PydanticUser(**result)
+
         async with self.session_maker() as session:
             user_data = pydantic_user.model_dump()
             new_user = UserModel(**user_data)
@@ -68,6 +103,14 @@ class UserManager:
     @enforce_types
     async def update_user(self, user_update: UserUpdate) -> PydanticUser:
         """Update user details (with cache invalidation)."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            update_data = user_update.model_dump(exclude_unset=True, exclude_none=True)
+            result = await provider.update("users", user_update.id, update_data)
+            return PydanticUser(**result)
+
         async with self.session_maker() as session:
             existing_user = await UserModel.read(db_session=session, identifier=user_update.id)
             update_data = user_update.model_dump(exclude_unset=True, exclude_none=True)
@@ -79,6 +122,13 @@ class UserManager:
     @enforce_types
     async def update_user_timezone(self, timezone_str: str, user_id: str) -> PydanticUser:
         """Update the timezone of a user (with cache invalidation)."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            result = await provider.update("users", user_id, {"timezone": timezone_str})
+            return PydanticUser(**result)
+
         async with self.session_maker() as session:
             existing_user = await UserModel.read(db_session=session, identifier=user_id)
             existing_user.timezone = timezone_str
@@ -88,6 +138,13 @@ class UserManager:
     @enforce_types
     async def update_user_status(self, user_id: str, status: str) -> PydanticUser:
         """Update the status of a user (with cache invalidation)."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            result = await provider.update("users", user_id, {"status": status})
+            return PydanticUser(**result)
+
         async with self.session_maker() as session:
             existing_user = await UserModel.read(db_session=session, identifier=user_id)
             existing_user.status = status
@@ -119,11 +176,54 @@ class UserManager:
         Args:
             user_id: ID of the user to soft delete
         """
-        from mirix.database.redis_client import get_redis_client
         from mirix.log import get_logger
 
         logger = get_logger(__name__)
         logger.info("Soft deleting user %s and all associated records using memory managers...", user_id)
+
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            memory_tables = [
+                "episodic_memory",
+                "semantic_memory",
+                "procedural_memory",
+                "resource_memory",
+                "knowledge_vault",
+                "messages",
+                "block",
+            ]
+            soft_deleted = 0
+            for table in memory_tables:
+                records = await provider.list(
+                    table, user_id=user_id, filter_tags=None, limit=5000
+                )
+                ids = [r.get("id") for r in records if r.get("id")]
+                if not ids:
+                    continue
+                result = await provider.bulk_delete(table, ids, soft=True)
+                soft_deleted += int(result.get("success", 0) or 0)
+
+            # Soft delete user record through provider path.
+            await provider.delete("users", user_id, soft=True)
+
+            # Invalidate user cache using cache provider abstraction.
+            try:
+                from mirix.database.cache_provider import get_cache_provider
+
+                cache_provider = get_cache_provider()
+                if cache_provider:
+                    await cache_provider.delete(f"{cache_provider.USER_PREFIX}{user_id}")
+            except Exception as e:
+                logger.warning("Failed to invalidate user cache for %s: %s", user_id, e)
+
+            logger.info(
+                "Soft deleted user %s via provider path (%d related records)",
+                user_id,
+                soft_deleted,
+            )
+            return
 
         # Import memory managers
         from mirix.services.block_manager import BlockManager
@@ -180,24 +280,26 @@ class UserManager:
 
             # 3. Invalidate Redis cache (remove key so soft-deleted user is not served from cache)
             try:
-                redis_client = get_redis_client()
-                if redis_client:
-                    user_key = f"{redis_client.USER_PREFIX}{user_id}"
-                    await redis_client.delete(user_key)
+                from mirix.database.cache_provider import get_cache_provider
+
+                cache_provider = get_cache_provider()
+                if cache_provider:
+                    user_key = f"{cache_provider.USER_PREFIX}{user_id}"
+                    await cache_provider.delete(user_key)
                     logger.debug("Removed soft-deleted user %s from cache", user_id)
 
-                    logger.info(
-                        "User %s and all associated records soft deleted: "
-                        "%d episodic, %d semantic, %d procedural, %d resource, %d knowledge_vault, %d messages, %d blocks",
-                        user_id,
-                        episodic_count,
-                        semantic_count,
-                        procedural_count,
-                        resource_count,
-                        knowledge_count,
-                        message_count,
-                        block_count,
-                    )
+                logger.info(
+                    "User %s and all associated records soft deleted: "
+                    "%d episodic, %d semantic, %d procedural, %d resource, %d knowledge_vault, %d messages, %d blocks",
+                    user_id,
+                    episodic_count,
+                    semantic_count,
+                    procedural_count,
+                    resource_count,
+                    knowledge_count,
+                    message_count,
+                    block_count,
+                )
             except Exception as e:
                 logger.warning("Failed to update cache for user %s: %s", user_id, e)
 
@@ -230,6 +332,39 @@ class UserManager:
 
         logger = get_logger(__name__)
         logger.info("Bulk deleting memories for user %s using memory managers (preserving user record)...", user_id)
+
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            memory_tables = [
+                "episodic_memory",
+                "semantic_memory",
+                "procedural_memory",
+                "resource_memory",
+                "knowledge_vault",
+                "messages",
+                "block",
+            ]
+            total_deleted = 0
+            for table in memory_tables:
+                records = await provider.list(
+                    table, user_id=user_id, filter_tags=None, limit=5000
+                )
+                ids = [r.get("id") for r in records if r.get("id")]
+                if not ids:
+                    continue
+                result = await provider.bulk_delete(table, ids, soft=False)
+                deleted = int(result.get("success", 0) or 0)
+                total_deleted += deleted
+                logger.debug("Bulk deleted %d %s records via provider", deleted, table)
+
+            logger.info(
+                "Bulk deleted memories for user %s via provider path (%d records)",
+                user_id,
+                total_deleted,
+            )
+            return
 
         # Import managers
         from mirix.services.block_manager import BlockManager
@@ -334,6 +469,25 @@ class UserManager:
         except Exception as e:
             logger.warning("Cache read failed for user %s: %s", user_id, e)
 
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            result = await provider.read("users", user_id)
+            if result is None:
+                raise NoResultFound(f"User {user_id} not found")
+            pydantic_user = PydanticUser(**result)
+            try:
+                if cache_provider:
+                    from mirix.settings import settings
+
+                    cache_key = f"{cache_provider.USER_PREFIX}{user_id}"
+                    data = pydantic_user.model_dump(mode="json")
+                    await cache_provider.set_hash(cache_key, data, ttl=settings.redis_ttl_users)
+            except Exception as e:
+                logger.warning("Failed to populate cache for user %s: %s", user_id, e)
+            return pydantic_user
+
         async with self.session_maker() as session:
             user = await UserModel.read(db_session=session, identifier=user_id)
             pydantic_user = user.to_pydantic()
@@ -377,6 +531,43 @@ class UserManager:
         Returns:
             PydanticUser: The default user for this organization
         """
+        from mirix.database.relational_provider import get_relational_provider
+
+        # Deterministic ID keeps get-or-create idempotent in both backends
+        default_user_id = f"user-default-{org_id}"
+
+        provider = get_relational_provider()
+        if provider:
+            existing = await provider.read("users", default_user_id)
+            if existing:
+                logger.debug("Found existing default user %s for organization %s", default_user_id, org_id)
+                return PydanticUser(**existing)
+
+            logger.info("Creating default template user for organization %s", org_id)
+            try:
+                result = await provider.create(
+                    "users",
+                    {
+                        "id": default_user_id,
+                        "name": self.DEFAULT_USER_NAME,
+                        "status": "active",
+                        "timezone": self.DEFAULT_TIME_ZONE,
+                        "organization_id": org_id,
+                    },
+                )
+                logger.info("Created default template user %s for organization %s", default_user_id, org_id)
+                return PydanticUser(**result)
+            except Exception as create_err:
+                # Handle race condition: another request may have created it concurrently
+                error_msg = str(create_err).lower()
+                if "unique" in error_msg or "duplicate" in error_msg or "already exists" in error_msg:
+                    logger.debug("Default user creation race condition, retrying lookup: %s", create_err)
+                    existing = await provider.read("users", default_user_id)
+                    if existing:
+                        return PydanticUser(**existing)
+                raise
+
+        # PostgreSQL fallback path (no IPS Relational registered)
         # Try to find existing default user for this org
         async with self.session_maker() as session:
             try:
@@ -400,9 +591,6 @@ class UserManager:
 
         # Default user doesn't exist, create it
         logger.info("Creating default template user for organization %s", org_id)
-
-        # Generate a deterministic user_id for the default user
-        default_user_id = f"user-default-{org_id}"
 
         try:
             # Try to get by ID first (in case it exists with that ID)
@@ -455,6 +643,17 @@ class UserManager:
             limit: Maximum number of users to return
             organization_id: Filter by organization ID
         """
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            results = await provider.list(
+                "users",
+                organization_id=organization_id,
+                limit=limit,
+            )
+            return [PydanticUser(**r) for r in results]
+
         async with self.session_maker() as session:
             stmt = select(UserModel).where(UserModel.is_deleted == False)
 

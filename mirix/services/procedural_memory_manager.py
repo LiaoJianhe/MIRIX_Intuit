@@ -408,6 +408,15 @@ class ProceduralMemoryManager:
         self, item_id: str, user: PydanticUser, timezone_str: str
     ) -> Optional[PydanticProceduralMemoryItem]:
         """Fetch a procedural memory item by ID (with cache - Redis or IPS Cache)."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            result = await provider.read("procedural_memory", item_id)
+            if result is None:
+                raise NoResultFound(f"Procedural memory item with id {item_id} not found.")
+            return PydanticProceduralMemoryItem(**result)
+
         cache_provider = None
         try:
             from mirix.database.cache_provider import get_cache_provider
@@ -491,6 +500,22 @@ class ProceduralMemoryManager:
         if client_id is None:
             client_id = actor.id
 
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            data_dict = item_data.model_dump()
+            data_dict["client_id"] = client_id
+            data_dict["user_id"] = user_id
+            data_dict.setdefault("organization_id", actor.organization_id)
+            required_fields = ["entry_type"]
+            for field in required_fields:
+                if field not in data_dict:
+                    raise ValueError(f"Required field '{field}' missing from procedural memory data")
+            logger.debug("create_item: client_id=%s, user_id=%s", client_id, user_id)
+            result = await provider.create("procedural_memory", data_dict)
+            return PydanticProceduralMemoryItem(**result)
+
         # Ensure ID is set before model_dump
         if not item_data.id:
             from mirix.utils import generate_unique_short_id_async
@@ -524,6 +549,16 @@ class ProceduralMemoryManager:
         actor: PydanticClient,
     ) -> PydanticProceduralMemoryItem:
         """Update an existing procedural memory item."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            update_data = item_update.model_dump(exclude_unset=True)
+            update_data.pop("id", None)
+            update_data.pop("updated_at", None)
+            result = await provider.update("procedural_memory", item_update.id, update_data)
+            return PydanticProceduralMemoryItem(**result)
+
         async with self.session_maker() as session:
             item = await ProceduralMemoryItem.read(db_session=session, identifier=item_update.id, user=user)
             update_data = item_update.model_dump(exclude_unset=True)
@@ -545,6 +580,31 @@ class ProceduralMemoryManager:
 
     async def get_total_number_of_items(self, user: PydanticUser) -> int:
         """Get the total number of items in the procedural memory for the user."""
+        from mirix.database.search_provider import get_search_provider
+
+        search_provider = get_search_provider()
+        if search_provider:
+            from mirix.database.call_context import CALL_ORIGIN_CLIENT_API, get_call_origin
+            from mirix.database.relational_provider import get_relational_provider
+
+            call_origin = get_call_origin()
+            if call_origin == CALL_ORIGIN_CLIENT_API:
+                return await search_provider.count(
+                    "procedural_memory",
+                    user_id=user.id,
+                    organization_id=user.organization_id,
+                )
+            from mirix.services.hybrid_search_helper import hybrid_count
+
+            relational_provider = get_relational_provider()
+            return await hybrid_count(
+                table="procedural_memory",
+                search_provider=search_provider,
+                relational_provider=relational_provider,
+                user_id=user.id,
+                organization_id=user.organization_id,
+            )
+
         async with self.session_maker() as session:
             query = select(func.count(ProceduralMemoryItem.id)).where(ProceduralMemoryItem.user_id == user.id)
             result = await session.execute(query)
@@ -605,6 +665,49 @@ class ProceduralMemoryManager:
 
         # Extract organization_id from user for multi-tenant isolation
         organization_id = user.organization_id
+
+        from mirix.database.search_provider import get_search_provider
+
+        search_provider = get_search_provider()
+        if search_provider:
+            from mirix.database.call_context import CALL_ORIGIN_CLIENT_API, get_call_origin
+            from mirix.database.relational_provider import get_relational_provider
+
+            call_origin = get_call_origin()
+            if call_origin == CALL_ORIGIN_CLIENT_API:
+                results, _cursor = await search_provider.search(
+                    "procedural_memory",
+                    query_text=query,
+                    query_embedding=embedded_text,
+                    search_method=search_method,
+                    search_field=search_field,
+                    user_id=user.id,
+                    organization_id=organization_id,
+                    filter_tags=filter_tags,
+                    scopes=scopes,
+                    limit=limit,
+                    similarity_threshold=similarity_threshold,
+                )
+                return [PydanticProceduralMemoryItem(**r) for r in results]
+            from mirix.services.hybrid_search_helper import hybrid_search
+
+            relational_provider = get_relational_provider()
+            results = await hybrid_search(
+                table="procedural_memory",
+                search_provider=search_provider,
+                relational_provider=relational_provider,
+                query_text=query,
+                query_embedding=embedded_text,
+                search_method=search_method,
+                search_field=search_field,
+                user_id=user.id,
+                organization_id=organization_id,
+                filter_tags=filter_tags,
+                scopes=scopes,
+                limit=limit,
+                similarity_threshold=similarity_threshold,
+            )
+            return [PydanticProceduralMemoryItem(**r) for r in results]
 
         # Try Redis Search first (if cache enabled and Redis is available)
         from mirix.database.redis_client import get_redis_client
@@ -907,6 +1010,35 @@ class ProceduralMemoryManager:
         user_id: Optional[str] = None,
     ) -> PydanticProceduralMemoryItem:
         try:
+            from mirix.database.relational_provider import get_relational_provider
+
+            provider = get_relational_provider()
+            if provider:
+                from datetime import datetime, timezone
+
+                from mirix.services.user_manager import UserManager
+
+                client_id = actor.id
+                if user_id is None:
+                    user_id = UserManager.ADMIN_USER_ID
+                data_dict = {
+                    "entry_type": entry_type,
+                    "summary": summary,
+                    "steps": steps,
+                    "filter_tags": filter_tags or {},
+                    "organization_id": organization_id,
+                    "user_id": user_id,
+                    "agent_id": agent_id,
+                    "client_id": client_id,
+                    "_created_by_id": actor.id,
+                    "last_modify": {
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "operation": "created",
+                    },
+                }
+                result = await provider.create("procedural_memory", data_dict)
+                return PydanticProceduralMemoryItem(**result)
+
             # Conditionally calculate embeddings based on BUILD_EMBEDDINGS_FOR_MEMORY flag
             if BUILD_EMBEDDINGS_FOR_MEMORY:
                 # TODO: need to check if we need to chunk the text
@@ -951,6 +1083,13 @@ class ProceduralMemoryManager:
 
     async def delete_procedure_by_id(self, procedure_id: str, actor: PydanticClient) -> None:
         """Delete a procedural memory item by ID (removes from cache)."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            await provider.delete("procedural_memory", procedure_id)
+            return
+
         async with self.session_maker() as session:
             try:
                 item = await ProceduralMemoryItem.read(db_session=session, identifier=procedure_id, actor=actor)
@@ -977,7 +1116,22 @@ class ProceduralMemoryManager:
         Returns:
             Number of records deleted
         """
+        from mirix.database.relational_provider import get_relational_provider
         from mirix.database.redis_client import get_redis_client
+
+        provider = get_relational_provider()
+        if provider:
+            records = await provider.list(
+                "procedural_memory",
+                filter_tags=None,
+                limit=5000,
+                _created_by_id=actor.id,
+            )
+            ids = [r.get("id") for r in records if r.get("id")]
+            if not ids:
+                return 0
+            result = await provider.bulk_delete("procedural_memory", ids, soft=False)
+            return int(result.get("success", 0) or 0)
 
         async with self.session_maker() as session:
             # Get IDs for Redis cleanup (only fetch IDs, not full objects)
@@ -1018,7 +1172,22 @@ class ProceduralMemoryManager:
         Returns:
             Number of records soft deleted
         """
+        from mirix.database.relational_provider import get_relational_provider
         from mirix.database.redis_client import get_redis_client
+
+        provider = get_relational_provider()
+        if provider:
+            records = await provider.list(
+                "procedural_memory",
+                filter_tags=None,
+                limit=5000,
+                _created_by_id=actor.id,
+            )
+            ids = [r.get("id") for r in records if r.get("id")]
+            if not ids:
+                return 0
+            result = await provider.bulk_delete("procedural_memory", ids, soft=True)
+            return int(result.get("success", 0) or 0)
 
         async with self.session_maker() as session:
             # Query all non-deleted records for this client (use actor.id)
@@ -1066,7 +1235,22 @@ class ProceduralMemoryManager:
         Returns:
             Number of records soft deleted
         """
+        from mirix.database.relational_provider import get_relational_provider
         from mirix.database.redis_client import get_redis_client
+
+        provider = get_relational_provider()
+        if provider:
+            records = await provider.list(
+                "procedural_memory",
+                user_id=user_id,
+                filter_tags=None,
+                limit=5000,
+            )
+            ids = [r.get("id") for r in records if r.get("id")]
+            if not ids:
+                return 0
+            result = await provider.bulk_delete("procedural_memory", ids, soft=True)
+            return int(result.get("success", 0) or 0)
 
         async with self.session_maker() as session:
             # Query all non-deleted records for this user
@@ -1115,7 +1299,22 @@ class ProceduralMemoryManager:
         Returns:
             Number of records deleted
         """
+        from mirix.database.relational_provider import get_relational_provider
         from mirix.database.redis_client import get_redis_client
+
+        provider = get_relational_provider()
+        if provider:
+            records = await provider.list(
+                "procedural_memory",
+                user_id=user_id,
+                filter_tags=None,
+                limit=5000,
+            )
+            ids = [r.get("id") for r in records if r.get("id")]
+            if not ids:
+                return 0
+            result = await provider.bulk_delete("procedural_memory", ids, soft=False)
+            return int(result.get("success", 0) or 0)
 
         async with self.session_maker() as session:
             # Get IDs for Redis cleanup (only fetch IDs, not full objects)
@@ -1166,6 +1365,49 @@ class ProceduralMemoryManager:
         """
         List procedural memories across ALL users in an organization.
         """
+        from mirix.database.search_provider import get_search_provider
+
+        search_provider = get_search_provider()
+        if search_provider:
+            from mirix.database.call_context import CALL_ORIGIN_CLIENT_API, get_call_origin
+            from mirix.database.relational_provider import get_relational_provider
+
+            call_origin = get_call_origin()
+            if call_origin == CALL_ORIGIN_CLIENT_API:
+                results, _cursor = await search_provider.search(
+                    "procedural_memory",
+                    query_text=query,
+                    query_embedding=embedded_text,
+                    search_method=search_method,
+                    search_field=search_field,
+                    user_id=None,
+                    organization_id=organization_id,
+                    filter_tags=filter_tags,
+                    scopes=scopes,
+                    limit=limit,
+                    similarity_threshold=similarity_threshold,
+                )
+                return [PydanticProceduralMemoryItem(**r) for r in results]
+            from mirix.services.hybrid_search_helper import hybrid_search
+
+            relational_provider = get_relational_provider()
+            results = await hybrid_search(
+                table="procedural_memory",
+                search_provider=search_provider,
+                relational_provider=relational_provider,
+                query_text=query,
+                query_embedding=embedded_text,
+                search_method=search_method,
+                search_field=search_field,
+                user_id=None,
+                organization_id=organization_id,
+                filter_tags=filter_tags,
+                scopes=scopes,
+                limit=limit,
+                similarity_threshold=similarity_threshold,
+            )
+            return [PydanticProceduralMemoryItem(**r) for r in results]
+
         from mirix.database.redis_client import get_redis_client
 
         redis_client = get_redis_client()

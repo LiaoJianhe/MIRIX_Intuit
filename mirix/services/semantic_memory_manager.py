@@ -421,6 +421,16 @@ class SemanticMemoryManager:
         self, semantic_memory_id: str, user: PydanticUser, timezone_str: str
     ) -> Optional[PydanticSemanticMemoryItem]:
         """Fetch a semantic memory item by ID (with cache - Redis or IPS Cache)."""
+        # IPS provider delegation (read by ID)
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            result = await provider.read("semantic_memory", semantic_memory_id)
+            if result is None:
+                raise NoResultFound(f"Semantic memory item with id {semantic_memory_id} not found.")
+            return PydanticSemanticMemoryItem(**result)
+
         cache_provider = None
         try:
             from mirix.database.cache_provider import get_cache_provider
@@ -516,6 +526,21 @@ class SemanticMemoryManager:
         if client_id is None:
             client_id = actor.id
 
+        # IPS provider delegation (create)
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            data_dict = item_data.model_dump()
+            data_dict["client_id"] = client_id
+            data_dict["user_id"] = user_id
+            data_dict.setdefault("organization_id", actor.organization_id)
+            created = data_dict.get("created_at")
+            if isinstance(created, datetime) and created.tzinfo is not None:
+                data_dict["created_at"] = created.astimezone(timezone.utc).replace(tzinfo=None)
+            result = await provider.create("semantic_memory", data_dict)
+            return PydanticSemanticMemoryItem(**result)
+
         # Ensure ID is set before model_dump
         if not item_data.id:
             item_data.id = await generate_unique_short_id_async(self.session_maker, SemanticMemoryItem, "sem")
@@ -552,6 +577,16 @@ class SemanticMemoryManager:
         actor: PydanticClient,
     ) -> PydanticSemanticMemoryItem:
         """Update an existing semantic memory item."""
+        # IPS provider delegation (update)
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            update_data = item_update.model_dump(exclude_unset=True)
+            update_data.pop("id", None)
+            result = await provider.update("semantic_memory", item_update.id, update_data)
+            return PydanticSemanticMemoryItem(**result)
+
         async with self.session_maker() as session:
             item = await SemanticMemoryItem.read(db_session=session, identifier=item_update.id, user=user)
             update_data = item_update.model_dump(exclude_unset=True)
@@ -576,6 +611,32 @@ class SemanticMemoryManager:
 
     async def get_total_number_of_items(self, user: PydanticUser) -> int:
         """Get the total number of items in the semantic memory for the user."""
+        # IPS provider delegation (count)
+        from mirix.database.search_provider import get_search_provider
+
+        search_provider = get_search_provider()
+        if search_provider:
+            from mirix.database.call_context import CALL_ORIGIN_CLIENT_API, get_call_origin
+            from mirix.database.relational_provider import get_relational_provider
+
+            call_origin = get_call_origin()
+            if call_origin == CALL_ORIGIN_CLIENT_API:
+                return await search_provider.count(
+                    "semantic_memory",
+                    user_id=user.id,
+                    organization_id=user.organization_id,
+                )
+            from mirix.services.hybrid_search_helper import hybrid_count
+
+            relational_provider = get_relational_provider()
+            return await hybrid_count(
+                table="semantic_memory",
+                search_provider=search_provider,
+                relational_provider=relational_provider,
+                user_id=user.id,
+                organization_id=user.organization_id,
+            )
+
         async with self.session_maker() as session:
             query = select(func.count(SemanticMemoryItem.id)).where(SemanticMemoryItem.user_id == user.id)
             result = await session.execute(query)
@@ -636,6 +697,50 @@ class SemanticMemoryManager:
 
         # Extract organization_id from user for multi-tenant isolation
         organization_id = user.organization_id
+
+        # IPS provider delegation (search/list)
+        from mirix.database.search_provider import get_search_provider
+
+        search_provider = get_search_provider()
+        if search_provider:
+            from mirix.database.call_context import CALL_ORIGIN_CLIENT_API, get_call_origin
+            from mirix.database.relational_provider import get_relational_provider
+
+            call_origin = get_call_origin()
+            if call_origin == CALL_ORIGIN_CLIENT_API:
+                results, _cursor = await search_provider.search(
+                    "semantic_memory",
+                    query_text=query,
+                    query_embedding=embedded_text,
+                    search_method=search_method,
+                    search_field=search_field,
+                    user_id=user.id,
+                    organization_id=organization_id,
+                    filter_tags=filter_tags,
+                    scopes=scopes,
+                    limit=limit,
+                    similarity_threshold=similarity_threshold,
+                )
+                return [PydanticSemanticMemoryItem(**r) for r in results]
+            from mirix.services.hybrid_search_helper import hybrid_search
+
+            relational_provider = get_relational_provider()
+            results = await hybrid_search(
+                table="semantic_memory",
+                search_provider=search_provider,
+                relational_provider=relational_provider,
+                query_text=query,
+                query_embedding=embedded_text,
+                search_method=search_method,
+                search_field=search_field,
+                user_id=user.id,
+                organization_id=organization_id,
+                filter_tags=filter_tags,
+                scopes=scopes,
+                limit=limit,
+                similarity_threshold=similarity_threshold,
+            )
+            return [PydanticSemanticMemoryItem(**r) for r in results]
 
         # Try Redis Search first (if cache enabled and Redis is available)
         from mirix.database.redis_client import get_redis_client
@@ -966,6 +1071,31 @@ class SemanticMemoryManager:
                 user_id = UserManager.ADMIN_USER_ID
                 logger.debug("user_id not provided, using DEFAULT_USER_ID: %s", user_id)
 
+            # IPS provider delegation (create)
+            from mirix.database.relational_provider import get_relational_provider
+
+            provider = get_relational_provider()
+            if provider:
+                data_dict = {
+                    "name": name,
+                    "summary": summary,
+                    "details": details,
+                    "source": source,
+                    "filter_tags": filter_tags or {},
+                    "embedding_config": agent_state.embedding_config,
+                    "organization_id": organization_id,
+                    "user_id": user_id,
+                    "agent_id": agent_id,
+                    "client_id": client_id,
+                    "_created_by_id": actor.id,
+                    "last_modify": {
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "operation": "created",
+                    },
+                }
+                result = await provider.create("semantic_memory", data_dict)
+                return PydanticSemanticMemoryItem(**result)
+
             # Conditionally calculate embeddings based on BUILD_EMBEDDINGS_FOR_MEMORY flag
             if BUILD_EMBEDDINGS_FOR_MEMORY:
                 # TODO: need to check if we need to chunk the text
@@ -1009,6 +1139,14 @@ class SemanticMemoryManager:
 
     async def delete_semantic_item_by_id(self, semantic_memory_id: str, actor: PydanticClient) -> None:
         """Delete a semantic memory item by ID (removes from cache)."""
+        # IPS provider delegation (delete)
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            await provider.delete("semantic_memory", semantic_memory_id)
+            return
+
         async with self.session_maker() as session:
             try:
                 item = await SemanticMemoryItem.read(db_session=session, identifier=semantic_memory_id, actor=actor)
@@ -1035,7 +1173,22 @@ class SemanticMemoryManager:
         Returns:
             Number of records deleted
         """
+        from mirix.database.relational_provider import get_relational_provider
         from mirix.database.redis_client import get_redis_client
+
+        provider = get_relational_provider()
+        if provider:
+            records = await provider.list(
+                "semantic_memory",
+                filter_tags=None,
+                limit=5000,
+                _created_by_id=actor.id,
+            )
+            ids = [r.get("id") for r in records if r.get("id")]
+            if not ids:
+                return 0
+            result = await provider.bulk_delete("semantic_memory", ids, soft=False)
+            return int(result.get("success", 0) or 0)
 
         async with self.session_maker() as session:
             # Get IDs for Redis cleanup (only fetch IDs, not full objects)
@@ -1076,7 +1229,22 @@ class SemanticMemoryManager:
         Returns:
             Number of records soft deleted
         """
+        from mirix.database.relational_provider import get_relational_provider
         from mirix.database.redis_client import get_redis_client
+
+        provider = get_relational_provider()
+        if provider:
+            records = await provider.list(
+                "semantic_memory",
+                filter_tags=None,
+                limit=5000,
+                _created_by_id=actor.id,
+            )
+            ids = [r.get("id") for r in records if r.get("id")]
+            if not ids:
+                return 0
+            result = await provider.bulk_delete("semantic_memory", ids, soft=True)
+            return int(result.get("success", 0) or 0)
 
         async with self.session_maker() as session:
             # Query all non-deleted records for this client (use actor.id)
@@ -1124,7 +1292,22 @@ class SemanticMemoryManager:
         Returns:
             Number of records soft deleted
         """
+        from mirix.database.relational_provider import get_relational_provider
         from mirix.database.redis_client import get_redis_client
+
+        provider = get_relational_provider()
+        if provider:
+            records = await provider.list(
+                "semantic_memory",
+                user_id=user_id,
+                filter_tags=None,
+                limit=5000,
+            )
+            ids = [r.get("id") for r in records if r.get("id")]
+            if not ids:
+                return 0
+            result = await provider.bulk_delete("semantic_memory", ids, soft=True)
+            return int(result.get("success", 0) or 0)
 
         async with self.session_maker() as session:
             # Query all non-deleted records for this user
@@ -1173,7 +1356,22 @@ class SemanticMemoryManager:
         Returns:
             Number of records deleted
         """
+        from mirix.database.relational_provider import get_relational_provider
         from mirix.database.redis_client import get_redis_client
+
+        provider = get_relational_provider()
+        if provider:
+            records = await provider.list(
+                "semantic_memory",
+                user_id=user_id,
+                filter_tags=None,
+                limit=5000,
+            )
+            ids = [r.get("id") for r in records if r.get("id")]
+            if not ids:
+                return 0
+            result = await provider.bulk_delete("semantic_memory", ids, soft=False)
+            return int(result.get("success", 0) or 0)
 
         async with self.session_maker() as session:
             # Get IDs for Redis cleanup (only fetch IDs, not full objects)
@@ -1220,6 +1418,50 @@ class SemanticMemoryManager:
         similarity_threshold: Optional[float] = None,
     ) -> List[PydanticSemanticMemoryItem]:
         """List semantic memory items across ALL users in an organization."""
+        # IPS provider delegation (org-scoped search/list)
+        from mirix.database.search_provider import get_search_provider
+
+        search_provider = get_search_provider()
+        if search_provider:
+            from mirix.database.call_context import CALL_ORIGIN_CLIENT_API, get_call_origin
+            from mirix.database.relational_provider import get_relational_provider
+
+            call_origin = get_call_origin()
+            if call_origin == CALL_ORIGIN_CLIENT_API:
+                results, _cursor = await search_provider.search(
+                    "semantic_memory",
+                    query_text=query,
+                    query_embedding=embedded_text,
+                    search_method=search_method,
+                    search_field=search_field,
+                    user_id=None,
+                    organization_id=organization_id,
+                    filter_tags=filter_tags,
+                    scopes=scopes,
+                    limit=limit,
+                    similarity_threshold=similarity_threshold,
+                )
+                return [PydanticSemanticMemoryItem(**r) for r in results]
+            from mirix.services.hybrid_search_helper import hybrid_search
+
+            relational_provider = get_relational_provider()
+            results = await hybrid_search(
+                table="semantic_memory",
+                search_provider=search_provider,
+                relational_provider=relational_provider,
+                query_text=query,
+                query_embedding=embedded_text,
+                search_method=search_method,
+                search_field=search_field,
+                user_id=None,
+                organization_id=organization_id,
+                filter_tags=filter_tags,
+                scopes=scopes,
+                limit=limit,
+                similarity_threshold=similarity_threshold,
+            )
+            return [PydanticSemanticMemoryItem(**r) for r in results]
+
         from mirix.database.redis_client import get_redis_client
 
         redis_client = get_redis_client()

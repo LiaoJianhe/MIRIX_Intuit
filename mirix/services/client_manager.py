@@ -29,6 +29,33 @@ class ClientManager:
     @enforce_types
     async def create_default_client(self, org_id: str = OrganizationManager.DEFAULT_ORG_ID) -> PydanticClient:
         """Create the default client (async)."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            # Verify the organization exists in IPS Relational
+            org = await provider.read("organizations", org_id)
+            if org is None:
+                raise ValueError(f"No organization with {org_id} exists in the organization table.")
+
+            # Return existing default client if already present
+            existing = await provider.read("clients", self.DEFAULT_CLIENT_ID)
+            if existing:
+                return PydanticClient(**existing)
+
+            result = await provider.create(
+                "clients",
+                {
+                    "id": self.DEFAULT_CLIENT_ID,
+                    "name": self.DEFAULT_CLIENT_NAME,
+                    "status": "active",
+                    "write_scope": None,
+                    "read_scopes": [],
+                    "organization_id": org_id,
+                },
+            )
+            return PydanticClient(**result)
+
         async with self.session_maker() as session:
             try:
                 await OrganizationModel.read(db_session=session, identifier=org_id)
@@ -53,6 +80,13 @@ class ClientManager:
     @enforce_types
     async def create_client(self, pydantic_client: PydanticClient) -> PydanticClient:
         """Create a new client if it doesn't already exist (with caching)."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            client_data = pydantic_client.model_dump()
+            result = await provider.create("clients", client_data)
+            return PydanticClient(**result)
         async with self.session_maker() as session:
             new_client = ClientModel(**pydantic_client.model_dump())
             await new_client.create_with_redis(session, actor=None)  # Auto-caches to Redis
@@ -61,6 +95,13 @@ class ClientManager:
     @enforce_types
     async def update_client(self, client_update: ClientUpdate) -> PydanticClient:
         """Update client details (with cache invalidation)."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            update_data = client_update.model_dump(exclude_unset=True, exclude_none=True)
+            result = await provider.update("clients", client_update.id, update_data)
+            return PydanticClient(**result)
         async with self.session_maker() as session:
             existing_client = await ClientModel.read(db_session=session, identifier=client_update.id)
             update_data = client_update.model_dump(exclude_unset=True, exclude_none=True)
@@ -79,7 +120,26 @@ class ClientManager:
         user_id: Optional[str] = None,
     ) -> PydanticClientApiKey:
         """Create a new API key for a client."""
+        from mirix.database.relational_provider import get_relational_provider
+
         hashed = hash_api_key(api_key)
+
+        provider = get_relational_provider()
+        if provider:
+            client_data = await provider.read("clients", client_id)
+            org_id = client_data.get("organization_id", "") if client_data else ""
+            data = {
+                "client_id": client_id,
+                "organization_id": org_id,
+                "api_key_hash": hashed,
+                "name": name,
+                "status": "active",
+                "permission": permission,
+                "user_id": user_id,
+            }
+            result = await provider.create("client_api_keys", data)
+            return PydanticClientApiKey(**result)
+
         async with self.session_maker() as session:
             existing_client = await ClientModel.read(db_session=session, identifier=client_id)
             api_key_pydantic = PydanticClientApiKey(
@@ -110,7 +170,27 @@ class ClientManager:
     @enforce_types
     async def get_client_by_api_key(self, api_key: str) -> Optional[PydanticClient]:
         """Lookup a client via API key (hash match) from the client_api_keys table."""
+        from mirix.database.relational_provider import get_relational_provider
+
         hashed = hash_api_key(api_key)
+
+        provider = get_relational_provider()
+        if provider:
+            keys = await provider.list(
+                "client_api_keys",
+                filter_tags=None,
+                limit=1,
+                api_key_hash=hashed,
+                status="active",
+            )
+            if not keys:
+                return None
+            client_id = keys[0].get("client_id", "")
+            client_data = await provider.read("clients", client_id)
+            if not client_data or client_data.get("is_deleted") or client_data.get("status") != "active":
+                return None
+            return PydanticClient(**client_data)
+
         async with self.session_maker() as session:
             stmt = (
                 select(ClientApiKeyModel)
@@ -135,6 +215,16 @@ class ClientManager:
     @enforce_types
     async def list_client_api_keys(self, client_id: str) -> List[PydanticClientApiKey]:
         """List all API keys for a client."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            records = await provider.list(
+                "client_api_keys", filter_tags=None, limit=100,
+                client_id=client_id,
+            )
+            return [PydanticClientApiKey(**r) for r in records]
+
         async with self.session_maker() as session:
             stmt = select(ClientApiKeyModel).where(
                 ClientApiKeyModel.client_id == client_id,
@@ -147,6 +237,15 @@ class ClientManager:
     @enforce_types
     async def revoke_client_api_key(self, api_key_id: str) -> PydanticClientApiKey:
         """Revoke an API key (set status to 'revoked')."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            result = await provider.update(
+                "client_api_keys", api_key_id, {"status": "revoked"}
+            )
+            return PydanticClientApiKey(**result)
+
         async with self.session_maker() as session:
             api_key = await ClientApiKeyModel.read(db_session=session, identifier=api_key_id)
             api_key.status = "revoked"
@@ -156,6 +255,13 @@ class ClientManager:
     @enforce_types
     async def delete_client_api_key(self, api_key_id: str) -> None:
         """Permanently delete an API key from the database."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            await provider.hard_delete("client_api_keys", api_key_id)
+            return
+
         async with self.session_maker() as session:
             api_key = await ClientApiKeyModel.read(db_session=session, identifier=api_key_id)
             session.delete(api_key)
@@ -164,6 +270,12 @@ class ClientManager:
     @enforce_types
     async def update_client_status(self, client_id: str, status: str) -> PydanticClient:
         """Update the status of a client (with cache invalidation)."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            result = await provider.update("clients", client_id, {"status": status})
+            return PydanticClient(**result)
         async with self.session_maker() as session:
             existing_client = await ClientModel.read(db_session=session, identifier=client_id)
             existing_client.status = status
@@ -184,6 +296,21 @@ class ClientManager:
         Raises:
             NoResultFound: If client not found
         """
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            await provider.delete("clients", client_id, soft=True)
+            try:
+                from mirix.database.cache_provider import get_cache_provider
+
+                cache_provider = get_cache_provider()
+                if cache_provider:
+                    cache_key = f"{cache_provider.CLIENT_PREFIX}{client_id}"
+                    await cache_provider.delete(cache_key)
+            except Exception:
+                pass
+            return PydanticClient(id=client_id, name="", status="deleted", read_scopes=[])
         async with self.session_maker() as session:
             client = await ClientModel.read(db_session=session, identifier=client_id)
             await client.delete(session, actor=None)
@@ -243,6 +370,64 @@ class ClientManager:
 
         logger = get_logger(__name__)
         logger.info("Soft deleting client %s and all associated records...", client_id)
+
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            # Soft delete memory records owned by the client.
+            memory_tables = [
+                "episodic_memory",
+                "semantic_memory",
+                "procedural_memory",
+                "resource_memory",
+                "knowledge_vault",
+                "messages",
+                "block",
+            ]
+            for table in memory_tables:
+                records = await provider.list(
+                    table,
+                    filter_tags=None,
+                    limit=5000,
+                    _created_by_id=client_id,
+                )
+                ids = [r.get("id") for r in records if r.get("id")]
+                if ids:
+                    await provider.bulk_delete(table, ids, soft=True)
+
+            # Soft delete agents/tools created by this client.
+            for table in ("agents", "tools"):
+                records = await provider.list(
+                    table,
+                    filter_tags=None,
+                    limit=5000,
+                    _created_by_id=client_id,
+                )
+                ids = [r.get("id") for r in records if r.get("id")]
+                for entity_id in ids:
+                    await provider.delete(table, entity_id, soft=True)
+
+            # Soft delete the client record.
+            await provider.delete("clients", client_id, soft=True)
+
+            # Cache invalidation via cache provider abstraction.
+            try:
+                from mirix.database.cache_provider import get_cache_provider
+
+                cache_provider = get_cache_provider()
+                if cache_provider:
+                    await cache_provider.delete(
+                        f"{cache_provider.CLIENT_PREFIX}{client_id}"
+                    )
+            except Exception as e:
+                logger.warning(
+                    "Failed to invalidate cache for soft-deleted client %s: %s",
+                    client_id,
+                    e,
+                )
+            logger.info("Soft deleted client %s via provider path", client_id)
+            return
 
         # Get client for actor parameter
         client = await self.get_client_by_id(client_id)
@@ -370,25 +555,12 @@ class ClientManager:
 
     async def delete_memories_by_client_id(self, client_id: str):
         """
-        Hard delete memories, messages, and blocks for a client using memory managers' bulk delete.
+        Hard delete memories, messages, and blocks for a client.
 
-        This permanently removes data records while preserving the client, agents, and tools.
-        Uses optimized bulk delete methods in each manager for efficient deletion.
+        When IPS Relational provider is registered, uses bulk_delete API.
+        Otherwise uses memory managers' bulk delete via SQLAlchemy.
 
-        Cleanup workflow:
-        1. Call each memory manager's delete_by_client_id() method
-           - EpisodicMemoryManager.delete_by_client_id()
-           - SemanticMemoryManager.delete_by_client_id()
-           - ProceduralMemoryManager.delete_by_client_id()
-           - ResourceMemoryManager.delete_by_client_id()
-           - KnowledgeVaultManager.delete_by_client_id()
-           - MessageManager.delete_by_client_id()
-        2. Delete blocks (via _created_by_id)
-        3. Each manager handles:
-           - Bulk database deletion
-           - Redis cache cleanup
-           - Business logic
-        4. PRESERVE: client record, agents, tools
+        Preserves the client, agents, and tools.
 
         Args:
             client_id: ID of the client whose memories to delete
@@ -396,6 +568,37 @@ class ClientManager:
         from mirix.log import get_logger
 
         logger = get_logger(__name__)
+
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            logger.info(
+                "Bulk deleting memories via IPS Relational for client %s", client_id
+            )
+            memory_tables = [
+                "episodic_memory", "semantic_memory", "procedural_memory",
+                "resource_memory", "knowledge_vault", "block", "messages",
+            ]
+            total = 0
+            for table in memory_tables:
+                records = await provider.list(
+                    table, filter_tags=None, limit=5000,
+                    _created_by_id=client_id,
+                )
+                if records:
+                    ids = [r.get("id", "") for r in records if r.get("id")]
+                    if ids:
+                        result = await provider.bulk_delete(
+                            table, ids, soft=False
+                        )
+                        deleted = int(result.get("success", 0) or 0)
+                        total += deleted
+                        logger.debug("Bulk deleted %d %s records", deleted, table)
+
+            logger.info("IPS bulk delete complete for client %s: %d total records", client_id, total)
+            return
+
         logger.info(
             "Bulk deleting memories for client %s using memory managers (preserving client, agents, tools)...",
             client_id,
@@ -541,6 +744,27 @@ class ClientManager:
         except Exception as e:
             logger.warning("Cache read failed for client %s: %s", client_id, e)
 
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            from mirix.orm.errors import NoResultFound as _NRF
+
+            result = await provider.read("clients", client_id)
+            if result is None:
+                raise _NRF(f"Client {client_id} not found")
+            pydantic_client = PydanticClient(**result)
+            try:
+                if cache_provider:
+                    from mirix.settings import settings
+
+                    cache_key = f"{cache_provider.CLIENT_PREFIX}{client_id}"
+                    data = pydantic_client.model_dump(mode="json")
+                    await cache_provider.set_hash(cache_key, data, ttl=settings.redis_ttl_clients)
+            except Exception as e:
+                logger.warning("Failed to populate cache for client %s: %s", client_id, e)
+            return pydantic_client
+
         async with self.session_maker() as session:
             client = await ClientModel.read(db_session=session, identifier=client_id)
             pydantic_client = client.to_pydantic()
@@ -612,6 +836,12 @@ class ClientManager:
         limit: Optional[int] = 50,
     ) -> List[PydanticClient]:
         """List clients with pagination using cursor (id) and limit."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            results = await provider.list("clients", limit=limit)
+            return [PydanticClient(**r) for r in results]
         async with self.session_maker() as session:
             results = await ClientModel.list(db_session=session, cursor=cursor, limit=limit)
             return [client.to_pydantic() for client in results]

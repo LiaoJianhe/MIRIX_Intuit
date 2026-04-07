@@ -133,8 +133,18 @@ class RawMemoryManager:
             raw_memory.filter_tags,
         )
 
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+
         # Conditionally calculate embeddings based on BUILD_EMBEDDINGS_FOR_MEMORY flag
-        if BUILD_EMBEDDINGS_FOR_MEMORY and agent_state is not None:
+        # When IPS providers are active, skip compute and persist only config metadata.
+        if provider:
+            raw_memory.context_embedding = None
+            raw_memory.embedding_config = (
+                agent_state.embedding_config if agent_state is not None else None
+            )
+        elif BUILD_EMBEDDINGS_FOR_MEMORY and agent_state is not None:
             try:
                 from mirix.embeddings import embedding_model
 
@@ -180,6 +190,11 @@ class RawMemoryManager:
         if not raw_memory_dict.get("context"):
             raise ValueError("Required field 'context' is missing or empty")
 
+        # IPS provider delegation (create)
+        if provider:
+            result = await provider.create("raw_memory", raw_memory_dict)
+            return PydanticRawMemoryItem(**result)
+
         # Create the raw memory item (with conditional Redis caching)
         async with self.session_maker() as session:
             raw_memory_item = RawMemory(**raw_memory_dict)
@@ -209,6 +224,25 @@ class RawMemoryManager:
         Raises:
             NoResultFound: If the record doesn't exist, scope doesn't match, or user doesn't match
         """
+        # IPS provider delegation (read by ID)
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            result = await provider.read("raw_memory", memory_id)
+            if result is None:
+                raise NoResultFound(f"Raw memory record with id {memory_id} not found.")
+            pydantic_memory = PydanticRawMemoryItem(**result)
+
+            memory_scope = (pydantic_memory.filter_tags or {}).get("scope")
+            if memory_scope not in actor.read_scopes:
+                raise NoResultFound(f"Raw memory record with id {memory_id} not found.")
+
+            if user_id and pydantic_memory.user_id != user_id:
+                raise NoResultFound(f"Raw memory record with id {memory_id} not found.")
+
+            return pydantic_memory
+
         # Try cache first (cache provider: Redis or IPS Cache)
         cache_provider = None
         try:
@@ -317,6 +351,72 @@ class RawMemoryManager:
             context_update_mode,
             tags_merge_mode,
         )
+
+        # IPS provider delegation (update)
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            existing = await provider.read("raw_memory", memory_id)
+            if existing is None:
+                raise ValueError(f"Raw memory {memory_id} not found")
+
+            if existing.get("organization_id") != actor.organization_id:
+                raise ValueError(
+                    f"Access denied: memory {memory_id} belongs to "
+                    f"organization {existing.get('organization_id')}, "
+                    f"actor belongs to {actor.organization_id}"
+                )
+
+            memory_scope = (existing.get("filter_tags") or {}).get("scope")
+            if memory_scope != actor.write_scope:
+                raise ValueError(
+                    f"Access denied: memory {memory_id} has scope '{memory_scope}', "
+                    f"actor has write_scope '{actor.write_scope}'"
+                )
+
+            if user_id and existing.get("user_id") != user_id:
+                raise ValueError(f"Raw memory {memory_id} not found")
+
+            if new_filter_tags is not None and "scope" in new_filter_tags:
+                if new_filter_tags["scope"] != actor.write_scope:
+                    raise ValueError("Cannot change memory scope - scope must match actor.write_scope")
+
+            context_val = existing.get("context") or ""
+            if new_context is not None:
+                if context_update_mode == "append":
+                    context_val = f"{context_val}\n\n{new_context}"
+                else:
+                    context_val = new_context
+            existing["context"] = context_val
+
+            if new_filter_tags is not None:
+                if tags_merge_mode == "merge":
+                    merged_tags = {**(existing.get("filter_tags") or {}), **new_filter_tags}
+                    existing["filter_tags"] = merged_tags
+                else:
+                    preserved_scope = (existing.get("filter_tags") or {}).get("scope")
+                    existing["filter_tags"] = dict(new_filter_tags)
+                    if preserved_scope:
+                        existing["filter_tags"]["scope"] = preserved_scope
+
+            # When IPS providers are active, skip embedding compute and keep only config metadata.
+            if agent_state is not None:
+                existing["embedding_config"] = agent_state.embedding_config
+            existing.pop("context_embedding", None)
+
+            now_utc = datetime.now(timezone.utc)
+            naive_now = now_utc.replace(tzinfo=None) if now_utc.tzinfo else now_utc
+            existing["updated_at"] = naive_now
+            existing["last_modify"] = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "operation": "updated",
+            }
+            if actor:
+                existing["_last_updated_by_id"] = actor.id
+
+            updated = await provider.update("raw_memory", memory_id, existing)
+            return PydanticRawMemoryItem(**updated)
 
         async with self.session_maker() as session:
             # Fetch the existing memory with row-level lock (SELECT FOR UPDATE)
@@ -449,6 +549,31 @@ class RawMemoryManager:
         """
         logger.info("Deleting raw memory: id=%s", memory_id)
 
+        # IPS provider delegation (delete)
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            existing = await provider.read("raw_memory", memory_id)
+            if existing is None:
+                logger.warning("Raw memory not found for deletion: id=%s", memory_id)
+                return False
+
+            memory_scope = (existing.get("filter_tags") or {}).get("scope")
+            if memory_scope != actor.write_scope:
+                raise ValueError(
+                    f"Access denied: memory {memory_id} has scope '{memory_scope}', "
+                    f"actor has write_scope '{actor.write_scope}'"
+                )
+
+            if user_id and existing.get("user_id") != user_id:
+                logger.warning("Raw memory %s not found for deletion (user mismatch)", memory_id)
+                return False
+
+            await provider.delete("raw_memory", memory_id)
+            logger.info("Raw memory deleted: id=%s", memory_id)
+            return True
+
         async with self.session_maker() as session:
             try:
                 raw_memory = await RawMemory.read(db_session=session, identifier=memory_id, actor=actor)
@@ -552,6 +677,49 @@ class RawMemoryManager:
                 cursor_id = decoded_cursor["id"]
             except (ValueError, KeyError, json.JSONDecodeError, UnicodeDecodeError) as e:
                 raise ValueError(f"Invalid cursor format: {e}")
+
+        # IPS provider delegation (search / list)
+        from mirix.database.search_provider import get_search_provider
+
+        search_provider = get_search_provider()
+        if search_provider:
+            from mirix.database.call_context import CALL_ORIGIN_CLIENT_API, get_call_origin
+            from mirix.database.relational_provider import get_relational_provider
+
+            call_origin = get_call_origin()
+            if call_origin == CALL_ORIGIN_CLIENT_API:
+                results, next_c = await search_provider.search(
+                    "raw_memory",
+                    organization_id=organization_id,
+                    user_id=user_id,
+                    filter_tags=filter_tags,
+                    scopes=scopes,
+                    limit=limit,
+                    sort=sort,
+                    cursor=cursor,
+                    time_range=time_range,
+                    search_method="string_match",
+                )
+                return [PydanticRawMemoryItem(**r) for r in results], next_c
+            else:
+                from mirix.services.hybrid_search_helper import hybrid_search
+
+                relational_provider = get_relational_provider()
+                results = await hybrid_search(
+                    table="raw_memory",
+                    search_provider=search_provider,
+                    relational_provider=relational_provider,
+                    organization_id=organization_id,
+                    user_id=user_id,
+                    filter_tags=filter_tags,
+                    scopes=scopes,
+                    limit=limit,
+                    sort=sort,
+                    cursor=cursor,
+                    time_range=time_range,
+                    search_method="string_match",
+                )
+                return [PydanticRawMemoryItem(**r) for r in results], None
 
         async with self.session_maker() as session:
             # Base query filtering by organization_id
