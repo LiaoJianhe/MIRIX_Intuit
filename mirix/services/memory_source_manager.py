@@ -1,7 +1,7 @@
 """Manager for MemorySource CRUD operations."""
 
 from datetime import datetime, timezone
-from typing import List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from sqlalchemy import select
 
@@ -52,6 +52,7 @@ class MemorySourceManager:
         summary: Optional[str] = None,
         summary_source: Optional[str] = None,
         batch_hash: Optional[str] = None,
+        filter_tags: Optional[Dict[str, Any]] = None,
         use_cache: bool = True,
     ) -> Optional[PydanticMemorySource]:
         """Create a memory source record using INSERT ON CONFLICT DO NOTHING.
@@ -79,6 +80,7 @@ class MemorySourceManager:
                 summary=summary,
                 summary_source=summary_source,
                 batch_hash=batch_hash,
+                filter_tags=filter_tags,
                 processing_complete=False,
                 created_at=now,
                 updated_at=now,
@@ -140,26 +142,36 @@ class MemorySourceManager:
     async def get_sources_by_thread_id(
         self,
         external_thread_id: str,
-        client_id: str,
-        user_id: str,
+        scopes: Optional[List[str]] = None,
+        user_id: Optional[str] = None,
         limit: int = 50,
         cursor: Optional[str] = None,
     ) -> List[PydanticMemorySource]:
         """Fetch all sources in a thread, ordered by occurred_at ascending.
 
+        Access control uses scope-based filtering via filter_tags->>'scope',
+        matching the pattern used by memory tables. If user_id is provided,
+        results are further filtered to that user.
+
         Cursor-based pagination: pass the id of the last source seen.
         """
+        from mirix.database.filter_tags_query import apply_filter_tags_sqlalchemy
+
         async with self.session_maker() as session:
             query = (
                 select(MemorySourceModel)
                 .where(
-                    MemorySourceModel.client_id == client_id,
-                    MemorySourceModel.user_id == user_id,
                     MemorySourceModel.external_thread_id == external_thread_id,
                     ~MemorySourceModel.is_deleted,
                 )
                 .order_by(MemorySourceModel.occurred_at.asc(), MemorySourceModel.created_at.asc())
             )
+
+            # Scope-based access control (same pattern as memory tables)
+            query = apply_filter_tags_sqlalchemy(query, MemorySourceModel, None, scopes=scopes)
+
+            if user_id:
+                query = query.where(MemorySourceModel.user_id == user_id)
 
             if cursor:
                 cursor_result = await session.execute(

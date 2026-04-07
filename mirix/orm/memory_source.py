@@ -97,6 +97,13 @@ class MemorySource(SqlalchemyBase, OrganizationMixin, UserMixin):
         doc="SHA-256 fallback dedup hash",
     )
 
+    filter_tags: Mapped[Optional[dict]] = mapped_column(
+        JSON,
+        nullable=True,
+        default=None,
+        doc="Custom filter tags for filtering and categorization (includes scope for access control)",
+    )
+
     __table_args__ = tuple(
         filter(
             None,
@@ -135,6 +142,27 @@ class MemorySource(SqlalchemyBase, OrganizationMixin, UserMixin):
                         "user_id",
                         "external_thread_id",
                         "occurred_at",
+                    )
+                    if settings.mirix_pg_uri_no_default
+                    else None
+                ),
+                # GIN index on filter_tags for flexible tag queries
+                (
+                    Index(
+                        "ix_memory_sources_filter_tags_gin",
+                        text("(filter_tags::jsonb)"),
+                        postgresql_using="gin",
+                    )
+                    if settings.mirix_pg_uri_no_default
+                    else None
+                ),
+                # Scope-based access control index (matches memory table pattern)
+                (
+                    Index(
+                        "ix_memory_sources_org_filter_scope",
+                        "organization_id",
+                        text("((filter_tags->>'scope')::text)"),
+                        postgresql_using="btree",
                     )
                     if settings.mirix_pg_uri_no_default
                     else None

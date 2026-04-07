@@ -1586,6 +1586,7 @@ class Agent(BaseAgent):
                 summary=self.source_summary,
                 summary_source=self.source_summary_source,
                 batch_hash=batch_hash,
+                filter_tags=self.filter_tags,
             )
 
             if msg_dicts:

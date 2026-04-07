@@ -5381,9 +5381,15 @@ async def get_memory_source(
     x_org_id: Optional[str] = Header(None),
     x_api_key: Optional[str] = Header(None),
 ):
-    """Get a memory source by ID (metadata + summary)."""
+    """Get a memory source by ID (metadata + summary).
+
+    Access control uses scope-based filtering via filter_tags->>'scope',
+    matching the pattern used by memory tables. A client can read any
+    memory source whose scope is in the client's read_scopes list.
+    """
     server = get_server()
     client_id, org_id = await get_client_and_org(x_client_id, x_org_id, x_api_key)
+    client = await server.client_manager.get_client_by_id(client_id)
 
     from mirix.services.memory_source_manager import MemorySourceManager
 
@@ -5392,8 +5398,9 @@ async def get_memory_source(
     if not source:
         raise HTTPException(status_code=404, detail=f"Memory source {source_id} not found")
 
-    # Access control: verify the source belongs to this client
-    if source.client_id != client_id:
+    # Scope-based access control (same pattern as memory tables)
+    source_scope = (source.filter_tags or {}).get("scope")
+    if source_scope not in client.read_scopes:
         raise HTTPException(status_code=404, detail=f"Memory source {source_id} not found")
 
     if user_id and source.user_id != user_id:
@@ -5412,17 +5419,26 @@ async def get_memory_source_messages(
     x_org_id: Optional[str] = Header(None),
     x_api_key: Optional[str] = Header(None),
 ):
-    """Get messages belonging to a specific memory source."""
+    """Get messages belonging to a specific memory source.
+
+    Source messages inherit the parent source's access control — if the
+    client can read the source (scope in read_scopes), it can read the messages.
+    """
     server = get_server()
     client_id, org_id = await get_client_and_org(x_client_id, x_org_id, x_api_key)
+    client = await server.client_manager.get_client_by_id(client_id)
 
     from mirix.services.memory_source_manager import MemorySourceManager
     from mirix.services.source_message_manager import SourceMessageManager
 
-    # Verify source exists and belongs to this client
+    # Verify source exists and client has scope access
     source_mgr = MemorySourceManager()
     source = await source_mgr.get_by_id(source_id)
-    if not source or source.client_id != client_id:
+    if not source:
+        raise HTTPException(status_code=404, detail=f"Memory source {source_id} not found")
+
+    source_scope = (source.filter_tags or {}).get("scope")
+    if source_scope not in client.read_scopes:
         raise HTTPException(status_code=404, detail=f"Memory source {source_id} not found")
 
     if user_id and source.user_id != user_id:
@@ -5447,22 +5463,21 @@ async def get_thread_sources(
     x_org_id: Optional[str] = Header(None),
     x_api_key: Optional[str] = Header(None),
 ):
-    """Get all memory sources in a thread, ordered by occurred_at."""
+    """Get all memory sources in a thread, ordered by occurred_at.
+
+    Access control uses scope-based filtering — only sources whose scope
+    is in the client's read_scopes are returned.
+    """
     server = get_server()
     client_id, org_id = await get_client_and_org(x_client_id, x_org_id, x_api_key)
-
-    if not user_id:
-        from mirix.services.admin_user_manager import ClientAuthManager
-
-        client = await server.client_manager.get_client_by_id(client_id)
-        user_id = ClientAuthManager.get_admin_user_id_for_client(client.id)
+    client = await server.client_manager.get_client_by_id(client_id)
 
     from mirix.services.memory_source_manager import MemorySourceManager
 
     manager = MemorySourceManager()
     sources = await manager.get_sources_by_thread_id(
         external_thread_id=external_thread_id,
-        client_id=client_id,
+        scopes=client.read_scopes,
         user_id=user_id,
         limit=limit,
         cursor=cursor,
@@ -5480,23 +5495,22 @@ async def get_thread_messages(
     x_org_id: Optional[str] = Header(None),
     x_api_key: Optional[str] = Header(None),
 ):
-    """Get all messages across a thread, flattened and ordered by timestamp."""
+    """Get all messages across a thread, flattened and ordered by timestamp.
+
+    Access control: verifies at least one source in the thread is readable
+    by the client (scope in read_scopes) before returning messages.
+    """
     server = get_server()
     client_id, org_id = await get_client_and_org(x_client_id, x_org_id, x_api_key)
+    client = await server.client_manager.get_client_by_id(client_id)
 
-    if not user_id:
-        from mirix.services.admin_user_manager import ClientAuthManager
-
-        client = await server.client_manager.get_client_by_id(client_id)
-        user_id = ClientAuthManager.get_admin_user_id_for_client(client.id)
-
-    # Verify at least one source in this thread belongs to this client+user
+    # Verify at least one source in this thread is readable by this client
     from mirix.services.memory_source_manager import MemorySourceManager
 
     source_mgr = MemorySourceManager()
     sources = await source_mgr.get_sources_by_thread_id(
         external_thread_id=external_thread_id,
-        client_id=client_id,
+        scopes=client.read_scopes,
         user_id=user_id,
         limit=1,
     )

@@ -1,6 +1,8 @@
 """Unit tests for S9 retrieval endpoints — memory sources and threads.
 
 Tests the manager retrieval methods and API route handlers using mocks.
+Validates scope-based access control: memory sources use filter_tags->>'scope'
+matching the same pattern as memory tables (client.read_scopes).
 """
 
 from datetime import datetime, timezone
@@ -20,7 +22,17 @@ SMSG_ID_1 = "smsg-aaaaaaaa-1111-2222-3333-444444444444"
 SMSG_ID_2 = "smsg-bbbbbbbb-1111-2222-3333-444444444444"
 
 
-def _make_source(id=SRC_ID_1, client_id="client-1", user_id="user-1", external_thread_id="thread-1", occurred_at=None):
+_SENTINEL = object()
+
+
+def _make_source(
+    id=SRC_ID_1,
+    client_id="client-1",
+    user_id="user-1",
+    external_thread_id="thread-1",
+    occurred_at=None,
+    filter_tags=_SENTINEL,
+):
     return MemorySource(
         id=id,
         client_id=client_id,
@@ -30,6 +42,7 @@ def _make_source(id=SRC_ID_1, client_id="client-1", user_id="user-1", external_t
         source_type="conversation",
         processing_complete=False,
         occurred_at=occurred_at or datetime(2026, 1, 1, tzinfo=timezone.utc),
+        filter_tags={"scope": "sbg"} if filter_tags is _SENTINEL else filter_tags,
     )
 
 
@@ -42,6 +55,15 @@ def _make_message(id=SMSG_ID_1, memory_source_id=SRC_ID_1, sequence_num=0, role=
         sequence_num=sequence_num,
         content_hash="abc123",
     )
+
+
+def _make_client(client_id="client-1", read_scopes=None, write_scope="sbg"):
+    """Create a mock client with scope configuration."""
+    client = MagicMock()
+    client.id = client_id
+    client.read_scopes = read_scopes if read_scopes is not None else ["sbg"]
+    client.write_scope = write_scope
+    return client
 
 
 # --- MemorySourceManager.get_sources_by_thread_id ---
@@ -79,8 +101,7 @@ class TestGetSourcesByThreadId:
 
         result = await mgr.get_sources_by_thread_id(
             external_thread_id="thread-1",
-            client_id="client-1",
-            user_id="user-1",
+            scopes=["sbg"],
         )
 
         assert len(result) == 2
@@ -168,20 +189,47 @@ class TestGetMessagesByThreadId:
 
 # --- REST API route handlers ---
 
+def _mock_server_with_client(client):
+    """Set up mock server that returns the given client from client_manager."""
+    mock_server = MagicMock()
+    mock_server.client_manager.get_client_by_id = AsyncMock(return_value=client)
+    return mock_server
+
+
 class TestGetMemorySourceRoute:
 
     @pytest.mark.asyncio
-    async def test_returns_source(self):
+    async def test_returns_source_when_scope_matches(self):
         from mirix.server.rest_api import get_memory_source
 
-        source = _make_source()
+        source = _make_source(filter_tags={"scope": "sbg"})
+        client = _make_client(read_scopes=["sbg"])
+
         with patch("mirix.services.memory_source_manager.MemorySourceManager") as MockMgr:
             mock_instance = MockMgr.return_value
             mock_instance.get_by_id = AsyncMock(return_value=source)
 
             with patch("mirix.server.rest_api.get_client_and_org", new_callable=AsyncMock, return_value=("client-1", "org-1")):
-                with patch("mirix.server.rest_api.get_server"):
+                with patch("mirix.server.rest_api.get_server", return_value=_mock_server_with_client(client)):
                     result = await get_memory_source(source_id=SRC_ID_1, x_client_id="client-1")
+
+        assert result.id == SRC_ID_1
+
+    @pytest.mark.asyncio
+    async def test_cross_client_scope_access(self):
+        """Client B can read a source created by Client A if the scope is in Client B's read_scopes."""
+        from mirix.server.rest_api import get_memory_source
+
+        source = _make_source(client_id="client-a", filter_tags={"scope": "shared-scope"})
+        client_b = _make_client(client_id="client-b", read_scopes=["shared-scope"])
+
+        with patch("mirix.services.memory_source_manager.MemorySourceManager") as MockMgr:
+            mock_instance = MockMgr.return_value
+            mock_instance.get_by_id = AsyncMock(return_value=source)
+
+            with patch("mirix.server.rest_api.get_client_and_org", new_callable=AsyncMock, return_value=("client-b", "org-1")):
+                with patch("mirix.server.rest_api.get_server", return_value=_mock_server_with_client(client_b)):
+                    result = await get_memory_source(source_id=SRC_ID_1, x_client_id="client-b")
 
         assert result.id == SRC_ID_1
 
@@ -189,32 +237,101 @@ class TestGetMemorySourceRoute:
     async def test_404_when_not_found(self):
         from mirix.server.rest_api import get_memory_source
 
+        client = _make_client(read_scopes=["sbg"])
+
         with patch("mirix.services.memory_source_manager.MemorySourceManager") as MockMgr:
             mock_instance = MockMgr.return_value
             mock_instance.get_by_id = AsyncMock(return_value=None)
 
             with patch("mirix.server.rest_api.get_client_and_org", new_callable=AsyncMock, return_value=("client-1", "org-1")):
-                with patch("mirix.server.rest_api.get_server"):
+                with patch("mirix.server.rest_api.get_server", return_value=_mock_server_with_client(client)):
                     from fastapi import HTTPException as FastHTTPException
                     with pytest.raises(FastHTTPException) as exc_info:
-                        await get_memory_source(source_id="src-cccccccc-0000-0000-0000-000000000000", x_client_id="client-1")
+                        await get_memory_source(source_id="src-missing", x_client_id="client-1")
 
                     assert exc_info.value.status_code == 404
 
     @pytest.mark.asyncio
-    async def test_404_when_wrong_client(self):
+    async def test_404_when_scope_not_in_read_scopes(self):
+        """Client cannot read a source whose scope is not in its read_scopes."""
         from mirix.server.rest_api import get_memory_source
 
-        source = _make_source(client_id="client-1")
+        source = _make_source(filter_tags={"scope": "tax"})
+        client = _make_client(read_scopes=["sbg"])
+
         with patch("mirix.services.memory_source_manager.MemorySourceManager") as MockMgr:
             mock_instance = MockMgr.return_value
             mock_instance.get_by_id = AsyncMock(return_value=source)
 
-            with patch("mirix.server.rest_api.get_client_and_org", new_callable=AsyncMock, return_value=("other-client", "org-1")):
-                with patch("mirix.server.rest_api.get_server"):
+            with patch("mirix.server.rest_api.get_client_and_org", new_callable=AsyncMock, return_value=("client-1", "org-1")):
+                with patch("mirix.server.rest_api.get_server", return_value=_mock_server_with_client(client)):
                     from fastapi import HTTPException as FastHTTPException
                     with pytest.raises(FastHTTPException) as exc_info:
-                        await get_memory_source(source_id=SRC_ID_1, x_client_id="other-client")
+                        await get_memory_source(source_id=SRC_ID_1, x_client_id="client-1")
+
+                    assert exc_info.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_404_when_no_filter_tags(self):
+        """Source with no filter_tags (legacy) is not accessible."""
+        from mirix.server.rest_api import get_memory_source
+
+        source = _make_source(filter_tags=None)
+        client = _make_client(read_scopes=["sbg"])
+
+        with patch("mirix.services.memory_source_manager.MemorySourceManager") as MockMgr:
+            mock_instance = MockMgr.return_value
+            mock_instance.get_by_id = AsyncMock(return_value=source)
+
+            with patch("mirix.server.rest_api.get_client_and_org", new_callable=AsyncMock, return_value=("client-1", "org-1")):
+                with patch("mirix.server.rest_api.get_server", return_value=_mock_server_with_client(client)):
+                    from fastapi import HTTPException as FastHTTPException
+                    with pytest.raises(FastHTTPException) as exc_info:
+                        await get_memory_source(source_id=SRC_ID_1, x_client_id="client-1")
+
+                    assert exc_info.value.status_code == 404
+
+
+class TestGetMemorySourceMessagesRoute:
+
+    @pytest.mark.asyncio
+    async def test_returns_messages_when_scope_matches(self):
+        from mirix.server.rest_api import get_memory_source_messages
+
+        source = _make_source(filter_tags={"scope": "sbg"})
+        client = _make_client(read_scopes=["sbg"])
+        messages = [_make_message(id=SMSG_ID_1), _make_message(id=SMSG_ID_2, sequence_num=1)]
+
+        with patch("mirix.services.memory_source_manager.MemorySourceManager") as MockSourceMgr:
+            mock_source_instance = MockSourceMgr.return_value
+            mock_source_instance.get_by_id = AsyncMock(return_value=source)
+
+            with patch("mirix.services.source_message_manager.SourceMessageManager") as MockMsgMgr:
+                mock_msg_instance = MockMsgMgr.return_value
+                mock_msg_instance.get_messages_by_source_id = AsyncMock(return_value=messages)
+
+                with patch("mirix.server.rest_api.get_client_and_org", new_callable=AsyncMock, return_value=("client-1", "org-1")):
+                    with patch("mirix.server.rest_api.get_server", return_value=_mock_server_with_client(client)):
+                        result = await get_memory_source_messages(source_id=SRC_ID_1, x_client_id="client-1")
+
+        assert len(result) == 2
+
+    @pytest.mark.asyncio
+    async def test_404_when_scope_mismatch(self):
+        from mirix.server.rest_api import get_memory_source_messages
+
+        source = _make_source(filter_tags={"scope": "tax"})
+        client = _make_client(read_scopes=["sbg"])
+
+        with patch("mirix.services.memory_source_manager.MemorySourceManager") as MockSourceMgr:
+            mock_source_instance = MockSourceMgr.return_value
+            mock_source_instance.get_by_id = AsyncMock(return_value=source)
+
+            with patch("mirix.server.rest_api.get_client_and_org", new_callable=AsyncMock, return_value=("client-1", "org-1")):
+                with patch("mirix.server.rest_api.get_server", return_value=_mock_server_with_client(client)):
+                    from fastapi import HTTPException as FastHTTPException
+                    with pytest.raises(FastHTTPException) as exc_info:
+                        await get_memory_source_messages(source_id=SRC_ID_1, x_client_id="client-1")
 
                     assert exc_info.value.status_code == 404
 
@@ -226,12 +343,14 @@ class TestGetThreadSourcesRoute:
         from mirix.server.rest_api import get_thread_sources
 
         sources = [_make_source(id=SRC_ID_1), _make_source(id=SRC_ID_2)]
+        client = _make_client(read_scopes=["sbg"])
+
         with patch("mirix.services.memory_source_manager.MemorySourceManager") as MockMgr:
             mock_instance = MockMgr.return_value
             mock_instance.get_sources_by_thread_id = AsyncMock(return_value=sources)
 
             with patch("mirix.server.rest_api.get_client_and_org", new_callable=AsyncMock, return_value=("client-1", "org-1")):
-                with patch("mirix.server.rest_api.get_server"):
+                with patch("mirix.server.rest_api.get_server", return_value=_mock_server_with_client(client)):
                     result = await get_thread_sources(
                         external_thread_id="thread-1",
                         user_id="user-1",
@@ -240,6 +359,32 @@ class TestGetThreadSourcesRoute:
 
         assert len(result) == 2
 
+    @pytest.mark.asyncio
+    async def test_passes_scopes_to_manager(self):
+        """Verify that client.read_scopes are forwarded to the manager method."""
+        from mirix.server.rest_api import get_thread_sources
+
+        client = _make_client(read_scopes=["sbg", "tax"])
+
+        with patch("mirix.services.memory_source_manager.MemorySourceManager") as MockMgr:
+            mock_instance = MockMgr.return_value
+            mock_instance.get_sources_by_thread_id = AsyncMock(return_value=[])
+
+            with patch("mirix.server.rest_api.get_client_and_org", new_callable=AsyncMock, return_value=("client-1", "org-1")):
+                with patch("mirix.server.rest_api.get_server", return_value=_mock_server_with_client(client)):
+                    await get_thread_sources(
+                        external_thread_id="thread-1",
+                        x_client_id="client-1",
+                    )
+
+        mock_instance.get_sources_by_thread_id.assert_called_once_with(
+            external_thread_id="thread-1",
+            scopes=["sbg", "tax"],
+            user_id=None,
+            limit=50,
+            cursor=None,
+        )
+
 
 class TestGetThreadMessagesRoute:
 
@@ -247,12 +392,14 @@ class TestGetThreadMessagesRoute:
     async def test_404_when_thread_not_found(self):
         from mirix.server.rest_api import get_thread_messages
 
+        client = _make_client(read_scopes=["sbg"])
+
         with patch("mirix.services.memory_source_manager.MemorySourceManager") as MockSourceMgr:
             mock_source_instance = MockSourceMgr.return_value
             mock_source_instance.get_sources_by_thread_id = AsyncMock(return_value=[])
 
             with patch("mirix.server.rest_api.get_client_and_org", new_callable=AsyncMock, return_value=("client-1", "org-1")):
-                with patch("mirix.server.rest_api.get_server"):
+                with patch("mirix.server.rest_api.get_server", return_value=_mock_server_with_client(client)):
                     from fastapi import HTTPException as FastHTTPException
                     with pytest.raises(FastHTTPException) as exc_info:
                         await get_thread_messages(
@@ -262,3 +409,28 @@ class TestGetThreadMessagesRoute:
                         )
 
                     assert exc_info.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_returns_messages_when_thread_accessible(self):
+        from mirix.server.rest_api import get_thread_messages
+
+        source = _make_source(filter_tags={"scope": "sbg"})
+        client = _make_client(read_scopes=["sbg"])
+        messages = [_make_message(id=SMSG_ID_1), _make_message(id=SMSG_ID_2, sequence_num=1)]
+
+        with patch("mirix.services.memory_source_manager.MemorySourceManager") as MockSourceMgr:
+            mock_source_instance = MockSourceMgr.return_value
+            mock_source_instance.get_sources_by_thread_id = AsyncMock(return_value=[source])
+
+            with patch("mirix.services.source_message_manager.SourceMessageManager") as MockMsgMgr:
+                mock_msg_instance = MockMsgMgr.return_value
+                mock_msg_instance.get_messages_by_thread_id = AsyncMock(return_value=messages)
+
+                with patch("mirix.server.rest_api.get_client_and_org", new_callable=AsyncMock, return_value=("client-1", "org-1")):
+                    with patch("mirix.server.rest_api.get_server", return_value=_mock_server_with_client(client)):
+                        result = await get_thread_messages(
+                            external_thread_id="thread-1",
+                            x_client_id="client-1",
+                        )
+
+        assert len(result) == 2
