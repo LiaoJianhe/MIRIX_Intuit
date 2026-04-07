@@ -1958,6 +1958,13 @@ class AddMemoryRequest(BaseModel):
     block_filter_tags_update_mode: Optional[str] = "merge"  # "merge" or "replace"
     use_cache: bool = True  # Control Redis cache behavior
     occurred_at: Optional[str] = None  # Optional ISO 8601 timestamp string for episodic memory
+    external_id: Optional[str] = None  # Client-provided stable dedup key
+    external_thread_id: Optional[str] = None  # Groups multiple saves into a thread
+    summarize: bool = False  # Opt-in async summary generation
+    summary: Optional[str] = None  # Client-provided summary (bypasses generation)
+    source_type: str = "conversation"  # Freeform string label for source type
+    source_system: Optional[str] = None  # Originating system label
+    source_metadata: Optional[Dict[str, Any]] = None  # Client-provided lineage context bag
 
 
 @router.post("/memory/add")
@@ -2008,6 +2015,19 @@ async def add_memory(
         logger.debug("No user_id provided, using admin user: %s", user_id)
 
     message = request.messages
+
+    # WHY original_messages?
+    #
+    # The flattening below destroys per-message identity: it merges all turns into
+    # a flat content list with [USER]/[ASSISTANT] text markers, then packs them into
+    # a single MessageCreate. Per-message metadata (role, external_message_id,
+    # occurred_at) is lost.
+    #
+    # original_messages preserves the raw per-turn dicts so they can travel through
+    # protobuf (as QueueMessage.source_messages, field 24) to the MetaAgent's
+    # _persist_memory_source(), which stores them individually in the source_messages
+    # DB table. See the parallel comment in queue_util.py put_messages().
+    original_messages = request.messages
 
     if isinstance(message, list) and "role" in message[0].keys():
         # This means the input is in the format of [{"role": "user", "content": [{"type": "text", "text": "..."}]}, {"role": "assistant", "content": [{"type": "text", "text": "..."}]}]
@@ -2060,6 +2080,11 @@ async def add_memory(
         raise HTTPException(status_code=403, detail="Client has no write_scope - cannot create memories")
     filter_tags["scope"] = client.write_scope
 
+    # Pre-generate memory_source_id for citation tracking
+    import uuid
+
+    memory_source_id = f"src-{uuid.uuid4()}"
+
     # Queue for async processing instead of synchronous execution
     # Note: actor is Client for org-level access control
     #       user_id represents the actual end-user (or admin user if not provided)
@@ -2075,6 +2100,15 @@ async def add_memory(
         block_filter_tags_update_mode=request.block_filter_tags_update_mode,
         use_cache=request.use_cache,
         occurred_at=request.occurred_at,  # Optional timestamp for episodic memory
+        memory_source_id=memory_source_id,
+        external_id=request.external_id,
+        external_thread_id=request.external_thread_id,
+        source_type=request.source_type,
+        source_system=request.source_system,
+        source_metadata=request.source_metadata,
+        summary=request.summary,
+        summarize=request.summarize,
+        source_messages=original_messages,
     )
 
     logger.debug("Memory queued for processing: %s", meta_agent.id)
@@ -2085,6 +2119,7 @@ async def add_memory(
         "status": "queued",
         "agent_id": meta_agent.id,
         "message_count": len(input_messages),
+        "memory_source_id": memory_source_id,
     }
 
 

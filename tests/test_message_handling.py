@@ -269,6 +269,26 @@ def build_step_test_agent(agent_state: AgentState, user: User) -> Agent:
         )
     )
     agent.interface = SimpleNamespace(step_complete=lambda: None)
+    agent.occurred_at = None
+    # Memory source fields (added by S2/S6)
+    agent.memory_source_id = None
+    agent.external_id = None
+    agent.external_thread_id = None
+    agent.source_type = None
+    agent.source_system = None
+    agent.source_metadata = None
+    agent.source_summary = None
+    agent.source_summary_source = None
+    agent.summarize = False
+    agent.source_messages = None
+    agent.memory_source_manager = SimpleNamespace(
+        create=AsyncMock(),
+        get_by_id=AsyncMock(return_value=None),
+        mark_processing_complete=AsyncMock(),
+    )
+    agent.source_message_manager = SimpleNamespace(
+        bulk_insert=AsyncMock(),
+    )
     return agent
 
 

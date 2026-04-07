@@ -83,6 +83,15 @@ async def put_messages(
     block_filter_tags_update_mode: Optional[str] = "merge",
     use_cache: bool = True,
     occurred_at: Optional[str] = None,
+    memory_source_id: Optional[str] = None,
+    external_id: Optional[str] = None,
+    external_thread_id: Optional[str] = None,
+    source_type: Optional[str] = None,
+    source_system: Optional[str] = None,
+    source_metadata: Optional[dict] = None,
+    summary: Optional[str] = None,
+    summarize: bool = False,
+    source_messages: Optional[List[dict]] = None,
 ):
     """
     Create QueueMessage protobuf and send to queue.
@@ -143,6 +152,10 @@ async def put_messages(
             proto_msg.sender_id = msg.sender_id
         if msg.group_id:
             proto_msg.group_id = msg.group_id
+        if msg.external_message_id:
+            proto_msg.external_message_id = msg.external_message_id
+        if msg.message_occurred_at:
+            proto_msg.message_occurred_at = msg.message_occurred_at
 
         proto_input_messages.append(proto_msg)
 
@@ -179,6 +192,70 @@ async def put_messages(
     # Set occurred_at if provided
     if occurred_at is not None:
         queue_msg.occurred_at = occurred_at
+
+    # Memory source fields
+    if memory_source_id is not None:
+        queue_msg.memory_source_id = memory_source_id
+    if external_id is not None:
+        queue_msg.external_id = external_id
+    if external_thread_id is not None:
+        queue_msg.external_thread_id = external_thread_id
+    if source_type is not None:
+        queue_msg.source_type = source_type
+    if source_system is not None:
+        queue_msg.source_system = source_system
+    if source_metadata:
+        queue_msg.source_metadata.update(source_metadata)
+    if summary is not None:
+        queue_msg.summary = summary
+    if summarize:
+        queue_msg.summarize = summarize
+
+    # WHY TWO MESSAGE ARRAYS (source_messages vs input_messages)?
+    #
+    # input_messages (field 3) carries the PACKED message for agent processing.
+    # The add_memory handler flattens all conversation turns into a single
+    # MessageCreate with [USER]/[ASSISTANT] text markers — this is what the
+    # MetaAgent and sub-agents consume. Per-message identity (role, external_message_id,
+    # occurred_at) is lost during that flattening.
+    #
+    # source_messages (field 24) carries the ORIGINAL per-turn messages so that
+    # _persist_memory_source() can store them individually in the source_messages
+    # DB table with their per-message metadata intact. These are never used for
+    # agent processing.
+    #
+    # This duplication exists because the flattening happens before enqueue and
+    # we can't change that without reworking how agents consume messages. A future
+    # refactor could move the flattening into the MetaAgent itself, eliminating
+    # the need for two copies.
+    if source_messages:
+        for msg_dict in source_messages:
+            proto_src_msg = ProtoMessageCreate()
+            role = msg_dict.get("role", "user")
+            if role == "user":
+                proto_src_msg.role = ProtoMessageCreate.ROLE_USER
+            elif role == "system":
+                proto_src_msg.role = ProtoMessageCreate.ROLE_SYSTEM
+            elif role == "assistant":
+                proto_src_msg.role = ProtoMessageCreate.ROLE_ASSISTANT
+            else:
+                proto_src_msg.role = ProtoMessageCreate.ROLE_UNSPECIFIED
+
+            content = msg_dict.get("content", "")
+            if isinstance(content, str):
+                proto_src_msg.text_content = content
+            elif isinstance(content, list):
+                text_parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
+                proto_src_msg.text_content = "\n".join(text_parts)
+
+            if msg_dict.get("external_message_id"):
+                proto_src_msg.external_message_id = msg_dict["external_message_id"]
+            if msg_dict.get("occurred_at"):
+                proto_src_msg.message_occurred_at = msg_dict["occurred_at"]
+            if msg_dict.get("metadata"):
+                proto_src_msg.message_metadata.update(msg_dict["metadata"])
+
+            queue_msg.source_messages.append(proto_src_msg)
 
     # Add LangFuse trace context for distributed tracing
     queue_msg = add_trace_to_queue_message(queue_msg)

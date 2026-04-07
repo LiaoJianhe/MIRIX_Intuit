@@ -76,6 +76,12 @@ class SourceMessage(SqlalchemyBase):
         doc="SHA-256 of (role, content) for dedup",
     )
 
+    message_metadata: Mapped[Optional[dict]] = mapped_column(
+        JSON,
+        nullable=True,
+        doc="Client-provided per-message property bag",
+    )
+
     __table_args__ = tuple(
         filter(
             None,

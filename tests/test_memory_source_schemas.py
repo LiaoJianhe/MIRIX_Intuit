@@ -279,3 +279,143 @@ class TestORMModels:
         assert MemorySource.__tablename__ == "memory_sources"
         assert SourceMessage.__tablename__ == "source_messages"
         assert MemoryCitation.__tablename__ == "memory_citations"
+
+
+# --- AddMemoryRequest schema tests ---
+
+
+class TestAddMemoryRequestSchema:
+    """Test the extended AddMemoryRequest with source fields."""
+
+    def test_new_source_fields_accepted(self):
+        from mirix.server.rest_api import AddMemoryRequest
+
+        req = AddMemoryRequest(
+            meta_agent_id="agent-1",
+            messages=[{"role": "user", "content": "hello"}],
+            external_id="ext-123",
+            external_thread_id="thread-456",
+            summarize=True,
+            summary="A chat about billing",
+            source_type="conversation",
+            source_system="slack",
+            source_metadata={"channel_id": "C123"},
+        )
+        assert req.external_id == "ext-123"
+        assert req.external_thread_id == "thread-456"
+        assert req.summarize is True
+        assert req.summary == "A chat about billing"
+        assert req.source_type == "conversation"
+        assert req.source_system == "slack"
+        assert req.source_metadata == {"channel_id": "C123"}
+
+    def test_source_field_defaults(self):
+        from mirix.server.rest_api import AddMemoryRequest
+
+        req = AddMemoryRequest(
+            meta_agent_id="agent-1",
+            messages=[{"role": "user", "content": "hello"}],
+        )
+        assert req.external_id is None
+        assert req.external_thread_id is None
+        assert req.summarize is False
+        assert req.summary is None
+        assert req.source_type == "conversation"
+        assert req.source_system is None
+        assert req.source_metadata is None
+
+    def test_backward_compatible_without_source_fields(self):
+        """Existing clients sending only old fields still work."""
+        from mirix.server.rest_api import AddMemoryRequest
+
+        req = AddMemoryRequest(
+            meta_agent_id="agent-1",
+            messages=[{"role": "user", "content": "hi"}],
+            chaining=False,
+            verbose=True,
+            use_cache=False,
+            occurred_at="2026-01-15T10:00:00Z",
+        )
+        assert req.meta_agent_id == "agent-1"
+        assert req.chaining is False
+
+
+# --- normalize_message tests ---
+
+from mirix.services.source_message_manager import normalize_message
+
+
+class TestNormalizeMessage:
+    """Test that normalize_message handles both dicts and Pydantic objects."""
+
+    def test_dict_with_per_message_fields(self):
+        msg = {
+            "role": "assistant",
+            "content": "I can help",
+            "external_message_id": "ext-msg-1",
+            "message_occurred_at": "2026-01-15T10:00:00Z",
+        }
+        normalized = normalize_message(msg)
+
+        assert normalized["role"] == "assistant"
+        assert normalized["content"] == {"text": "I can help"}
+        assert normalized["external_message_id"] == "ext-msg-1"
+        assert normalized["occurred_at"] == "2026-01-15T10:00:00Z"
+
+    def test_dict_without_optional_fields(self):
+        msg = {"role": "user", "content": "hello"}
+        normalized = normalize_message(msg)
+
+        assert normalized["role"] == "user"
+        assert normalized["content"] == {"text": "hello"}
+        assert "external_message_id" not in normalized
+        assert "occurred_at" not in normalized
+
+    def test_pydantic_message_create(self):
+        """normalize_message works with Pydantic MessageCreate objects."""
+        from mirix.schemas.message import MessageCreate
+
+        msg = MessageCreate(role="user", content="hello", external_message_id="ext-1", message_occurred_at="2026-01-15T10:00:00Z")
+        normalized = normalize_message(msg)
+
+        assert normalized["role"] == "user"
+        assert normalized["content"] == {"text": "hello"}
+        assert normalized["external_message_id"] == "ext-1"
+        assert normalized["occurred_at"] == "2026-01-15T10:00:00Z"
+
+    def test_pydantic_without_optional_fields(self):
+        from mirix.schemas.message import MessageCreate
+
+        msg = MessageCreate(role="user", content="hello")
+        normalized = normalize_message(msg)
+
+        assert normalized["role"] == "user"
+        assert "external_message_id" not in normalized
+        assert "occurred_at" not in normalized
+
+    def test_dict_with_metadata(self):
+        msg = {
+            "role": "user",
+            "content": "hello",
+            "metadata": {"source": "slack", "channel": "#general"},
+        }
+        normalized = normalize_message(msg)
+
+        assert normalized["metadata"] == {"source": "slack", "channel": "#general"}
+
+
+# --- memory_source_id generation tests ---
+
+import uuid
+
+
+class TestMemorySourceIdGeneration:
+    def test_format(self):
+        """memory_source_id should be src-{uuid4} format."""
+        memory_source_id = f"src-{uuid.uuid4()}"
+        assert memory_source_id.startswith("src-")
+        uuid.UUID(memory_source_id.split("-", 1)[1])
+
+    def test_uniqueness(self):
+        ids = {f"src-{uuid.uuid4()}" for _ in range(100)}
+        assert len(ids) == 100

@@ -68,22 +68,33 @@ def derive_external_id_from_message_ids(message_ids: List[str]) -> str:
     return f"auto-{h.hexdigest()}"
 
 
+def _get(msg, key, default=None):
+    """Read a field from a dict or an object attribute."""
+    if isinstance(msg, dict):
+        return msg.get(key, default)
+    return getattr(msg, key, default)
+
+
 def normalize_message(msg) -> Dict[str, Any]:
-    """Convert a Message or MessageCreate object into a dict suitable for source message storage.
+    """Convert a Message, MessageCreate, or plain dict into a dict for source message storage.
+
+    Accepts three input shapes:
+      - Pydantic MessageCreate objects (from agent processing path)
+      - Plain dicts (from source_messages deserialization in the worker)
+      - Message ORM objects
 
     Handles role extraction (str or enum), content normalization (str -> dict),
     and optional per-message fields (external_message_id, message_occurred_at).
     """
-    role = getattr(msg, "role", None) or "user"
+    role = _get(msg, "role") or "user"
     if hasattr(role, "value"):
         role = role.value
     role = str(role)
 
-    if hasattr(msg, "content"):
-        content = msg.content
-    elif hasattr(msg, "text"):
-        content = msg.text
-    else:
+    content = _get(msg, "content")
+    if content is None:
+        content = _get(msg, "text")
+    if content is None:
         content = str(msg)
 
     # Normalize content to dict
@@ -95,10 +106,17 @@ def normalize_message(msg) -> Dict[str, Any]:
     result = {"role": role, "content": content}
 
     # Carry per-message fields if present
-    if hasattr(msg, "external_message_id") and msg.external_message_id:
-        result["external_message_id"] = msg.external_message_id
-    if hasattr(msg, "message_occurred_at") and msg.message_occurred_at:
-        result["occurred_at"] = msg.message_occurred_at
+    ext_msg_id = _get(msg, "external_message_id")
+    if ext_msg_id:
+        result["external_message_id"] = ext_msg_id
+
+    occurred = _get(msg, "message_occurred_at") or _get(msg, "occurred_at")
+    if occurred:
+        result["occurred_at"] = occurred
+
+    metadata = _get(msg, "metadata")
+    if metadata:
+        result["metadata"] = metadata
 
     return result
 
@@ -117,11 +135,16 @@ class SourceMessageManager:
         messages: List[Dict[str, Any]],
         memory_source_id: str,
         external_thread_id: Optional[str] = None,
+        fallback_occurred_at: Optional[str] = None,
     ) -> int:
         """Insert source messages in bulk using ORM bulk_create_or_ignore.
 
         Each message dict should have: role, content, and optionally
-        external_message_id and occurred_at.
+        external_message_id, occurred_at, and metadata.
+
+        Args:
+            fallback_occurred_at: Top-level occurred_at from the request. Used when
+                a message doesn't have its own per-message occurred_at.
 
         Returns the number of rows actually inserted (excludes conflicts).
         """
@@ -143,9 +166,10 @@ class SourceMessageManager:
                     external_message_id=msg.get("external_message_id"),
                     role=role,
                     content=content if isinstance(content, dict) else {"text": content},
-                    occurred_at=msg.get("occurred_at"),
+                    occurred_at=msg.get("occurred_at") or fallback_occurred_at,
                     sequence_num=seq,
                     content_hash=content_hash,
+                    message_metadata=msg.get("metadata"),
                     created_at=now,
                     updated_at=now,
                     is_deleted=False,

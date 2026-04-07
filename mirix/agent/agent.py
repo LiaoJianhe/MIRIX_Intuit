@@ -194,6 +194,14 @@ class Agent(BaseAgent):
         self.source_metadata = None
         self.source_summary = None
         self.source_summary_source = None
+        self.summarize = False
+        # Original per-turn messages (as plain dicts) for source_message persistence.
+        # These exist separately from the packed input_messages because the add_memory
+        # handler flattens all turns into a single MessageCreate with [USER]/[ASSISTANT]
+        # markers for agent processing, which loses per-message identity. source_messages
+        # preserves the original role, external_message_id, and occurred_at per turn.
+        # See the comment in queue_util.py put_messages() for the full explanation.
+        self.source_messages = None
 
         # Derive block scopes from filter_tags for block_manager.get_blocks() calls.
         # filter_tags["scope"] is the client's write_scope, set by the server when queuing work.
@@ -1536,8 +1544,15 @@ class Agent(BaseAgent):
         )
 
         try:
+            # Prefer source_messages (original per-turn dicts with role, external_message_id,
+            # occurred_at intact) over the packed input_messages which lost per-message
+            # fields when the add_memory handler flattened turns into [USER]/[ASSISTANT]
+            # markers. Falls back to input_messages for callers that pass memory_source_id
+            # without source_messages (nobody does today, but the two params aren't coupled).
+            messages_for_persistence = self.source_messages if self.source_messages else input_messages
+
             # Normalize messages once — reused for hash computation and persistence
-            msg_dicts = [normalize_message(msg) for msg in input_messages] if input_messages else []
+            msg_dicts = [normalize_message(msg) for msg in messages_for_persistence] if messages_for_persistence else []
 
             # Compute dedup keys for source-level idempotency
             external_id = self.external_id
@@ -1578,6 +1593,7 @@ class Agent(BaseAgent):
                     messages=msg_dicts,
                     memory_source_id=memory_source_id,
                     external_thread_id=self.external_thread_id,
+                    fallback_occurred_at=self.occurred_at,
                 )
 
             logger.info(
