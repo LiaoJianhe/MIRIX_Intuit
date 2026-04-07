@@ -1,7 +1,7 @@
 """Manager for MemorySource CRUD operations."""
 
 from datetime import datetime, timezone
-from typing import Optional, Union
+from typing import List, Optional, Union
 
 from sqlalchemy import select
 
@@ -135,6 +135,52 @@ class MemorySourceManager:
                 logger.warning("Cache write failed for memory source %s: %s", memory_source_id, e)
 
         return pydantic_source
+
+    @enforce_types
+    async def get_sources_by_thread_id(
+        self,
+        external_thread_id: str,
+        client_id: str,
+        user_id: str,
+        limit: int = 50,
+        cursor: Optional[str] = None,
+    ) -> List[PydanticMemorySource]:
+        """Fetch all sources in a thread, ordered by occurred_at ascending.
+
+        Cursor-based pagination: pass the id of the last source seen.
+        """
+        async with self.session_maker() as session:
+            query = (
+                select(MemorySourceModel)
+                .where(
+                    MemorySourceModel.client_id == client_id,
+                    MemorySourceModel.user_id == user_id,
+                    MemorySourceModel.external_thread_id == external_thread_id,
+                    ~MemorySourceModel.is_deleted,
+                )
+                .order_by(MemorySourceModel.occurred_at.asc(), MemorySourceModel.created_at.asc())
+            )
+
+            if cursor:
+                cursor_result = await session.execute(
+                    select(MemorySourceModel).where(MemorySourceModel.id == cursor)
+                )
+                cursor_obj = cursor_result.scalar_one_or_none()
+                if cursor_obj:
+                    # Use created_at for stable ordering when occurred_at may be null
+                    ref = cursor_obj.occurred_at or cursor_obj.created_at
+                    query = query.where(
+                        (MemorySourceModel.occurred_at > ref)
+                        | (
+                            (MemorySourceModel.occurred_at == ref)
+                            & (MemorySourceModel.created_at > cursor_obj.created_at)
+                        )
+                    )
+
+            query = query.limit(limit)
+            result = await session.execute(query)
+            records = result.scalars().all()
+            return [rec.to_pydantic() for rec in records]
 
     @enforce_types
     async def mark_processing_complete(self, memory_source_id: str) -> None:
