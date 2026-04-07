@@ -52,6 +52,41 @@ async def _write_citation(agent: "Agent", memory_type: str, memory_id: str, cita
     )
 
 
+async def _should_update_memory(agent: "Agent", memory_type: str, memory_id: str) -> bool:
+    """Temporal guard: prevent backdated sources from overwriting more recent memory state.
+
+    Returns True if the update should proceed, False if it should be skipped.
+    Falls back to arrival-order (always allow) when occurred_at is not set.
+    """
+    occurred_at = getattr(agent, "occurred_at", None)
+    if occurred_at is None:
+        return True
+
+    memory_source_id = getattr(agent, "memory_source_id", None)
+    if not memory_source_id:
+        return True
+
+    from mirix.services.memory_citation_manager import MemoryCitationManager
+
+    citation_mgr = MemoryCitationManager()
+    max_occurred_at = await citation_mgr.get_max_occurred_at(memory_type, memory_id)
+
+    if max_occurred_at is None:
+        return True
+
+    if occurred_at < max_occurred_at:
+        logger.info(
+            "Temporal guard: skipping %s/%s update — source occurred_at %s is older than existing %s",
+            memory_type,
+            memory_id,
+            occurred_at,
+            max_occurred_at,
+        )
+        return False
+
+    return True
+
+
 async def core_memory_append(
     self: "Agent", blocks_in_memory: "Memory", label: str, content: str
 ) -> Optional[str]:  # type: ignore
@@ -91,6 +126,10 @@ async def core_memory_append(
         )
         return error_msg
 
+    # Temporal guard: skip if this source is backdated relative to existing citations
+    if not await _should_update_memory(self, "core", current_block.id):
+        return None
+
     # If within limit, perform the append
     blocks_in_memory.update_block_value(label=label, value=new_value)
 
@@ -128,6 +167,10 @@ async def core_memory_rewrite(
 
     # Only update if the content actually changed
     if current_value != new_value:
+        # Temporal guard: skip if this source is backdated relative to existing citations
+        if not await _should_update_memory(self, "core", current_block.id):
+            return None
+
         blocks_in_memory.update_block_value(label=label, value=new_value)
 
         await _write_citation(self, "core", current_block.id, "updated")
@@ -205,6 +248,10 @@ async def episodic_memory_merge(
         Optional[str]: None is always returned as this function does not produce a response.
     """
 
+    # Temporal guard: skip if this source is backdated relative to existing citations
+    if not await _should_update_memory(self, "episodic", event_id):
+        return None
+
     episodic_memory = await self.episodic_memory_manager.update_event(
         event_id=event_id,
         new_summary=combined_summary,
@@ -256,6 +303,11 @@ async def episodic_memory_replace(self: "Agent", event_ids: List[str], new_items
     for event_id in event_ids:
         # It will raise an error if the event_id is not found in the episodic memory.
         await self.episodic_memory_manager.get_episodic_memory_by_id(event_id, user=self.user)
+
+    # Temporal guard: skip if any existing event has a more recent citation
+    for event_id in event_ids:
+        if not await _should_update_memory(self, "episodic", event_id):
+            return None
 
     for event_id in event_ids:
         await self.episodic_memory_manager.delete_event_by_id(event_id, actor=self.actor)
@@ -376,6 +428,11 @@ async def resource_memory_update(self: "Agent", old_ids: List[str], new_items: L
     client_id = getattr(self, "client_id", None)
     user_id = getattr(self, "user_id", None)
 
+    # Temporal guard: skip if any old item has a more recent citation
+    for old_id in old_ids:
+        if not await _should_update_memory(self, "resource", old_id):
+            return None
+
     for old_id in old_ids:
         await self.resource_memory_manager.delete_resource_by_id(resource_id=old_id, actor=self.actor)
 
@@ -450,6 +507,11 @@ async def procedural_memory_update(self: "Agent", old_ids: List[str], new_items:
     use_cache = getattr(self, "use_cache", True)
     client_id = getattr(self, "client_id", None)
     user_id = getattr(self, "user_id", None)
+
+    # Temporal guard: skip if any old item has a more recent citation
+    for old_id in old_ids:
+        if not await _should_update_memory(self, "procedural", old_id):
+            return None
 
     for old_id in old_ids:
         await self.procedural_memory_manager.delete_procedure_by_id(procedure_id=old_id, actor=self.actor)
@@ -563,6 +625,11 @@ async def semantic_memory_update(
     client_id = getattr(self, "client_id", None)
     user_id = getattr(self, "user_id", None)
 
+    # Temporal guard: skip if any old item has a more recent citation
+    for old_id in old_semantic_item_ids:
+        if not await _should_update_memory(self, "semantic", old_id):
+            return f"Skipped: semantic memory update blocked by temporal guard for {old_id}"
+
     for old_id in old_semantic_item_ids:
         await self.semantic_memory_manager.delete_semantic_item_by_id(semantic_memory_id=old_id, actor=self.actor)
 
@@ -648,6 +715,11 @@ async def knowledge_vault_update(self: "Agent", old_ids: List[str], new_items: L
     use_cache = getattr(self, "use_cache", True)
     client_id = getattr(self, "client_id", None)
     user_id = getattr(self, "user_id", None)
+
+    # Temporal guard: skip if any old item has a more recent citation
+    for old_id in old_ids:
+        if not await _should_update_memory(self, "knowledge_vault", old_id):
+            return None
 
     for old_id in old_ids:
         await self.knowledge_vault_manager.delete_knowledge_by_id(knowledge_vault_item_id=old_id, actor=self.actor)
