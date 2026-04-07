@@ -5369,6 +5369,155 @@ async def dashboard_check_setup():
 
 
 # ============================================================================
+# Memory Sources & Threads (Retrieval Endpoints)
+# ============================================================================
+
+
+@router.get("/memory-sources/{source_id}")
+async def get_memory_source(
+    source_id: str,
+    user_id: Optional[str] = None,
+    x_client_id: Optional[str] = Header(None),
+    x_org_id: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+):
+    """Get a memory source by ID (metadata + summary)."""
+    server = get_server()
+    client_id, org_id = await get_client_and_org(x_client_id, x_org_id, x_api_key)
+
+    from mirix.services.memory_source_manager import MemorySourceManager
+
+    manager = MemorySourceManager()
+    source = await manager.get_by_id(source_id)
+    if not source:
+        raise HTTPException(status_code=404, detail=f"Memory source {source_id} not found")
+
+    # Access control: verify the source belongs to this client
+    if source.client_id != client_id:
+        raise HTTPException(status_code=404, detail=f"Memory source {source_id} not found")
+
+    if user_id and source.user_id != user_id:
+        raise HTTPException(status_code=404, detail=f"Memory source {source_id} not found")
+
+    return source
+
+
+@router.get("/memory-sources/{source_id}/messages")
+async def get_memory_source_messages(
+    source_id: str,
+    user_id: Optional[str] = None,
+    limit: int = 100,
+    cursor: Optional[str] = None,
+    x_client_id: Optional[str] = Header(None),
+    x_org_id: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+):
+    """Get messages belonging to a specific memory source."""
+    server = get_server()
+    client_id, org_id = await get_client_and_org(x_client_id, x_org_id, x_api_key)
+
+    from mirix.services.memory_source_manager import MemorySourceManager
+    from mirix.services.source_message_manager import SourceMessageManager
+
+    # Verify source exists and belongs to this client
+    source_mgr = MemorySourceManager()
+    source = await source_mgr.get_by_id(source_id)
+    if not source or source.client_id != client_id:
+        raise HTTPException(status_code=404, detail=f"Memory source {source_id} not found")
+
+    if user_id and source.user_id != user_id:
+        raise HTTPException(status_code=404, detail=f"Memory source {source_id} not found")
+
+    msg_mgr = SourceMessageManager()
+    messages = await msg_mgr.get_messages_by_source_id(
+        memory_source_id=source_id,
+        limit=limit,
+        cursor=cursor,
+    )
+    return messages
+
+
+@router.get("/threads/{external_thread_id}")
+async def get_thread_sources(
+    external_thread_id: str,
+    user_id: Optional[str] = None,
+    limit: int = 50,
+    cursor: Optional[str] = None,
+    x_client_id: Optional[str] = Header(None),
+    x_org_id: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+):
+    """Get all memory sources in a thread, ordered by occurred_at."""
+    server = get_server()
+    client_id, org_id = await get_client_and_org(x_client_id, x_org_id, x_api_key)
+
+    if not user_id:
+        from mirix.services.admin_user_manager import ClientAuthManager
+
+        client = await server.client_manager.get_client_by_id(client_id)
+        user_id = ClientAuthManager.get_admin_user_id_for_client(client.id)
+
+    from mirix.services.memory_source_manager import MemorySourceManager
+
+    manager = MemorySourceManager()
+    sources = await manager.get_sources_by_thread_id(
+        external_thread_id=external_thread_id,
+        client_id=client_id,
+        user_id=user_id,
+        limit=limit,
+        cursor=cursor,
+    )
+    return sources
+
+
+@router.get("/threads/{external_thread_id}/messages")
+async def get_thread_messages(
+    external_thread_id: str,
+    user_id: Optional[str] = None,
+    limit: int = 100,
+    cursor: Optional[str] = None,
+    x_client_id: Optional[str] = Header(None),
+    x_org_id: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+):
+    """Get all messages across a thread, flattened and ordered by timestamp."""
+    server = get_server()
+    client_id, org_id = await get_client_and_org(x_client_id, x_org_id, x_api_key)
+
+    if not user_id:
+        from mirix.services.admin_user_manager import ClientAuthManager
+
+        client = await server.client_manager.get_client_by_id(client_id)
+        user_id = ClientAuthManager.get_admin_user_id_for_client(client.id)
+
+    # Verify at least one source in this thread belongs to this client+user
+    from mirix.services.memory_source_manager import MemorySourceManager
+
+    source_mgr = MemorySourceManager()
+    sources = await source_mgr.get_sources_by_thread_id(
+        external_thread_id=external_thread_id,
+        client_id=client_id,
+        user_id=user_id,
+        limit=1,
+    )
+    if not sources:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Thread {external_thread_id} not found",
+        )
+
+    from mirix.services.source_message_manager import SourceMessageManager
+
+    msg_mgr = SourceMessageManager()
+    messages = await msg_mgr.get_messages_by_thread_id(
+        external_thread_id=external_thread_id,
+        limit=limit,
+        cursor=cursor,
+    )
+    return messages
+
+
+# ============================================================================
 # Include Router and Exports
 # ============================================================================
 

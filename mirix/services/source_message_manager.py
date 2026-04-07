@@ -5,6 +5,8 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
 
+from sqlalchemy import select
+
 from mirix.log import get_logger
 from mirix.orm.source_message import SourceMessage as SourceMessageModel
 from mirix.schemas.source_message import SourceMessage as PydanticSourceMessage
@@ -206,3 +208,81 @@ class SourceMessageManager:
             memory_source_id=memory_source_id,
             external_thread_id=external_thread_id,
         )
+
+    @enforce_types
+    async def get_messages_by_source_id(
+        self,
+        memory_source_id: str,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+    ) -> List[PydanticSourceMessage]:
+        """Fetch messages for a source, ordered by sequence_num ascending."""
+        async with self.session_maker() as session:
+            query = (
+                select(SourceMessageModel)
+                .where(
+                    SourceMessageModel.memory_source_id == memory_source_id,
+                    ~SourceMessageModel.is_deleted,
+                )
+                .order_by(SourceMessageModel.sequence_num.asc())
+            )
+
+            if cursor:
+                cursor_result = await session.execute(
+                    select(SourceMessageModel).where(SourceMessageModel.id == cursor)
+                )
+                cursor_obj = cursor_result.scalar_one_or_none()
+                if cursor_obj:
+                    query = query.where(SourceMessageModel.sequence_num > cursor_obj.sequence_num)
+
+            query = query.limit(limit)
+            result = await session.execute(query)
+            records = result.scalars().all()
+            return [rec.to_pydantic() for rec in records]
+
+    @enforce_types
+    async def get_messages_by_thread_id(
+        self,
+        external_thread_id: str,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+    ) -> List[PydanticSourceMessage]:
+        """Fetch all messages across a thread, ordered by occurred_at then sequence_num."""
+        async with self.session_maker() as session:
+            query = (
+                select(SourceMessageModel)
+                .where(
+                    SourceMessageModel.external_thread_id == external_thread_id,
+                    ~SourceMessageModel.is_deleted,
+                )
+                .order_by(
+                    SourceMessageModel.occurred_at.asc().nulls_last(),
+                    SourceMessageModel.created_at.asc(),
+                    SourceMessageModel.sequence_num.asc(),
+                )
+            )
+
+            if cursor:
+                cursor_result = await session.execute(
+                    select(SourceMessageModel).where(SourceMessageModel.id == cursor)
+                )
+                cursor_obj = cursor_result.scalar_one_or_none()
+                if cursor_obj:
+                    ref = cursor_obj.occurred_at or cursor_obj.created_at
+                    query = query.where(
+                        (SourceMessageModel.occurred_at > ref)
+                        | (
+                            (SourceMessageModel.occurred_at == ref)
+                            & (SourceMessageModel.created_at > cursor_obj.created_at)
+                        )
+                        | (
+                            (SourceMessageModel.occurred_at == ref)
+                            & (SourceMessageModel.created_at == cursor_obj.created_at)
+                            & (SourceMessageModel.sequence_num > cursor_obj.sequence_num)
+                        )
+                    )
+
+            query = query.limit(limit)
+            result = await session.execute(query)
+            records = result.scalars().all()
+            return [rec.to_pydantic() for rec in records]
