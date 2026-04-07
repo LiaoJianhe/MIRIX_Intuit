@@ -5508,13 +5508,13 @@ async def get_thread_messages(
     from mirix.services.memory_source_manager import MemorySourceManager
 
     source_mgr = MemorySourceManager()
-    sources = await source_mgr.get_sources_by_thread_id(
+    sources_page = await source_mgr.get_sources_by_thread_id(
         external_thread_id=external_thread_id,
         scopes=client.read_scopes,
         user_id=user_id,
         limit=1,
     )
-    if not sources:
+    if not sources_page.items:
         raise HTTPException(
             status_code=404,
             detail=f"Thread {external_thread_id} not found",

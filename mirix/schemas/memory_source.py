@@ -1,9 +1,19 @@
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Generic, List, Optional, TypeVar
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from mirix.schemas.mirix_base import MirixBase
+
+T = TypeVar("T")
+
+
+class PaginatedResponse(BaseModel, Generic[T]):
+    """Cursor-based paginated response envelope."""
+
+    items: List[T]
+    next_cursor: Optional[str] = Field(None, description="Cursor for the next page (pass as ?cursor=). Null if no more results.")
+    has_more: bool = Field(..., description="Whether there are more results beyond this page")
 
 
 class MemorySourceBase(MirixBase):

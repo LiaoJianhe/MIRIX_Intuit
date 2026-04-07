@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from mirix.log import get_logger
 from mirix.orm.source_message import SourceMessage as SourceMessageModel
+from mirix.schemas.memory_source import PaginatedResponse
 from mirix.schemas.source_message import SourceMessage as PydanticSourceMessage
 from mirix.utils import enforce_types
 
@@ -215,8 +216,11 @@ class SourceMessageManager:
         memory_source_id: str,
         limit: int = 100,
         cursor: Optional[str] = None,
-    ) -> List[PydanticSourceMessage]:
-        """Fetch messages for a source, ordered by sequence_num ascending."""
+    ) -> PaginatedResponse[PydanticSourceMessage]:
+        """Fetch messages for a source, ordered by sequence_num ascending.
+
+        Returns a PaginatedResponse with next_cursor and has_more.
+        """
         async with self.session_maker() as session:
             query = (
                 select(SourceMessageModel)
@@ -235,10 +239,20 @@ class SourceMessageManager:
                 if cursor_obj:
                     query = query.where(SourceMessageModel.sequence_num > cursor_obj.sequence_num)
 
-            query = query.limit(limit)
+            # Fetch limit+1 to determine has_more
+            query = query.limit(limit + 1)
             result = await session.execute(query)
             records = result.scalars().all()
-            return [rec.to_pydantic() for rec in records]
+
+            has_more = len(records) > limit
+            records = records[:limit]
+            items = [rec.to_pydantic() for rec in records]
+
+            return PaginatedResponse(
+                items=items,
+                next_cursor=items[-1].id if has_more and items else None,
+                has_more=has_more,
+            )
 
     @enforce_types
     async def get_messages_by_thread_id(
@@ -246,8 +260,11 @@ class SourceMessageManager:
         external_thread_id: str,
         limit: int = 100,
         cursor: Optional[str] = None,
-    ) -> List[PydanticSourceMessage]:
-        """Fetch all messages across a thread, ordered by occurred_at then sequence_num."""
+    ) -> PaginatedResponse[PydanticSourceMessage]:
+        """Fetch all messages across a thread, ordered by occurred_at then sequence_num.
+
+        Returns a PaginatedResponse with next_cursor and has_more.
+        """
         async with self.session_maker() as session:
             query = (
                 select(SourceMessageModel)
@@ -282,7 +299,17 @@ class SourceMessageManager:
                         )
                     )
 
-            query = query.limit(limit)
+            # Fetch limit+1 to determine has_more
+            query = query.limit(limit + 1)
             result = await session.execute(query)
             records = result.scalars().all()
-            return [rec.to_pydantic() for rec in records]
+
+            has_more = len(records) > limit
+            records = records[:limit]
+            items = [rec.to_pydantic() for rec in records]
+
+            return PaginatedResponse(
+                items=items,
+                next_cursor=items[-1].id if has_more and items else None,
+                has_more=has_more,
+            )

@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mirix.schemas.memory_source import MemorySource
+from mirix.schemas.memory_source import MemorySource, PaginatedResponse
 from mirix.schemas.source_message import SourceMessage
 
 
@@ -104,9 +104,11 @@ class TestGetSourcesByThreadId:
             scopes=["sbg"],
         )
 
-        assert len(result) == 2
-        assert result[0].id == SRC_ID_1
-        assert result[1].id == SRC_ID_2
+        assert len(result.items) == 2
+        assert result.items[0].id == SRC_ID_1
+        assert result.items[1].id == SRC_ID_2
+        assert result.has_more is False
+        assert result.next_cursor is None
 
 
 # --- SourceMessageManager.get_messages_by_source_id ---
@@ -144,9 +146,11 @@ class TestGetMessagesBySourceId:
 
         result = await mgr.get_messages_by_source_id(memory_source_id="src-1")
 
-        assert len(result) == 2
-        assert result[0].id == SMSG_ID_1
-        assert result[1].id == SMSG_ID_2
+        assert len(result.items) == 2
+        assert result.items[0].id == SMSG_ID_1
+        assert result.items[1].id == SMSG_ID_2
+        assert result.has_more is False
+        assert result.next_cursor is None
 
 
 # --- SourceMessageManager.get_messages_by_thread_id ---
@@ -184,7 +188,8 @@ class TestGetMessagesByThreadId:
 
         result = await mgr.get_messages_by_thread_id(external_thread_id="thread-1")
 
-        assert len(result) == 2
+        assert len(result.items) == 2
+        assert result.has_more is False
 
 
 # --- REST API route handlers ---
@@ -301,6 +306,7 @@ class TestGetMemorySourceMessagesRoute:
         source = _make_source(filter_tags={"scope": "sbg"})
         client = _make_client(read_scopes=["sbg"])
         messages = [_make_message(id=SMSG_ID_1), _make_message(id=SMSG_ID_2, sequence_num=1)]
+        page = PaginatedResponse(items=messages, next_cursor=None, has_more=False)
 
         with patch("mirix.services.memory_source_manager.MemorySourceManager") as MockSourceMgr:
             mock_source_instance = MockSourceMgr.return_value
@@ -308,13 +314,14 @@ class TestGetMemorySourceMessagesRoute:
 
             with patch("mirix.services.source_message_manager.SourceMessageManager") as MockMsgMgr:
                 mock_msg_instance = MockMsgMgr.return_value
-                mock_msg_instance.get_messages_by_source_id = AsyncMock(return_value=messages)
+                mock_msg_instance.get_messages_by_source_id = AsyncMock(return_value=page)
 
                 with patch("mirix.server.rest_api.get_client_and_org", new_callable=AsyncMock, return_value=("client-1", "org-1")):
                     with patch("mirix.server.rest_api.get_server", return_value=_mock_server_with_client(client)):
                         result = await get_memory_source_messages(source_id=SRC_ID_1, x_client_id="client-1")
 
-        assert len(result) == 2
+        assert len(result.items) == 2
+        assert result.has_more is False
 
     @pytest.mark.asyncio
     async def test_404_when_scope_mismatch(self):
@@ -343,11 +350,12 @@ class TestGetThreadSourcesRoute:
         from mirix.server.rest_api import get_thread_sources
 
         sources = [_make_source(id=SRC_ID_1), _make_source(id=SRC_ID_2)]
+        page = PaginatedResponse(items=sources, next_cursor=None, has_more=False)
         client = _make_client(read_scopes=["sbg"])
 
         with patch("mirix.services.memory_source_manager.MemorySourceManager") as MockMgr:
             mock_instance = MockMgr.return_value
-            mock_instance.get_sources_by_thread_id = AsyncMock(return_value=sources)
+            mock_instance.get_sources_by_thread_id = AsyncMock(return_value=page)
 
             with patch("mirix.server.rest_api.get_client_and_org", new_callable=AsyncMock, return_value=("client-1", "org-1")):
                 with patch("mirix.server.rest_api.get_server", return_value=_mock_server_with_client(client)):
@@ -357,7 +365,8 @@ class TestGetThreadSourcesRoute:
                         x_client_id="client-1",
                     )
 
-        assert len(result) == 2
+        assert len(result.items) == 2
+        assert result.has_more is False
 
     @pytest.mark.asyncio
     async def test_passes_scopes_to_manager(self):
@@ -368,7 +377,8 @@ class TestGetThreadSourcesRoute:
 
         with patch("mirix.services.memory_source_manager.MemorySourceManager") as MockMgr:
             mock_instance = MockMgr.return_value
-            mock_instance.get_sources_by_thread_id = AsyncMock(return_value=[])
+            empty_page = PaginatedResponse(items=[], next_cursor=None, has_more=False)
+            mock_instance.get_sources_by_thread_id = AsyncMock(return_value=empty_page)
 
             with patch("mirix.server.rest_api.get_client_and_org", new_callable=AsyncMock, return_value=("client-1", "org-1")):
                 with patch("mirix.server.rest_api.get_server", return_value=_mock_server_with_client(client)):
@@ -396,7 +406,8 @@ class TestGetThreadMessagesRoute:
 
         with patch("mirix.services.memory_source_manager.MemorySourceManager") as MockSourceMgr:
             mock_source_instance = MockSourceMgr.return_value
-            mock_source_instance.get_sources_by_thread_id = AsyncMock(return_value=[])
+            empty_page = PaginatedResponse(items=[], next_cursor=None, has_more=False)
+            mock_source_instance.get_sources_by_thread_id = AsyncMock(return_value=empty_page)
 
             with patch("mirix.server.rest_api.get_client_and_org", new_callable=AsyncMock, return_value=("client-1", "org-1")):
                 with patch("mirix.server.rest_api.get_server", return_value=_mock_server_with_client(client)):
@@ -417,14 +428,16 @@ class TestGetThreadMessagesRoute:
         source = _make_source(filter_tags={"scope": "sbg"})
         client = _make_client(read_scopes=["sbg"])
         messages = [_make_message(id=SMSG_ID_1), _make_message(id=SMSG_ID_2, sequence_num=1)]
+        sources_page = PaginatedResponse(items=[source], next_cursor=None, has_more=False)
+        messages_page = PaginatedResponse(items=messages, next_cursor=None, has_more=False)
 
         with patch("mirix.services.memory_source_manager.MemorySourceManager") as MockSourceMgr:
             mock_source_instance = MockSourceMgr.return_value
-            mock_source_instance.get_sources_by_thread_id = AsyncMock(return_value=[source])
+            mock_source_instance.get_sources_by_thread_id = AsyncMock(return_value=sources_page)
 
             with patch("mirix.services.source_message_manager.SourceMessageManager") as MockMsgMgr:
                 mock_msg_instance = MockMsgMgr.return_value
-                mock_msg_instance.get_messages_by_thread_id = AsyncMock(return_value=messages)
+                mock_msg_instance.get_messages_by_thread_id = AsyncMock(return_value=messages_page)
 
                 with patch("mirix.server.rest_api.get_client_and_org", new_callable=AsyncMock, return_value=("client-1", "org-1")):
                     with patch("mirix.server.rest_api.get_server", return_value=_mock_server_with_client(client)):
@@ -433,4 +446,5 @@ class TestGetThreadMessagesRoute:
                             x_client_id="client-1",
                         )
 
-        assert len(result) == 2
+        assert len(result.items) == 2
+        assert result.has_more is False

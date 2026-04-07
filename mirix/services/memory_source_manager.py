@@ -7,7 +7,7 @@ from sqlalchemy import select
 
 from mirix.log import get_logger
 from mirix.orm.memory_source import MemorySource as MemorySourceModel
-from mirix.schemas.memory_source import MemorySource as PydanticMemorySource
+from mirix.schemas.memory_source import MemorySource as PydanticMemorySource, PaginatedResponse
 from mirix.utils import enforce_types
 
 logger = get_logger(__name__)
@@ -146,14 +146,14 @@ class MemorySourceManager:
         user_id: Optional[str] = None,
         limit: int = 50,
         cursor: Optional[str] = None,
-    ) -> List[PydanticMemorySource]:
+    ) -> PaginatedResponse[PydanticMemorySource]:
         """Fetch all sources in a thread, ordered by occurred_at ascending.
 
         Access control uses scope-based filtering via filter_tags->>'scope',
         matching the pattern used by memory tables. If user_id is provided,
         results are further filtered to that user.
 
-        Cursor-based pagination: pass the id of the last source seen.
+        Returns a PaginatedResponse with next_cursor and has_more.
         """
         from mirix.database.filter_tags_query import apply_filter_tags_sqlalchemy
 
@@ -189,10 +189,20 @@ class MemorySourceManager:
                         )
                     )
 
-            query = query.limit(limit)
+            # Fetch limit+1 to determine has_more
+            query = query.limit(limit + 1)
             result = await session.execute(query)
             records = result.scalars().all()
-            return [rec.to_pydantic() for rec in records]
+
+            has_more = len(records) > limit
+            records = records[:limit]
+            items = [rec.to_pydantic() for rec in records]
+
+            return PaginatedResponse(
+                items=items,
+                next_cursor=items[-1].id if has_more and items else None,
+                has_more=has_more,
+            )
 
     @enforce_types
     async def mark_processing_complete(self, memory_source_id: str) -> None:
