@@ -1574,7 +1574,7 @@ class Agent(BaseAgent):
 
             await self.memory_source_manager.create(
                 memory_source_id=memory_source_id,
-                client_id=self.client_id,
+                actor=self.actor,
                 user_id=self.user_id,
                 organization_id=self.agent_state.organization_id,
                 source_type=self.source_type or "conversation",

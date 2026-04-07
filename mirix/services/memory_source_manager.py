@@ -7,6 +7,7 @@ from sqlalchemy import select
 
 from mirix.log import get_logger
 from mirix.orm.memory_source import MemorySource as MemorySourceModel
+from mirix.schemas.client import Client as PydanticClient
 from mirix.schemas.memory_source import MemorySource as PydanticMemorySource, PaginatedResponse
 from mirix.utils import enforce_types
 
@@ -40,7 +41,7 @@ class MemorySourceManager:
     async def create(
         self,
         memory_source_id: str,
-        client_id: str,
+        actor: PydanticClient,
         user_id: str,
         organization_id: str,
         source_type: str = "conversation",
@@ -57,9 +58,20 @@ class MemorySourceManager:
     ) -> Optional[PydanticMemorySource]:
         """Create a memory source record using INSERT ON CONFLICT DO NOTHING.
 
+        Enforces scope injection: filter_tags["scope"] is always set to
+        actor.write_scope, matching the pattern in raw_memory_manager.
+        Client-provided filter_tags are preserved but scope cannot be overridden.
+
         Returns the record (whether just inserted or pre-existing).
         Cache write handled by the ORM layer via create_or_ignore_with_redis.
         """
+        # Enforce scope from actor's write_scope (same pattern as raw_memory_manager)
+        if actor.write_scope is None:
+            raise ValueError("Client has no write_scope - cannot create memory sources")
+        if filter_tags is None:
+            filter_tags = {}
+        filter_tags["scope"] = actor.write_scope
+
         async with self.session_maker() as session:
             now = datetime.now(timezone.utc)
             occurred_at = parse_occurred_at(occurred_at)
@@ -68,7 +80,7 @@ class MemorySourceManager:
                 db_session=session,
                 use_cache=use_cache,
                 id=memory_source_id,
-                client_id=client_id,
+                client_id=actor.id,
                 user_id=user_id,
                 organization_id=organization_id,
                 source_type=source_type,
