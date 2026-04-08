@@ -2144,6 +2144,7 @@ async def retrieve_memories_by_keywords(
         )
 
     # Get timezone from user record (if exists)
+    user = None  # Initialize before try so references below work even if lookup fails
     try:
         user = await server.user_manager.get_user_by_id(user_id)
         timezone_str = user.timezone
@@ -2731,6 +2732,7 @@ async def search_memory(
     agent_state = all_agents[0]
 
     # Get timezone from user record (if exists)
+    user = None  # Initialize before try so closures below can reference it even on failure
     try:
         user = await server.user_manager.get_user_by_id(user_id)
         timezone_str = user.timezone

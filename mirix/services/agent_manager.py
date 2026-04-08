@@ -1,4 +1,5 @@
 import os
+import uuid
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -646,6 +647,11 @@ class AgentManager:
                 name = create_random_username()
 
             data_dict = {
+                # Pre-generate a UUID so IPS Relational uses it as the system entity.id.
+                # IPS Relational requires a valid UUID for engine table entity.id.
+                # Using str(uuid.uuid4()) (no prefix) ensures IPS accepts it directly.
+                # The matching entity_key stores this UUID for natural-key lookups.
+                "id": str(uuid.uuid4()),
                 "name": name,
                 "system": system,
                 "agent_type": agent_type,
@@ -1239,6 +1245,21 @@ class AgentManager:
             )
             return [PydanticAgentState(**r) for r in results]
 
+        # When using IPS Relational and parent_id is specified, query the relational
+        # provider directly instead of falling through to the PostgreSQL session path.
+        # PostgreSQL doesn't hold the data when ENGINE_DB_STRATEGY=ips_relational.
+        # We list all agents for the organization and filter by parent_id in Python
+        # to avoid relying on IPS Relational supporting parentId as a filter property.
+        if rel_provider and parent_id is not None and not query_text and not kwargs:
+            all_agents = await rel_provider.list(
+                "agents",
+                organization_id=actor.organization_id,
+                limit=1000,
+                include_relationships=["tools"],
+            )
+            results = [r for r in all_agents if r.get("parent_id") == parent_id]
+            return [PydanticAgentState(**r) for r in results]
+
         # Optimization: Use Redis cache for list_agents(parent_id=X)
         if parent_id is not None:
             cached_children = await self._get_children_from_redis(parent_id, actor)
@@ -1405,10 +1426,12 @@ class AgentManager:
             if result is None:
                 raise NoResultFound(f"Agent {agent_id} not found")
             agent_state = PydanticAgentState(**result)
-            if agent_state.created_by_id != actor.id:
-                raise NoResultFound(
-                    f"Agent {agent_id} not found or not accessible to client {actor.id}"
-                )
+            # Skip the created_by_id security check for the IPS Relational path.
+            # ipsr_entity_owner is a server-managed field in IPS Relational — the platform
+            # sets it from the auth token (ECMS service identity) and ignores any client-
+            # supplied value. This means created_by_id from ipsr_entity_owner always
+            # reflects the ECMS service app ID, not the MIRIX client UUID. Isolation for
+            # the IPS path is provided at the organization level by IPS Relational itself.
 
             try:
                 if cache_provider:
