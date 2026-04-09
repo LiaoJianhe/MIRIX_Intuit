@@ -210,7 +210,6 @@ class SourceMessageManager:
             external_thread_id=external_thread_id,
         )
 
-    @enforce_types
     async def get_messages_by_source_id(
         self,
         memory_source_id: str,

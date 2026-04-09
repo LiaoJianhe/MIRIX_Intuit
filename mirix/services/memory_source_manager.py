@@ -37,7 +37,6 @@ class MemorySourceManager:
 
         self.session_maker = db_context
 
-    @enforce_types
     async def create(
         self,
         memory_source_id: str,
@@ -150,7 +149,6 @@ class MemorySourceManager:
 
         return pydantic_source
 
-    @enforce_types
     async def get_sources_by_thread_id(
         self,
         external_thread_id: str,
