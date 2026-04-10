@@ -198,8 +198,8 @@ class TestSummaryGeneration:
         agent.memory_source_manager.update_summary.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_handles_llm_failure_gracefully(self):
-        """LLM failure is logged but does not raise."""
+    async def test_raises_on_llm_failure(self):
+        """LLM failure propagates to caller for consistent error handling."""
         agent, _, _ = _setup_agent("src-abc123", summarize=True)
 
         source_msgs = [_make_source_message("user", "Hello", 1)]
@@ -212,8 +212,8 @@ class TestSummaryGeneration:
             mock_client.send_llm_request = AsyncMock(side_effect=RuntimeError("LLM unavailable"))
             mock_llm_cls.create.return_value = mock_client
 
-            # Should not raise
-            await agent._generate_source_summary()
+            with pytest.raises(RuntimeError, match="LLM unavailable"):
+                await agent._generate_source_summary()
 
         agent.memory_source_manager.update_summary.assert_not_called()
 
@@ -286,20 +286,18 @@ class TestSummaryTriggerInStep:
         input_msg = MessageCreate(role="user", content="test message")
 
         with patch("mirix.agent.agent.LLMClient"):
-            # Patch ensure_future to run the coroutine immediately for testing
-            with patch("mirix.agent.agent.asyncio.ensure_future") as mock_ensure:
-                result = await agent.step(
-                    input_messages=[input_msg],
-                    chaining=False,
-                    max_chaining_steps=1,
-                    stream=False,
-                    skip_verify=True,
-                    actor=actor,
-                    user=user,
-                )
+            result = await agent.step(
+                input_messages=[input_msg],
+                chaining=False,
+                max_chaining_steps=1,
+                stream=False,
+                skip_verify=True,
+                actor=actor,
+                user=user,
+            )
 
         agent.memory_source_manager.mark_processing_complete.assert_called_once_with("src-abc123")
-        mock_ensure.assert_called_once()
+        agent._generate_source_summary.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_no_summary_when_summarize_false(self):
@@ -316,19 +314,18 @@ class TestSummaryTriggerInStep:
         input_msg = MessageCreate(role="user", content="test message")
 
         with patch("mirix.agent.agent.LLMClient"):
-            with patch("mirix.agent.agent.asyncio.ensure_future") as mock_ensure:
-                result = await agent.step(
-                    input_messages=[input_msg],
-                    chaining=False,
-                    max_chaining_steps=1,
-                    stream=False,
-                    skip_verify=True,
-                    actor=actor,
-                    user=user,
-                )
+            result = await agent.step(
+                input_messages=[input_msg],
+                chaining=False,
+                max_chaining_steps=1,
+                stream=False,
+                skip_verify=True,
+                actor=actor,
+                user=user,
+            )
 
         agent.memory_source_manager.mark_processing_complete.assert_called_once_with("src-abc123")
-        mock_ensure.assert_not_called()
+        agent._generate_source_summary.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_no_summary_when_client_summary_provided(self):
@@ -349,50 +346,48 @@ class TestSummaryTriggerInStep:
         input_msg = MessageCreate(role="user", content="test message")
 
         with patch("mirix.agent.agent.LLMClient"):
-            with patch("mirix.agent.agent.asyncio.ensure_future") as mock_ensure:
-                result = await agent.step(
-                    input_messages=[input_msg],
-                    chaining=False,
-                    max_chaining_steps=1,
-                    stream=False,
-                    skip_verify=True,
-                    actor=actor,
-                    user=user,
-                )
+            result = await agent.step(
+                input_messages=[input_msg],
+                chaining=False,
+                max_chaining_steps=1,
+                stream=False,
+                skip_verify=True,
+                actor=actor,
+                user=user,
+            )
 
         agent.memory_source_manager.mark_processing_complete.assert_called_once()
-        mock_ensure.assert_not_called()
+        agent._generate_source_summary.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_processing_complete_set_even_if_summary_fails(self):
-        """processing_complete is set before summary generation fires."""
+        """processing_complete is set even when summary generation raises."""
         agent, actor, user = _setup_agent("src-abc123", summarize=True)
 
         resp = _make_step_response()
         agent.inner_step = AsyncMock(return_value=resp)
         agent._extract_topics_from_messages = AsyncMock(return_value=["topic1"])
+        agent._generate_source_summary = AsyncMock(side_effect=RuntimeError("LLM down"))
 
         from mirix.schemas.message import MessageCreate
 
         input_msg = MessageCreate(role="user", content="test message")
 
         with patch("mirix.agent.agent.LLMClient"):
-            with patch("mirix.agent.agent.asyncio.ensure_future") as mock_ensure:
-                result = await agent.step(
-                    input_messages=[input_msg],
-                    chaining=False,
-                    max_chaining_steps=1,
-                    stream=False,
-                    skip_verify=True,
-                    actor=actor,
-                    user=user,
-                )
+            result = await agent.step(
+                input_messages=[input_msg],
+                chaining=False,
+                max_chaining_steps=1,
+                stream=False,
+                skip_verify=True,
+                actor=actor,
+                user=user,
+            )
 
-        # processing_complete is set regardless
+        # processing_complete is set before summary generation
         agent.memory_source_manager.mark_processing_complete.assert_called_once_with("src-abc123")
-        # summary gen fires after (non-blocking)
-        mock_ensure.assert_called_once()
-        # Verify the return value is still a valid usage stats
+        # summary was attempted but failed — step() still returns normally
+        agent._generate_source_summary.assert_awaited_once()
         assert isinstance(result, MirixUsageStatistics)
 
 

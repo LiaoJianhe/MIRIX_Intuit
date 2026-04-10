@@ -1522,11 +1522,12 @@ class Agent(BaseAgent):
                 logger.warning("Failed to mark source %s complete: %s", self.memory_source_id, e)
 
             # Generate summary if opt-in and no client-provided summary.
-            # Runs async and non-blocking — failure does not affect processing_complete.
+            # Failure does not affect processing_complete (already set above).
             if self.summarize and not self.source_summary:
-                asyncio.ensure_future(
-                    self._generate_source_summary()
-                )
+                try:
+                    await self._generate_source_summary()
+                except Exception as e:
+                    logger.warning("Failed to generate summary for source %s: %s", self.memory_source_id, e)
 
         return MirixUsageStatistics(**total_usage.model_dump(), step_count=step_count)
 
@@ -1620,73 +1621,69 @@ class Agent(BaseAgent):
         The generated summary is written to memory_sources.summary with
         summary_source="generated".
 
-        This method is fire-and-forget — exceptions are logged but never raised.
+        Raises on failure — caller is responsible for error handling.
         """
         from mirix.constants import MESSAGE_SUMMARY_REQUEST_ACK
         from mirix.prompts.gpt_summarize import SYSTEM as SUMMARY_PROMPT_SYSTEM
         from mirix.schemas.enums import MessageRole
         from mirix.schemas.mirix_message_content import TextContent
 
-        try:
-            # Retrieve source messages
-            result = await self.source_message_manager.get_messages_by_source_id(
-                memory_source_id=self.memory_source_id,
-                limit=500,
-            )
-            if not result.items:
-                logger.warning("No source messages found for %s, skipping summary", self.memory_source_id)
-                return
+        # Retrieve source messages
+        result = await self.source_message_manager.get_messages_by_source_id(
+            memory_source_id=self.memory_source_id,
+            limit=500,
+        )
+        if not result.items:
+            logger.warning("No source messages found for %s, skipping summary", self.memory_source_id)
+            return
 
-            # Format messages into a conversation transcript
-            transcript_lines = []
-            for msg in result.items:
-                content = msg.content
-                if isinstance(content, dict):
-                    text = content.get("text", "") or content.get("content", "")
-                elif isinstance(content, str):
-                    text = content
-                else:
-                    text = str(content)
-                transcript_lines.append(f"{msg.role}: {text}")
-            transcript = "\n\n".join(transcript_lines)
-
-            # Build LLM messages using the existing summary prompt pattern
-            llm_messages = [
-                Message(
-                    agent_id=self.agent_state.id,
-                    role=MessageRole.system,
-                    content=[TextContent(text=SUMMARY_PROMPT_SYSTEM)],
-                ),
-                Message(
-                    agent_id=self.agent_state.id,
-                    role=MessageRole.assistant,
-                    content=[TextContent(text=MESSAGE_SUMMARY_REQUEST_ACK)],
-                ),
-                Message(
-                    agent_id=self.agent_state.id,
-                    role=MessageRole.user,
-                    content=[TextContent(text=transcript)],
-                ),
-            ]
-
-            llm_client = LLMClient.create(
-                llm_config=self.agent_state.llm_config.model_copy(deep=True),
-            )
-            response = await llm_client.send_llm_request(messages=llm_messages)
-            summary_text = response.choices[0].message.content
-
-            if summary_text:
-                await self.memory_source_manager.update_summary(
-                    memory_source_id=self.memory_source_id,
-                    summary=summary_text,
-                    summary_source="generated",
-                )
-                logger.info("Generated summary for memory source %s", self.memory_source_id)
+        # Format messages into a conversation transcript
+        transcript_lines = []
+        for msg in result.items:
+            content = msg.content
+            if isinstance(content, dict):
+                text = content.get("text", "") or content.get("content", "")
+            elif isinstance(content, str):
+                text = content
             else:
-                logger.warning("LLM returned empty summary for source %s", self.memory_source_id)
+                text = str(content)
+            transcript_lines.append(f"{msg.role}: {text}")
+        transcript = "\n\n".join(transcript_lines)
 
-        except Exception as e:
-            logger.warning("Failed to generate summary for source %s: %s", self.memory_source_id, e)
+        # Build LLM messages using the existing summary prompt pattern
+        llm_messages = [
+            Message(
+                agent_id=self.agent_state.id,
+                role=MessageRole.system,
+                content=[TextContent(text=SUMMARY_PROMPT_SYSTEM)],
+            ),
+            Message(
+                agent_id=self.agent_state.id,
+                role=MessageRole.assistant,
+                content=[TextContent(text=MESSAGE_SUMMARY_REQUEST_ACK)],
+            ),
+            Message(
+                agent_id=self.agent_state.id,
+                role=MessageRole.user,
+                content=[TextContent(text=transcript)],
+            ),
+        ]
+
+        llm_client = LLMClient.create(
+            llm_config=self.agent_state.llm_config.model_copy(deep=True),
+        )
+        response = await llm_client.send_llm_request(messages=llm_messages)
+        summary_text = response.choices[0].message.content
+
+        if summary_text:
+            await self.memory_source_manager.update_summary(
+                memory_source_id=self.memory_source_id,
+                summary=summary_text,
+                summary_source="generated",
+            )
+            logger.info("Generated summary for memory source %s", self.memory_source_id)
+        else:
+            logger.warning("LLM returned empty summary for source %s", self.memory_source_id)
 
     async def build_system_prompt_with_memories(
         self,
