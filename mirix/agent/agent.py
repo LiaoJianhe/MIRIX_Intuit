@@ -1623,7 +1623,6 @@ class Agent(BaseAgent):
 
         Raises on failure — caller is responsible for error handling.
         """
-        from mirix.constants import MESSAGE_SUMMARY_REQUEST_ACK
         from mirix.prompts.gpt_summarize_source_messages import SYSTEM as SUMMARY_PROMPT_SYSTEM
         from mirix.schemas.enums import MessageRole
         from mirix.schemas.mirix_message_content import TextContent
@@ -1650,17 +1649,11 @@ class Agent(BaseAgent):
             transcript_lines.append(f"{msg.role}: {text}")
         transcript = "\n\n".join(transcript_lines)
 
-        # Build LLM messages using the existing summary prompt pattern
         llm_messages = [
             Message(
                 agent_id=self.agent_state.id,
                 role=MessageRole.system,
                 content=[TextContent(text=SUMMARY_PROMPT_SYSTEM)],
-            ),
-            Message(
-                agent_id=self.agent_state.id,
-                role=MessageRole.assistant,
-                content=[TextContent(text=MESSAGE_SUMMARY_REQUEST_ACK)],
             ),
             Message(
                 agent_id=self.agent_state.id,
