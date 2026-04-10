@@ -1628,11 +1628,12 @@ class Agent(BaseAgent):
         from mirix.prompts.gpt_summarize_source_messages import SYSTEM as SUMMARY_PROMPT_SYSTEM
         from mirix.schemas.enums import MessageRole
         from mirix.schemas.mirix_message_content import TextContent
+        from mirix.utils import count_tokens
 
         # Retrieve source messages
         result = await self.source_message_manager.get_messages_by_source_id(
             memory_source_id=self.memory_source_id,
-            limit=500,
+            limit=2000,
         )
         if not result.items:
             logger.warning("No source messages found for %s, skipping summary", self.memory_source_id)
@@ -1650,6 +1651,15 @@ class Agent(BaseAgent):
                 text = str(content)
             transcript_lines.append(f"{msg.role}: {text}")
         transcript = "\n\n".join(transcript_lines)
+
+        # Truncate to fit within ~60% of the context window (same approach as memory.py)
+        context_window = self.agent_state.llm_config.context_window
+        max_input_tokens = int(context_window * 0.6)
+        transcript_tokens = count_tokens(transcript)
+        if transcript_tokens > max_input_tokens:
+            ratio = max_input_tokens / transcript_tokens * 0.8
+            keep = max(1, int(len(result.items) * ratio))
+            transcript = "\n\n".join(transcript_lines[-keep:])
 
         llm_messages = [
             Message(

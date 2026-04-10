@@ -174,7 +174,7 @@ class TestSummaryGeneration:
 
         agent.source_message_manager.get_messages_by_source_id.assert_called_once_with(
             memory_source_id="src-abc123",
-            limit=500,
+            limit=2000,
         )
         agent.memory_source_manager.update_summary.assert_called_once_with(
             memory_source_id="src-abc123",
