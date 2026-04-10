@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Union
 from sqlalchemy import select
 
 from mirix.log import get_logger
+from mirix.services.memory_source_manager import parse_occurred_at
 from mirix.orm.source_message import SourceMessage as SourceMessageModel
 from mirix.schemas.memory_source import PaginatedResponse
 from mirix.schemas.source_message import SourceMessage as PydanticSourceMessage
@@ -168,7 +169,7 @@ class SourceMessageManager:
                     external_message_id=msg.get("external_message_id"),
                     role=role,
                     content=content if isinstance(content, dict) else {"text": content},
-                    occurred_at=msg.get("occurred_at") or fallback_occurred_at,
+                    occurred_at=parse_occurred_at(msg.get("occurred_at") or fallback_occurred_at),
                     sequence_num=seq,
                     content_hash=content_hash,
                     message_metadata=msg.get("metadata"),
