@@ -1624,7 +1624,7 @@ class Agent(BaseAgent):
         Raises on failure — caller is responsible for error handling.
         """
         from mirix.constants import MESSAGE_SUMMARY_REQUEST_ACK
-        from mirix.prompts.gpt_summarize import SYSTEM as SUMMARY_PROMPT_SYSTEM
+        from mirix.prompts.gpt_summarize_source_messages import SYSTEM as SUMMARY_PROMPT_SYSTEM
         from mirix.schemas.enums import MessageRole
         from mirix.schemas.mirix_message_content import TextContent
 
