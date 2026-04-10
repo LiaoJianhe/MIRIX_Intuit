@@ -115,7 +115,10 @@ class MemorySourceManager:
                     cached_data = await cache_provider.get_json(cache_key)
                     if cached_data:
                         logger.debug("Cache HIT for memory source %s", memory_source_id)
-                        return PydanticMemorySource(**cached_data)
+                        # Strip Redis-internal fields (_ts suffixes) that pydantic rejects
+                        known_fields = PydanticMemorySource.model_fields
+                        clean = {k: v for k, v in cached_data.items() if k in known_fields}
+                        return PydanticMemorySource(**clean)
             except Exception as e:
                 logger.warning("Cache read failed for memory source %s: %s", memory_source_id, e)
 
