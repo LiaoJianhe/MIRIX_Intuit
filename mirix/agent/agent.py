@@ -1652,9 +1652,9 @@ class Agent(BaseAgent):
             transcript_lines.append(f"{msg.role}: {text}")
         transcript = "\n\n".join(transcript_lines)
 
-        # Truncate to fit within ~60% of the context window (same approach as memory.py)
+        # Truncate to fit within ~90% of the context window
         context_window = self.agent_state.llm_config.context_window
-        max_input_tokens = int(context_window * 0.6)
+        max_input_tokens = int(context_window * 0.9)
         transcript_tokens = count_tokens(transcript)
         if transcript_tokens > max_input_tokens:
             ratio = max_input_tokens / transcript_tokens * 0.8
