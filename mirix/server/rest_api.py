@@ -5369,6 +5369,92 @@ async def dashboard_check_setup():
 
 
 # ============================================================================
+# Memory Sources & Threads (Retrieval Endpoints)
+# ============================================================================
+
+
+@router.get("/memory-sources/{source_id}")
+async def get_memory_source(
+    source_id: str,
+    user_id: Optional[str] = None,
+    x_client_id: Optional[str] = Header(None),
+    x_org_id: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+):
+    """Get a memory source by ID (metadata + summary).
+
+    Access control uses scope-based filtering via filter_tags->>'scope',
+    matching the pattern used by memory tables. A client can read any
+    memory source whose scope is in the client's read_scopes list.
+    """
+    server = get_server()
+    client_id, org_id = await get_client_and_org(x_client_id, x_org_id, x_api_key)
+    client = await server.client_manager.get_client_by_id(client_id)
+
+    from mirix.services.memory_source_manager import MemorySourceManager
+
+    manager = MemorySourceManager()
+    source = await manager.get_by_id(source_id)
+    if not source:
+        raise HTTPException(status_code=404, detail=f"Memory source {source_id} not found")
+
+    # Scope-based access control (same pattern as memory tables)
+    source_scope = (source.filter_tags or {}).get("scope")
+    if source_scope not in client.read_scopes:
+        raise HTTPException(status_code=404, detail=f"Memory source {source_id} not found")
+
+    if user_id and source.user_id != user_id:
+        raise HTTPException(status_code=404, detail=f"Memory source {source_id} not found")
+
+    return source
+
+
+@router.get("/memory-sources/{source_id}/messages")
+async def get_memory_source_messages(
+    source_id: str,
+    user_id: Optional[str] = None,
+    limit: int = 100,
+    cursor: Optional[str] = None,
+    x_client_id: Optional[str] = Header(None),
+    x_org_id: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+):
+    """Get messages belonging to a specific memory source.
+
+    Source messages inherit the parent source's access control — if the
+    client can read the source (scope in read_scopes), it can read the messages.
+    """
+    server = get_server()
+    client_id, org_id = await get_client_and_org(x_client_id, x_org_id, x_api_key)
+    client = await server.client_manager.get_client_by_id(client_id)
+
+    from mirix.services.memory_source_manager import MemorySourceManager
+    from mirix.services.source_message_manager import SourceMessageManager
+
+    # Verify source exists and client has scope access
+    source_mgr = MemorySourceManager()
+    source = await source_mgr.get_by_id(source_id)
+    if not source:
+        raise HTTPException(status_code=404, detail=f"Memory source {source_id} not found")
+
+    source_scope = (source.filter_tags or {}).get("scope")
+    if source_scope not in client.read_scopes:
+        raise HTTPException(status_code=404, detail=f"Memory source {source_id} not found")
+
+    if user_id and source.user_id != user_id:
+        raise HTTPException(status_code=404, detail=f"Memory source {source_id} not found")
+
+    msg_mgr = SourceMessageManager()
+    messages = await msg_mgr.get_messages_by_source_id(
+        memory_source_id=source_id,
+        limit=limit,
+        cursor=cursor,
+    )
+    return messages
+
+
+
+# ============================================================================
 # Include Router and Exports
 # ============================================================================
 

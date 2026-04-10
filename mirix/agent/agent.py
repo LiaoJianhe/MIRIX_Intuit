@@ -1574,7 +1574,7 @@ class Agent(BaseAgent):
 
             await self.memory_source_manager.create(
                 memory_source_id=memory_source_id,
-                client_id=self.client_id,
+                actor=self.actor,
                 user_id=self.user_id,
                 organization_id=self.agent_state.organization_id,
                 source_type=self.source_type or "conversation",
@@ -1586,6 +1586,7 @@ class Agent(BaseAgent):
                 summary=self.source_summary,
                 summary_source=self.source_summary_source,
                 batch_hash=batch_hash,
+                filter_tags=self.filter_tags,
             )
 
             if msg_dicts:
@@ -1602,8 +1603,8 @@ class Agent(BaseAgent):
                 len(input_messages),
             )
         except Exception as e:
-            # Source persistence failure should not block memory processing
             logger.error("Failed to persist memory source %s: %s", memory_source_id, e)
+            raise
 
     async def build_system_prompt_with_memories(
         self,
