@@ -1520,6 +1520,7 @@ class Agent(BaseAgent):
                 await self.memory_source_manager.mark_processing_complete(self.memory_source_id)
             except Exception as e:
                 logger.warning("Failed to mark source %s complete: %s", self.memory_source_id, e)
+                raise
 
             # Generate summary if opt-in and no client-provided summary.
             # Failure does not affect processing_complete (already set above).
@@ -1528,6 +1529,7 @@ class Agent(BaseAgent):
                     await self._generate_source_summary()
                 except Exception as e:
                     logger.warning("Failed to generate summary for source %s: %s", self.memory_source_id, e)
+                    raise
 
         return MirixUsageStatistics(**total_usage.model_dump(), step_count=step_count)
 

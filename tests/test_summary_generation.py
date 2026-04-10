@@ -360,8 +360,8 @@ class TestSummaryTriggerInStep:
         agent._generate_source_summary.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_processing_complete_set_even_if_summary_fails(self):
-        """processing_complete is set even when summary generation raises."""
+    async def test_summary_failure_raises_after_processing_complete(self):
+        """Summary failure propagates, but processing_complete was already set."""
         agent, actor, user = _setup_agent("src-abc123", summarize=True)
 
         resp = _make_step_response()
@@ -374,21 +374,20 @@ class TestSummaryTriggerInStep:
         input_msg = MessageCreate(role="user", content="test message")
 
         with patch("mirix.agent.agent.LLMClient"):
-            result = await agent.step(
-                input_messages=[input_msg],
-                chaining=False,
-                max_chaining_steps=1,
-                stream=False,
-                skip_verify=True,
-                actor=actor,
-                user=user,
-            )
+            with pytest.raises(RuntimeError, match="LLM down"):
+                await agent.step(
+                    input_messages=[input_msg],
+                    chaining=False,
+                    max_chaining_steps=1,
+                    stream=False,
+                    skip_verify=True,
+                    actor=actor,
+                    user=user,
+                )
 
-        # processing_complete is set before summary generation
+        # processing_complete was set before summary generation was attempted
         agent.memory_source_manager.mark_processing_complete.assert_called_once_with("src-abc123")
-        # summary was attempted but failed — step() still returns normally
         agent._generate_source_summary.assert_awaited_once()
-        assert isinstance(result, MirixUsageStatistics)
 
 
 class TestClientProvidedSummary:
