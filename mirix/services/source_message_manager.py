@@ -132,7 +132,6 @@ class SourceMessageManager:
 
         self.session_maker = db_context
 
-    @enforce_types
     async def bulk_insert(
         self,
         messages: List[Dict[str, Any]],

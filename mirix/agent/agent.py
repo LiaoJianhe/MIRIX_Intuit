@@ -1603,8 +1603,8 @@ class Agent(BaseAgent):
                 len(input_messages),
             )
         except Exception as e:
-            # Source persistence failure should not block memory processing
             logger.error("Failed to persist memory source %s: %s", memory_source_id, e)
+            raise
 
     async def build_system_prompt_with_memories(
         self,
