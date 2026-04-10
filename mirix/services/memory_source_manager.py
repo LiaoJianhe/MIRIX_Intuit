@@ -230,3 +230,17 @@ class MemorySourceManager:
             record.processing_complete = True
             await record.update_with_redis(session)
             logger.info("Marked memory source %s as processing complete", memory_source_id)
+
+    @enforce_types
+    async def update_summary(self, memory_source_id: str, summary: str, summary_source: str) -> None:
+        """Write a summary to an existing memory source.
+
+        Used after processing completes to store a generated summary.
+        Safe from lost updates: only touches summary/summary_source columns.
+        """
+        async with self.session_maker() as session:
+            record = await MemorySourceModel.read(db_session=session, identifier=memory_source_id)
+            record.summary = summary
+            record.summary_source = summary_source
+            await record.update_with_redis(session)
+            logger.info("Updated summary for memory source %s (source=%s)", memory_source_id, summary_source)
