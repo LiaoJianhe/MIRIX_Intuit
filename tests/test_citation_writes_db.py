@@ -74,12 +74,21 @@ def source_mgr():
     return MemorySourceManager()
 
 
+async def _get_actor():
+    """Fetch the test client as a PydanticClient for use as actor."""
+    from mirix.services.client_manager import ClientManager
+
+    client_mgr = ClientManager()
+    return await client_mgr.get_client_by_id(TEST_CLIENT_ID)
+
+
 async def _create_source(source_mgr, source_id=None):
     """Create a memory_source record to use as FK target for citations."""
     sid = source_id or _unique("src")
+    actor = await _get_actor()
     await source_mgr.create(
         memory_source_id=sid,
-        client_id=TEST_CLIENT_ID,
+        actor=actor,
         user_id=TEST_USER_ID,
         organization_id=TEST_ORG_ID,
         source_type="conversation",

@@ -53,11 +53,20 @@ def manager():
     return MemorySourceManager()
 
 
+async def _get_actor():
+    """Fetch the test client as a PydanticClient for use as actor."""
+    from mirix.services.client_manager import ClientManager
+
+    client_mgr = ClientManager()
+    return await client_mgr.get_client_by_id(TEST_CLIENT_ID)
+
+
 async def test_duplicate_external_id_silently_skipped(manager):
     """Same (client_id, user_id, external_id) submitted twice: second INSERT is silently skipped."""
     ext_id = f"ext-{uuid.uuid4().hex[:12]}"
+    actor = await _get_actor()
     common = dict(
-        client_id=TEST_CLIENT_ID,
+        actor=actor,
         user_id=TEST_USER_ID,
         organization_id=TEST_ORG_ID,
         external_id=ext_id,
@@ -98,8 +107,9 @@ async def test_same_content_different_thread_produces_different_batch_hash(manag
     # Hashes must differ
     assert hash_a != hash_b, "batch_hash should differ when thread IDs differ"
 
+    actor = await _get_actor()
     common = dict(
-        client_id=TEST_CLIENT_ID,
+        actor=actor,
         user_id=TEST_USER_ID,
         organization_id=TEST_ORG_ID,
         source_type="conversation",
@@ -137,8 +147,9 @@ async def test_duplicate_batch_hash_silently_skipped(manager):
     messages = [{"role": "user", "content": {"text": "duplicate batch content"}}]
     batch_hash = compute_batch_hash("thread-X", "2026-01-01T00:00:00Z", messages)
 
+    actor = await _get_actor()
     common = dict(
-        client_id=TEST_CLIENT_ID,
+        actor=actor,
         user_id=TEST_USER_ID,
         organization_id=TEST_ORG_ID,
         batch_hash=batch_hash,
