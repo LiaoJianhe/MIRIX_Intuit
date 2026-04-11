@@ -8,7 +8,8 @@ from sqlalchemy import select
 from mirix.log import get_logger
 from mirix.orm.memory_source import MemorySource as MemorySourceModel
 from mirix.schemas.client import Client as PydanticClient
-from mirix.schemas.memory_source import MemorySource as PydanticMemorySource, PaginatedResponse
+from mirix.schemas.memory_source import MemorySource as PydanticMemorySource
+from mirix.schemas.memory_source import PaginatedResponse
 from mirix.utils import enforce_types
 
 logger = get_logger(__name__)
@@ -115,7 +116,10 @@ class MemorySourceManager:
                     cached_data = await cache_provider.get_json(cache_key)
                     if cached_data:
                         logger.debug("Cache HIT for memory source %s", memory_source_id)
-                        return PydanticMemorySource(**cached_data)
+                        # Strip Redis-internal fields (_ts suffixes) that pydantic rejects
+                        known_fields = PydanticMemorySource.model_fields
+                        clean = {k: v for k, v in cached_data.items() if k in known_fields}
+                        return PydanticMemorySource(**clean)
             except Exception as e:
                 logger.warning("Cache read failed for memory source %s: %s", memory_source_id, e)
 
@@ -184,9 +188,7 @@ class MemorySourceManager:
                 query = query.where(MemorySourceModel.user_id == user_id)
 
             if cursor:
-                cursor_result = await session.execute(
-                    select(MemorySourceModel).where(MemorySourceModel.id == cursor)
-                )
+                cursor_result = await session.execute(select(MemorySourceModel).where(MemorySourceModel.id == cursor))
                 cursor_obj = cursor_result.scalar_one_or_none()
                 if cursor_obj:
                     # Use created_at for stable ordering when occurred_at may be null
@@ -230,3 +232,17 @@ class MemorySourceManager:
             record.processing_complete = True
             await record.update_with_redis(session)
             logger.info("Marked memory source %s as processing complete", memory_source_id)
+
+    @enforce_types
+    async def update_summary(self, memory_source_id: str, summary: str, summary_source: str) -> None:
+        """Write a summary to an existing memory source.
+
+        Used after processing completes to store a generated summary.
+        Safe from lost updates: only touches summary/summary_source columns.
+        """
+        async with self.session_maker() as session:
+            record = await MemorySourceModel.read(db_session=session, identifier=memory_source_id)
+            record.summary = summary
+            record.summary_source = summary_source
+            await record.update_with_redis(session)
+            logger.info("Updated summary for memory source %s (source=%s)", memory_source_id, summary_source)

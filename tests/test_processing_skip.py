@@ -88,6 +88,9 @@ def _setup_agent(memory_source_id, source_processing_complete=None):
     agent.client_id = "client-1"
     agent.logger = MagicMock()
     agent.model = "gpt-4o-mini"
+    agent.summarize = False
+    agent.source_summary = None
+    agent.source_summary_source = None
 
     agent.message_manager = MagicMock()
     agent.message_manager.get_messages_for_agent = AsyncMock(return_value=[])

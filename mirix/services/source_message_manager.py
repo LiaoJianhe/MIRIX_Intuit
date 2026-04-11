@@ -11,6 +11,7 @@ from mirix.log import get_logger
 from mirix.orm.source_message import SourceMessage as SourceMessageModel
 from mirix.schemas.memory_source import PaginatedResponse
 from mirix.schemas.source_message import SourceMessage as PydanticSourceMessage
+from mirix.services.memory_source_manager import parse_occurred_at
 from mirix.utils import enforce_types
 
 logger = get_logger(__name__)
@@ -168,7 +169,7 @@ class SourceMessageManager:
                     external_message_id=msg.get("external_message_id"),
                     role=role,
                     content=content if isinstance(content, dict) else {"text": content},
-                    occurred_at=msg.get("occurred_at") or fallback_occurred_at,
+                    occurred_at=parse_occurred_at(msg.get("occurred_at") or fallback_occurred_at),
                     sequence_num=seq,
                     content_hash=content_hash,
                     message_metadata=msg.get("metadata"),
@@ -230,9 +231,7 @@ class SourceMessageManager:
             )
 
             if cursor:
-                cursor_result = await session.execute(
-                    select(SourceMessageModel).where(SourceMessageModel.id == cursor)
-                )
+                cursor_result = await session.execute(select(SourceMessageModel).where(SourceMessageModel.id == cursor))
                 cursor_obj = cursor_result.scalar_one_or_none()
                 if cursor_obj:
                     query = query.where(SourceMessageModel.sequence_num > cursor_obj.sequence_num)
@@ -251,4 +250,3 @@ class SourceMessageManager:
                 next_cursor=items[-1].id if has_more and items else None,
                 has_more=has_more,
             )
-

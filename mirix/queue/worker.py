@@ -258,19 +258,25 @@ class QueueWorker:
 
             # Extract memory source fields if present on the protobuf message
             memory_source_id = (
-                message.memory_source_id if hasattr(message, "memory_source_id") and message.HasField("memory_source_id") else None
+                message.memory_source_id
+                if hasattr(message, "memory_source_id") and message.HasField("memory_source_id")
+                else None
             )
             external_id = (
                 message.external_id if hasattr(message, "external_id") and message.HasField("external_id") else None
             )
             external_thread_id = (
-                message.external_thread_id if hasattr(message, "external_thread_id") and message.HasField("external_thread_id") else None
+                message.external_thread_id
+                if hasattr(message, "external_thread_id") and message.HasField("external_thread_id")
+                else None
             )
             source_type = (
                 message.source_type if hasattr(message, "source_type") and message.HasField("source_type") else None
             )
             source_system = (
-                message.source_system if hasattr(message, "source_system") and message.HasField("source_system") else None
+                message.source_system
+                if hasattr(message, "source_system") and message.HasField("source_system")
+                else None
             )
             source_metadata = None
             if hasattr(message, "source_metadata") and message.source_metadata:
@@ -278,12 +284,8 @@ class QueueWorker:
                     source_metadata = MessageToDict(message.source_metadata)
                 except Exception:
                     pass
-            summary = (
-                message.summary if hasattr(message, "summary") and message.HasField("summary") else None
-            )
-            summarize = (
-                message.summarize if hasattr(message, "summarize") and message.HasField("summarize") else False
-            )
+            summary = message.summary if hasattr(message, "summary") and message.HasField("summary") else None
+            summarize = message.summarize if hasattr(message, "summarize") and message.HasField("summarize") else False
 
             # Extract original per-turn messages for source_message persistence.
             #

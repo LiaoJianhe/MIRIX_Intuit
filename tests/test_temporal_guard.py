@@ -25,8 +25,8 @@ from mirix.functions.function_sets.memory_tools import (
     semantic_memory_update,
 )
 
-
 # --- Helpers ---
+
 
 def _make_agent(memory_source_id=None, use_cache=True, external_thread_id=None, occurred_at=None):
     """Create a minimal mock agent with memory source fields."""
@@ -56,6 +56,7 @@ NEWER = datetime(2026, 6, 1, tzinfo=timezone.utc)
 
 
 # --- _should_update_memory ---
+
 
 class TestShouldUpdateMemory:
     """Tests for the temporal guard helper."""
@@ -111,6 +112,7 @@ class TestShouldUpdateMemory:
 
 # --- core_memory_append ---
 
+
 class TestCoreMemoryAppendTemporalGuard:
 
     @pytest.mark.asyncio
@@ -160,6 +162,7 @@ class TestCoreMemoryAppendTemporalGuard:
 
 # --- core_memory_rewrite ---
 
+
 class TestCoreMemoryRewriteTemporalGuard:
 
     @pytest.mark.asyncio
@@ -186,6 +189,7 @@ class TestCoreMemoryRewriteTemporalGuard:
 
 # --- semantic_memory_update ---
 
+
 class TestSemanticMemoryUpdateTemporalGuard:
 
     @pytest.mark.asyncio
@@ -199,7 +203,9 @@ class TestSemanticMemoryUpdateTemporalGuard:
             mock_instance = MockMgr.return_value
             mock_instance.get_max_occurred_at = AsyncMock(return_value=NEWER)
 
-            result = await semantic_memory_update(agent, ["sem-old-1"], [{"name": "n", "summary": "s", "details": "d", "source": "src"}])
+            result = await semantic_memory_update(
+                agent, ["sem-old-1"], [{"name": "n", "summary": "s", "details": "d", "source": "src"}]
+            )
 
             assert "temporal guard" in result.lower()
             agent.semantic_memory_manager.delete_semantic_item_by_id.assert_not_awaited()
@@ -219,7 +225,9 @@ class TestSemanticMemoryUpdateTemporalGuard:
             mock_instance.get_max_occurred_at = AsyncMock(return_value=OLDER)
             mock_instance.create = AsyncMock(return_value=None)
 
-            result = await semantic_memory_update(agent, ["sem-old-1"], [{"name": "n", "summary": "s", "details": "d", "source": "src"}])
+            result = await semantic_memory_update(
+                agent, ["sem-old-1"], [{"name": "n", "summary": "s", "details": "d", "source": "src"}]
+            )
 
             agent.semantic_memory_manager.delete_semantic_item_by_id.assert_awaited_once()
             agent.semantic_memory_manager.insert_semantic_item.assert_awaited_once()
@@ -227,6 +235,7 @@ class TestSemanticMemoryUpdateTemporalGuard:
 
 
 # --- procedural_memory_update ---
+
 
 class TestProceduralMemoryUpdateTemporalGuard:
 
@@ -241,7 +250,9 @@ class TestProceduralMemoryUpdateTemporalGuard:
             mock_instance = MockMgr.return_value
             mock_instance.get_max_occurred_at = AsyncMock(return_value=NEWER)
 
-            result = await procedural_memory_update(agent, ["proc-old-1"], [{"entry_type": "t", "summary": "s", "steps": []}])
+            result = await procedural_memory_update(
+                agent, ["proc-old-1"], [{"entry_type": "t", "summary": "s", "steps": []}]
+            )
 
             assert result is None
             agent.procedural_memory_manager.delete_procedure_by_id.assert_not_awaited()
@@ -249,6 +260,7 @@ class TestProceduralMemoryUpdateTemporalGuard:
 
 
 # --- resource_memory_update ---
+
 
 class TestResourceMemoryUpdateTemporalGuard:
 
@@ -263,7 +275,9 @@ class TestResourceMemoryUpdateTemporalGuard:
             mock_instance = MockMgr.return_value
             mock_instance.get_max_occurred_at = AsyncMock(return_value=NEWER)
 
-            result = await resource_memory_update(agent, ["res-old-1"], [{"title": "t", "summary": "s", "resource_type": "r", "content": "c"}])
+            result = await resource_memory_update(
+                agent, ["res-old-1"], [{"title": "t", "summary": "s", "resource_type": "r", "content": "c"}]
+            )
 
             assert result is None
             agent.resource_memory_manager.delete_resource_by_id.assert_not_awaited()
@@ -271,6 +285,7 @@ class TestResourceMemoryUpdateTemporalGuard:
 
 
 # --- knowledge_vault_update ---
+
 
 class TestKnowledgeVaultUpdateTemporalGuard:
 
@@ -285,7 +300,11 @@ class TestKnowledgeVaultUpdateTemporalGuard:
             mock_instance = MockMgr.return_value
             mock_instance.get_max_occurred_at = AsyncMock(return_value=NEWER)
 
-            result = await knowledge_vault_update(agent, ["kv-old-1"], [{"entry_type": "t", "source": "s", "sensitivity": "low", "secret_value": "v", "caption": "c"}])
+            result = await knowledge_vault_update(
+                agent,
+                ["kv-old-1"],
+                [{"entry_type": "t", "source": "s", "sensitivity": "low", "secret_value": "v", "caption": "c"}],
+            )
 
             assert result is None
             agent.knowledge_vault_manager.delete_knowledge_by_id.assert_not_awaited()
@@ -293,6 +312,7 @@ class TestKnowledgeVaultUpdateTemporalGuard:
 
 
 # --- Episodic insert is NOT guarded (append-only) ---
+
 
 class TestEpisodicInsertNotGuarded:
     """episodic_memory_insert is append-only — no guard needed."""
@@ -312,7 +332,15 @@ class TestEpisodicInsertNotGuarded:
 
                 await episodic_memory_insert(
                     agent,
-                    [{"occurred_at": "2026-01-01T00:00:00Z", "event_type": "test", "actor": "user", "summary": "s", "details": "d"}],
+                    [
+                        {
+                            "occurred_at": "2026-01-01T00:00:00Z",
+                            "event_type": "test",
+                            "actor": "user",
+                            "summary": "s",
+                            "details": "d",
+                        }
+                    ],
                 )
 
                 mock_guard.assert_not_called()
@@ -320,6 +348,7 @@ class TestEpisodicInsertNotGuarded:
 
 
 # --- Episodic merge IS guarded ---
+
 
 class TestEpisodicMergeTemporalGuard:
 
@@ -361,6 +390,7 @@ class TestEpisodicMergeTemporalGuard:
 
 # --- Episodic replace IS guarded ---
 
+
 class TestEpisodicReplaceTemporalGuard:
 
     @pytest.mark.asyncio
@@ -376,8 +406,17 @@ class TestEpisodicReplaceTemporalGuard:
             mock_instance.get_max_occurred_at = AsyncMock(return_value=NEWER)
 
             result = await episodic_memory_replace(
-                agent, ["event-1"],
-                [{"occurred_at": "2026-01-01T00:00:00Z", "event_type": "test", "actor": "user", "summary": "s", "details": "d"}],
+                agent,
+                ["event-1"],
+                [
+                    {
+                        "occurred_at": "2026-01-01T00:00:00Z",
+                        "event_type": "test",
+                        "actor": "user",
+                        "summary": "s",
+                        "details": "d",
+                    }
+                ],
             )
 
             assert result is None

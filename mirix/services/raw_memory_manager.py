@@ -222,6 +222,9 @@ class RawMemoryManager:
                 if cached_data:
                     # Cache HIT - validate scope before returning
                     logger.debug("Cache HIT for raw memory %s", memory_id)
+                    from mirix.database.redis_client import RedisMemoryClient
+
+                    cached_data = RedisMemoryClient.clean_redis_fields([cached_data])[0]
                     pydantic_memory = PydanticRawMemoryItem(**cached_data)
 
                     # Validate scope - memory must be in actor's read_scopes

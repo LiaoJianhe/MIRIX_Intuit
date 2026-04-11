@@ -2,7 +2,7 @@ from typing import Callable, Dict, List, Optional
 
 from mirix.constants import MESSAGE_SUMMARY_REQUEST_ACK
 from mirix.llm_api.llm_client import LLMClient
-from mirix.prompts.gpt_summarize import SYSTEM as SUMMARY_PROMPT_SYSTEM
+from mirix.prompts.gpt_summarize_internal import SYSTEM as SUMMARY_PROMPT_SYSTEM
 from mirix.schemas.agent import AgentState
 from mirix.schemas.enums import MessageRole
 from mirix.schemas.memory import Memory

@@ -16,7 +16,9 @@ class MemoryCitation(MemoryCitationBase):
     """Full representation of a memory citation record."""
 
     id: str = MemoryCitationBase.generate_id_field()
-    memory_type: str = Field(..., description="Memory type: episodic, semantic, procedural, resource, knowledge_vault, core")
+    memory_type: str = Field(
+        ..., description="Memory type: episodic, semantic, procedural, resource, knowledge_vault, core"
+    )
     memory_id: str = Field(..., description="Polymorphic reference to the specific memory record")
     memory_source_id: str = Field(..., description="ID of the parent memory source")
     external_thread_id: Optional[str] = Field(None, description="Denormalized thread ID")

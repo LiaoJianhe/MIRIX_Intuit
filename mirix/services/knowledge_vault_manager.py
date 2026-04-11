@@ -430,6 +430,9 @@ class KnowledgeVaultManager:
                 cached_data = await cache_provider.get_json(cache_key)
                 if cached_data:
                     logger.debug("Cache HIT for knowledge vault %s", knowledge_vault_item_id)
+                    from mirix.database.redis_client import RedisMemoryClient
+
+                    cached_data = RedisMemoryClient.clean_redis_fields([cached_data])[0]
                     return PydanticKnowledgeVaultItem(**cached_data)
         except Exception as e:
             logger.warning("Cache read failed for knowledge vault %s: %s", knowledge_vault_item_id, e)
@@ -1247,9 +1250,18 @@ class KnowledgeVaultManager:
             if search_method == "embedding":
                 embedding_config = agent_state.embedding_config
                 if embedded_text is None:
+                    import numpy as np
+
+                    from mirix.constants import MAX_EMBEDDING_DIM
                     from mirix.embeddings import embedding_model
 
                     embedded_text = await (await embedding_model(embedding_config)).get_text_embedding(query)
+                    embedded_text = np.array(embedded_text)
+                    embedded_text = np.pad(
+                        embedded_text,
+                        (0, MAX_EMBEDDING_DIM - embedded_text.shape[0]),
+                        mode="constant",
+                    ).tolist()
 
                 # Determine which embedding field to search
                 if search_field == "caption":

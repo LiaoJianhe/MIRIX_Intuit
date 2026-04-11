@@ -132,8 +132,7 @@ class TestResourceMemoryInsert:
             insert_method="insert_resource",
         )
         items = [
-            {"title": f"res-{i}", "summary": f"s-{i}", "resource_type": "doc", "content": f"c-{i}"}
-            for i in range(4)
+            {"title": f"res-{i}", "summary": f"s-{i}", "resource_type": "doc", "content": f"c-{i}"} for i in range(4)
         ]
 
         result = await resource_memory_insert(agent, items)
@@ -179,10 +178,7 @@ class TestProceduralMemoryInsert:
             manager_attr="procedural_memory_manager",
             insert_method="insert_procedure",
         )
-        items = [
-            {"entry_type": "process", "summary": f"proc-{i}", "steps": ["a", "b"]}
-            for i in range(2)
-        ]
+        items = [{"entry_type": "process", "summary": f"proc-{i}", "steps": ["a", "b"]} for i in range(2)]
 
         result = await procedural_memory_insert(agent, items)
 
@@ -228,8 +224,13 @@ class TestKnowledgeVaultInsert:
             insert_method="insert_knowledge",
         )
         items = [
-            {"entry_type": "secret", "source": "vault", "sensitivity": "high",
-             "secret_value": f"val-{i}", "caption": f"cap-{i}"}
+            {
+                "entry_type": "secret",
+                "source": "vault",
+                "sensitivity": "high",
+                "secret_value": f"val-{i}",
+                "caption": f"cap-{i}",
+            }
             for i in range(3)
         ]
 
@@ -243,8 +244,7 @@ class TestKnowledgeVaultInsert:
             manager_attr="knowledge_vault_manager",
             insert_method="insert_knowledge",
         )
-        item = {"entry_type": "secret", "source": "v", "sensitivity": "low",
-                "secret_value": "same", "caption": "same"}
+        item = {"entry_type": "secret", "source": "v", "sensitivity": "low", "secret_value": "same", "caption": "same"}
 
         result = await knowledge_vault_insert(agent, [item, item])
 
@@ -256,8 +256,9 @@ class TestKnowledgeVaultInsert:
             manager_attr="knowledge_vault_manager",
             insert_method="insert_knowledge",
         )
-        items = [{"entry_type": "credential", "source": "s", "sensitivity": "high",
-                  "secret_value": "pw", "caption": "c"}]
+        items = [
+            {"entry_type": "credential", "source": "s", "sensitivity": "high", "secret_value": "pw", "caption": "c"}
+        ]
 
         await knowledge_vault_insert(agent, items)
 
@@ -280,8 +281,13 @@ class TestEpisodicMemoryInsert:
         )
         agent.occurred_at = None
         items = [
-            {"event_type": "activity", "actor": "user", "summary": f"ev-{i}",
-             "details": f"d-{i}", "occurred_at": datetime.now().isoformat()}
+            {
+                "event_type": "activity",
+                "actor": "user",
+                "summary": f"ev-{i}",
+                "details": f"d-{i}",
+                "occurred_at": datetime.now().isoformat(),
+            }
             for i in range(2)
         ]
 
@@ -296,8 +302,13 @@ class TestEpisodicMemoryInsert:
             insert_method="insert_event",
         )
         agent.occurred_at = None
-        item = {"event_type": "activity", "actor": "user", "summary": "same",
-                "details": "same", "occurred_at": datetime.now().isoformat()}
+        item = {
+            "event_type": "activity",
+            "actor": "user",
+            "summary": "same",
+            "details": "same",
+            "occurred_at": datetime.now().isoformat(),
+        }
 
         result = await episodic_memory_insert(agent, [item, item])
 
@@ -311,8 +322,15 @@ class TestEpisodicMemoryInsert:
         )
         override_time = datetime(2026, 1, 1, 12, 0, 0)
         agent.occurred_at = override_time
-        items = [{"event_type": "activity", "actor": "user", "summary": "s",
-                  "details": "d", "occurred_at": "2025-06-15T00:00:00"}]
+        items = [
+            {
+                "event_type": "activity",
+                "actor": "user",
+                "summary": "s",
+                "details": "d",
+                "occurred_at": "2025-06-15T00:00:00",
+            }
+        ]
 
         await episodic_memory_insert(agent, items)
 
@@ -396,8 +414,7 @@ class TestKnowledgeVaultInsertCitation:
             insert_method="insert_knowledge",
             memory_source_id="src-123",
         )
-        items = [{"entry_type": "secret", "source": "v", "sensitivity": "low",
-                  "secret_value": "pw", "caption": "c"}]
+        items = [{"entry_type": "secret", "source": "v", "sensitivity": "low", "secret_value": "pw", "caption": "c"}]
 
         with patch(CITATION_PATCH) as MockMgr:
             MockMgr.return_value.create = AsyncMock(return_value=None)
@@ -413,8 +430,15 @@ class TestEpisodicMemoryInsertCitation:
             insert_method="insert_event",
             memory_source_id="src-123",
         )
-        items = [{"event_type": "activity", "actor": "user", "summary": "s",
-                  "details": "d", "occurred_at": datetime.now().isoformat()}]
+        items = [
+            {
+                "event_type": "activity",
+                "actor": "user",
+                "summary": "s",
+                "details": "d",
+                "occurred_at": datetime.now().isoformat(),
+            }
+        ]
 
         with patch(CITATION_PATCH) as MockMgr:
             MockMgr.return_value.create = AsyncMock(return_value=None)
@@ -429,8 +453,15 @@ class TestEpisodicMemoryInsertCitation:
             manager_attr="episodic_memory_manager",
             insert_method="insert_event",
         )
-        items = [{"event_type": "activity", "actor": "user", "summary": "s",
-                  "details": "d", "occurred_at": datetime.now().isoformat()}]
+        items = [
+            {
+                "event_type": "activity",
+                "actor": "user",
+                "summary": "s",
+                "details": "d",
+                "occurred_at": datetime.now().isoformat(),
+            }
+        ]
 
         with patch(CITATION_PATCH) as MockMgr:
             MockMgr.return_value.create = AsyncMock(return_value=None)

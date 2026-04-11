@@ -1016,6 +1016,7 @@ class TestProtobufSourceFields:
         assert deserialized.source_type == "conversation"
         assert deserialized.source_system == "slack"
         from google.protobuf.json_format import MessageToDict
+
         metadata = MessageToDict(deserialized.source_metadata)
         assert metadata["channel_id"] == "C123"
         assert metadata["team_id"] == "T456"

@@ -117,7 +117,9 @@ class MemoryCitationManager:
                     key = self._exists_cache_key(memory_source_id, memory_type, memory_id)
                     cached_data = await cache_provider.get_json(key)
                     if cached_data:
-                        logger.debug("Cache HIT for citation exists: %s/%s/%s", memory_source_id, memory_type, memory_id)
+                        logger.debug(
+                            "Cache HIT for citation exists: %s/%s/%s", memory_source_id, memory_type, memory_id
+                        )
                         return True
             except Exception as e:
                 logger.warning("Cache read failed for citation exists check: %s", e)

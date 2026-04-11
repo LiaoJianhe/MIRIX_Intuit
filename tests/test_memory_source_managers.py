@@ -58,14 +58,17 @@ class TestManagerImports:
 
     def test_memory_source_manager_imports(self):
         from mirix.services.memory_source_manager import MemorySourceManager
+
         assert MemorySourceManager is not None
 
     def test_source_message_manager_imports(self):
         from mirix.services.source_message_manager import SourceMessageManager
+
         assert SourceMessageManager is not None
 
     def test_memory_citation_manager_imports(self):
         from mirix.services.memory_citation_manager import MemoryCitationManager
+
         assert MemoryCitationManager is not None
 
 
@@ -74,6 +77,7 @@ class TestManagerMethodSignatures:
 
     def test_memory_source_manager_methods(self):
         from mirix.services.memory_source_manager import MemorySourceManager
+
         mgr = MemorySourceManager.__new__(MemorySourceManager)
         assert callable(getattr(mgr, "create", None))
         assert callable(getattr(mgr, "get_by_id", None))
@@ -81,11 +85,13 @@ class TestManagerMethodSignatures:
 
     def test_source_message_manager_methods(self):
         from mirix.services.source_message_manager import SourceMessageManager
+
         mgr = SourceMessageManager.__new__(SourceMessageManager)
         assert callable(getattr(mgr, "bulk_insert", None))
 
     def test_memory_citation_manager_methods(self):
         from mirix.services.memory_citation_manager import MemoryCitationManager
+
         mgr = MemoryCitationManager.__new__(MemoryCitationManager)
         assert callable(getattr(mgr, "create", None))
         assert callable(getattr(mgr, "check_exists", None))

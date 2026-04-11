@@ -13,7 +13,6 @@ import pytest
 from mirix.schemas.memory_source import MemorySource, PaginatedResponse
 from mirix.schemas.source_message import SourceMessage
 
-
 # --- Test data factories ---
 
 SRC_ID_1 = "src-aaaaaaaa-1111-2222-3333-444444444444"
@@ -68,6 +67,7 @@ def _make_client(client_id="client-1", read_scopes=None, write_scope="sbg"):
 
 # --- SourceMessageManager.get_messages_by_source_id ---
 
+
 class TestGetMessagesBySourceId:
 
     @pytest.mark.asyncio
@@ -110,6 +110,7 @@ class TestGetMessagesBySourceId:
 
 # --- REST API route handlers ---
 
+
 def _mock_server_with_client(client):
     """Set up mock server that returns the given client from client_manager."""
     mock_server = MagicMock()
@@ -130,7 +131,9 @@ class TestGetMemorySourceRoute:
             mock_instance = MockMgr.return_value
             mock_instance.get_by_id = AsyncMock(return_value=source)
 
-            with patch("mirix.server.rest_api.get_client_and_org", new_callable=AsyncMock, return_value=("client-1", "org-1")):
+            with patch(
+                "mirix.server.rest_api.get_client_and_org", new_callable=AsyncMock, return_value=("client-1", "org-1")
+            ):
                 with patch("mirix.server.rest_api.get_server", return_value=_mock_server_with_client(client)):
                     result = await get_memory_source(source_id=SRC_ID_1, x_client_id="client-1")
 
@@ -148,7 +151,9 @@ class TestGetMemorySourceRoute:
             mock_instance = MockMgr.return_value
             mock_instance.get_by_id = AsyncMock(return_value=source)
 
-            with patch("mirix.server.rest_api.get_client_and_org", new_callable=AsyncMock, return_value=("client-b", "org-1")):
+            with patch(
+                "mirix.server.rest_api.get_client_and_org", new_callable=AsyncMock, return_value=("client-b", "org-1")
+            ):
                 with patch("mirix.server.rest_api.get_server", return_value=_mock_server_with_client(client_b)):
                     result = await get_memory_source(source_id=SRC_ID_1, x_client_id="client-b")
 
@@ -164,9 +169,12 @@ class TestGetMemorySourceRoute:
             mock_instance = MockMgr.return_value
             mock_instance.get_by_id = AsyncMock(return_value=None)
 
-            with patch("mirix.server.rest_api.get_client_and_org", new_callable=AsyncMock, return_value=("client-1", "org-1")):
+            with patch(
+                "mirix.server.rest_api.get_client_and_org", new_callable=AsyncMock, return_value=("client-1", "org-1")
+            ):
                 with patch("mirix.server.rest_api.get_server", return_value=_mock_server_with_client(client)):
                     from fastapi import HTTPException as FastHTTPException
+
                     with pytest.raises(FastHTTPException) as exc_info:
                         await get_memory_source(source_id="src-missing", x_client_id="client-1")
 
@@ -184,9 +192,12 @@ class TestGetMemorySourceRoute:
             mock_instance = MockMgr.return_value
             mock_instance.get_by_id = AsyncMock(return_value=source)
 
-            with patch("mirix.server.rest_api.get_client_and_org", new_callable=AsyncMock, return_value=("client-1", "org-1")):
+            with patch(
+                "mirix.server.rest_api.get_client_and_org", new_callable=AsyncMock, return_value=("client-1", "org-1")
+            ):
                 with patch("mirix.server.rest_api.get_server", return_value=_mock_server_with_client(client)):
                     from fastapi import HTTPException as FastHTTPException
+
                     with pytest.raises(FastHTTPException) as exc_info:
                         await get_memory_source(source_id=SRC_ID_1, x_client_id="client-1")
 
@@ -204,9 +215,12 @@ class TestGetMemorySourceRoute:
             mock_instance = MockMgr.return_value
             mock_instance.get_by_id = AsyncMock(return_value=source)
 
-            with patch("mirix.server.rest_api.get_client_and_org", new_callable=AsyncMock, return_value=("client-1", "org-1")):
+            with patch(
+                "mirix.server.rest_api.get_client_and_org", new_callable=AsyncMock, return_value=("client-1", "org-1")
+            ):
                 with patch("mirix.server.rest_api.get_server", return_value=_mock_server_with_client(client)):
                     from fastapi import HTTPException as FastHTTPException
+
                     with pytest.raises(FastHTTPException) as exc_info:
                         await get_memory_source(source_id=SRC_ID_1, x_client_id="client-1")
 
@@ -232,7 +246,11 @@ class TestGetMemorySourceMessagesRoute:
                 mock_msg_instance = MockMsgMgr.return_value
                 mock_msg_instance.get_messages_by_source_id = AsyncMock(return_value=page)
 
-                with patch("mirix.server.rest_api.get_client_and_org", new_callable=AsyncMock, return_value=("client-1", "org-1")):
+                with patch(
+                    "mirix.server.rest_api.get_client_and_org",
+                    new_callable=AsyncMock,
+                    return_value=("client-1", "org-1"),
+                ):
                     with patch("mirix.server.rest_api.get_server", return_value=_mock_server_with_client(client)):
                         result = await get_memory_source_messages(source_id=SRC_ID_1, x_client_id="client-1")
 
@@ -250,12 +268,13 @@ class TestGetMemorySourceMessagesRoute:
             mock_source_instance = MockSourceMgr.return_value
             mock_source_instance.get_by_id = AsyncMock(return_value=source)
 
-            with patch("mirix.server.rest_api.get_client_and_org", new_callable=AsyncMock, return_value=("client-1", "org-1")):
+            with patch(
+                "mirix.server.rest_api.get_client_and_org", new_callable=AsyncMock, return_value=("client-1", "org-1")
+            ):
                 with patch("mirix.server.rest_api.get_server", return_value=_mock_server_with_client(client)):
                     from fastapi import HTTPException as FastHTTPException
+
                     with pytest.raises(FastHTTPException) as exc_info:
                         await get_memory_source_messages(source_id=SRC_ID_1, x_client_id="client-1")
 
                     assert exc_info.value.status_code == 404
-
-

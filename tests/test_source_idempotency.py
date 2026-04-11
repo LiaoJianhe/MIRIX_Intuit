@@ -107,7 +107,7 @@ class TestDeriveExternalIdFromMessageIds:
     def test_hex_suffix(self):
         """Suffix is a valid 64-char hex SHA-256."""
         eid = derive_external_id_from_message_ids(["msg-1"])
-        hex_part = eid[len("auto-"):]
+        hex_part = eid[len("auto-") :]
         assert len(hex_part) == 64
         int(hex_part, 16)
 

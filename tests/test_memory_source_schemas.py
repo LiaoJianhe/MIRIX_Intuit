@@ -375,7 +375,9 @@ class TestNormalizeMessage:
         """normalize_message works with Pydantic MessageCreate objects."""
         from mirix.schemas.message import MessageCreate
 
-        msg = MessageCreate(role="user", content="hello", external_message_id="ext-1", message_occurred_at="2026-01-15T10:00:00Z")
+        msg = MessageCreate(
+            role="user", content="hello", external_message_id="ext-1", message_occurred_at="2026-01-15T10:00:00Z"
+        )
         normalized = normalize_message(msg)
 
         assert normalized["role"] == "user"
