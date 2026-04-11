@@ -2884,7 +2884,7 @@ async def search_memory(
                     agent_state=agent_state,
                     user=user,
                     query=query,
-                    embedded_text=(embedded_text if search_method == "embedding" and query else None),
+                    embedded_text=(embedded_text_padded if search_method == "embedding" and query else None),
                     search_field=(
                         search_field
                         if search_field != "null"
@@ -2918,7 +2918,7 @@ async def search_memory(
                     agent_state=agent_state,
                     user=user,
                     query=query,
-                    embedded_text=(embedded_text if search_method == "embedding" and query else None),
+                    embedded_text=(embedded_text_padded if search_method == "embedding" and query else None),
                     search_field=search_field if search_field != "null" else "summary",
                     search_method=search_method,
                     limit=limit,
@@ -2947,7 +2947,7 @@ async def search_memory(
                     agent_state=agent_state,
                     user=user,
                     query=query,
-                    embedded_text=(embedded_text if search_method == "embedding" and query else None),
+                    embedded_text=(embedded_text_padded if search_method == "embedding" and query else None),
                     search_field=search_field if search_field != "null" else "caption",
                     search_method=search_method,
                     limit=limit,
@@ -3075,7 +3075,7 @@ async def search_memory(
                 agent_state=agent_state,
                 user=user,
                 query=query,
-                embedded_text=(embedded_text if search_method == "embedding" and query else None),
+                embedded_text=(embedded_text_padded if search_method == "embedding" and query else None),
                 search_field=(
                     search_field
                     if search_field != "null"
@@ -3111,7 +3111,7 @@ async def search_memory(
                 agent_state=agent_state,
                 user=user,
                 query=query,
-                embedded_text=(embedded_text if search_method == "embedding" and query else None),
+                embedded_text=(embedded_text_padded if search_method == "embedding" and query else None),
                 search_field=search_field if search_field != "null" else "summary",
                 search_method=search_method,
                 limit=limit,
@@ -3142,7 +3142,7 @@ async def search_memory(
                 agent_state=agent_state,
                 user=user,
                 query=query,
-                embedded_text=(embedded_text if search_method == "embedding" and query else None),
+                embedded_text=(embedded_text_padded if search_method == "embedding" and query else None),
                 search_field=search_field if search_field != "null" else "caption",
                 search_method=search_method,
                 limit=limit,
@@ -3448,7 +3448,7 @@ async def search_memory_all_users(
                     agent_state=agent_state,
                     organization_id=effective_org_id,
                     query=query,
-                    embedded_text=(embedded_text if search_method == "embedding" and query else None),
+                    embedded_text=(embedded_text_padded if search_method == "embedding" and query else None),
                     search_field=(
                         search_field
                         if search_field != "null"
@@ -3483,7 +3483,7 @@ async def search_memory_all_users(
                     agent_state=agent_state,
                     organization_id=effective_org_id,
                     query=query,
-                    embedded_text=(embedded_text if search_method == "embedding" and query else None),
+                    embedded_text=(embedded_text_padded if search_method == "embedding" and query else None),
                     search_field=search_field if search_field != "null" else "summary",
                     search_method=search_method,
                     limit=limit,
@@ -3513,7 +3513,7 @@ async def search_memory_all_users(
                     agent_state=agent_state,
                     organization_id=effective_org_id,
                     query=query,
-                    embedded_text=(embedded_text if search_method == "embedding" and query else None),
+                    embedded_text=(embedded_text_padded if search_method == "embedding" and query else None),
                     search_field=search_field if search_field != "null" else "caption",
                     search_method=search_method,
                     limit=limit,
@@ -3624,7 +3624,7 @@ async def search_memory_all_users(
                 agent_state=agent_state,
                 organization_id=effective_org_id,
                 query=query,
-                embedded_text=(embedded_text if search_method == "embedding" and query else None),
+                embedded_text=(embedded_text_padded if search_method == "embedding" and query else None),
                 search_field=(
                     search_field
                     if search_field != "null"
@@ -3661,7 +3661,7 @@ async def search_memory_all_users(
                 agent_state=agent_state,
                 organization_id=effective_org_id,
                 query=query,
-                embedded_text=(embedded_text if search_method == "embedding" and query else None),
+                embedded_text=(embedded_text_padded if search_method == "embedding" and query else None),
                 search_field=search_field if search_field != "null" else "summary",
                 search_method=search_method,
                 limit=limit,
@@ -3693,7 +3693,7 @@ async def search_memory_all_users(
                 agent_state=agent_state,
                 organization_id=effective_org_id,
                 query=query,
-                embedded_text=(embedded_text if search_method == "embedding" and query else None),
+                embedded_text=(embedded_text_padded if search_method == "embedding" and query else None),
                 search_field=search_field if search_field != "null" else "caption",
                 search_method=search_method,
                 limit=limit,
@@ -5451,7 +5451,6 @@ async def get_memory_source_messages(
         cursor=cursor,
     )
     return messages
-
 
 
 # ============================================================================

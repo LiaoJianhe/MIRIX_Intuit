@@ -181,7 +181,8 @@ async def add_all_memories(
 
     # Add core memory - personal user profile information that triggers the core_memory_agent.
     # The meta_memory_agent LLM needs to see personal facts / preferences to include "core"
-    # in its trigger_memory_update call.
+    # in its trigger_memory_update call.  The message is worded to strongly match the Core
+    # Memory classification rule: "WHO the user is and HOW they prefer to communicate."
     result = await client.add(
         user_id=user_id,
         messages=[
@@ -191,8 +192,12 @@ async def add_all_memories(
                     {
                         "type": "text",
                         "text": (
-                            f"{prefix}My name is Alex and I'm a senior software engineer. "
-                            "I prefer direct, concise communication and like technical details. "
+                            f"{prefix}Here are my personal details and communication preferences "
+                            "so you can remember them for future conversations: "
+                            "My name is Alex. I am a senior software engineer. "
+                            "I strongly prefer direct, concise responses without filler. "
+                            "Always include technical details and code examples when relevant. "
+                            "Never give me motivational fluff. "
                             "I work remotely from Portland and enjoy hiking on weekends."
                         ),
                     }
@@ -200,7 +205,12 @@ async def add_all_memories(
             },
             {
                 "role": "assistant",
-                "content": [{"type": "text", "text": "Nice to meet you, Alex! I've noted your preferences."}],
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Thanks for sharing! What would you like to work on today?",
+                    }
+                ],
             },
         ],
         occurred_at="2025-11-20T14:25:00",
@@ -959,24 +969,15 @@ class TestSearchAllUsers:
         )
         await add_all_memories(client1, user_prod_id, filter_tags, prefix="[Prod] ", block_filter_tags={"env": "prod"})
 
-        logger.info("⏱️  Waiting 50 seconds for async memory processing (staging + prod users)...")
-        await asyncio.sleep(50)
-
-        results = await client1.search_all_users(
-            query="",
-            memory_type="all",
-            client_id=client1.client_id,
-            limit=100,
-            include_core_memory=True,
-            block_filter_tags={"env": "staging"},
-        )
-
-        assert results is not None and results["success"] is True
-        core_results = [r for r in results["results"] if r.get("memory_type") == "core"]
-
-        if len(core_results) == 0:
-            logger.info("No core results after 50s; waiting 40s and retrying once for slow queue processing...")
-            await asyncio.sleep(40)
+        # Poll for core memory blocks with env=staging tag.
+        # With MIRIX_MEMORY_QUEUE_NUM_WORKERS set to parallelize across users,
+        # processing should complete within ~60-90s even with class-level fixture messages.
+        max_attempts = 12
+        poll_interval = 10
+        logger.info("⏱️  Polling for core memory blocks with env=staging (up to %ds)...", max_attempts * poll_interval)
+        core_results = []
+        for attempt in range(max_attempts):
+            await asyncio.sleep(poll_interval)
             results = await client1.search_all_users(
                 query="",
                 memory_type="all",
@@ -985,7 +986,16 @@ class TestSearchAllUsers:
                 include_core_memory=True,
                 block_filter_tags={"env": "staging"},
             )
+            assert results is not None and results["success"] is True
             core_results = [r for r in results["results"] if r.get("memory_type") == "core"]
+            if len(core_results) > 0:
+                logger.info(
+                    "✅ Found %d core blocks with env=staging after %ds",
+                    len(core_results),
+                    (attempt + 1) * poll_interval,
+                )
+                break
+            logger.info("  Attempt %d/%d: no core blocks yet...", attempt + 1, max_attempts)
 
         assert len(core_results) > 0, (
             "With block_filter_tags={'env': 'staging'}, at least one core block (staging user's) must be returned. "

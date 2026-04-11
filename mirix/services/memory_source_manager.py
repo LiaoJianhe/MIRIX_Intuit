@@ -8,7 +8,8 @@ from sqlalchemy import select
 from mirix.log import get_logger
 from mirix.orm.memory_source import MemorySource as MemorySourceModel
 from mirix.schemas.client import Client as PydanticClient
-from mirix.schemas.memory_source import MemorySource as PydanticMemorySource, PaginatedResponse
+from mirix.schemas.memory_source import MemorySource as PydanticMemorySource
+from mirix.schemas.memory_source import PaginatedResponse
 from mirix.utils import enforce_types
 
 logger = get_logger(__name__)
@@ -187,9 +188,7 @@ class MemorySourceManager:
                 query = query.where(MemorySourceModel.user_id == user_id)
 
             if cursor:
-                cursor_result = await session.execute(
-                    select(MemorySourceModel).where(MemorySourceModel.id == cursor)
-                )
+                cursor_result = await session.execute(select(MemorySourceModel).where(MemorySourceModel.id == cursor))
                 cursor_obj = cursor_result.scalar_one_or_none()
                 if cursor_obj:
                     # Use created_at for stable ordering when occurred_at may be null

@@ -30,6 +30,7 @@ NC='\033[0m'
 # Parse arguments
 USE_PODMAN=false
 START_SERVER=false
+NO_CACHE=false
 SERVER_PORT=8000
 PYTEST_ARGS=()
 
@@ -47,6 +48,10 @@ while [[ $# -gt 0 ]]; do
             START_SERVER=true
             SERVER_PORT="$2"
             shift 2
+            ;;
+        --no-cache)
+            NO_CACHE=true
+            shift
             ;;
         *)
             PYTEST_ARGS+=("$1")
@@ -162,9 +167,12 @@ if [ "$START_SERVER" = true ]; then
         exit 1
     fi
     
-    # Force rebuild server container without cache to pick up all code changes
-    # This ensures the container always runs the latest code (ORM models, schemas, etc.)
-    $COMPOSE_CMD -f "$COMPOSE_FILE" build --no-cache test_server
+    # Rebuild server container to pick up code changes (uses layer cache for deps)
+    BUILD_ARGS=""
+    if [ "$NO_CACHE" = true ]; then
+        BUILD_ARGS="--no-cache"
+    fi
+    $COMPOSE_CMD -f "$COMPOSE_FILE" build $BUILD_ARGS test_server
     $COMPOSE_CMD -f "$COMPOSE_FILE" up -d test_server
     
     # Wait for server health check

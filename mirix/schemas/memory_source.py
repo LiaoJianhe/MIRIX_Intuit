@@ -12,7 +12,9 @@ class PaginatedResponse(BaseModel, Generic[T]):
     """Cursor-based paginated response envelope."""
 
     items: List[T]
-    next_cursor: Optional[str] = Field(None, description="Cursor for the next page (pass as ?cursor=). Null if no more results.")
+    next_cursor: Optional[str] = Field(
+        None, description="Cursor for the next page (pass as ?cursor=). Null if no more results."
+    )
     has_more: bool = Field(..., description="Whether there are more results beyond this page")
 
 
@@ -39,7 +41,9 @@ class MemorySource(MemorySourceBase):
     summary_source: Optional[str] = Field(None, description="How the summary was produced: client or generated")
     processing_complete: bool = Field(False, description="Whether all agents have finished processing")
     batch_hash: Optional[str] = Field(None, description="SHA-256 fallback dedup hash")
-    filter_tags: Optional[Dict[str, Any]] = Field(None, description="Custom filter tags for filtering and categorization (includes scope for access control)")
+    filter_tags: Optional[Dict[str, Any]] = Field(
+        None, description="Custom filter tags for filtering and categorization (includes scope for access control)"
+    )
     created_at: Optional[datetime] = Field(None, description="When the record was created")
     updated_at: Optional[datetime] = Field(None, description="When the record was last updated")
 

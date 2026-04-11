@@ -29,8 +29,8 @@ from mirix.functions.function_sets.memory_tools import (
     semantic_memory_update,
 )
 
-
 # --- Helpers ---
+
 
 def _make_agent(memory_source_id=None, use_cache=True, external_thread_id=None, occurred_at=None):
     """Create a minimal mock agent with memory source fields."""
@@ -57,6 +57,7 @@ def _make_agent(memory_source_id=None, use_cache=True, external_thread_id=None, 
 
 # --- _write_citation ---
 
+
 class TestWriteCitation:
     """Tests for the _write_citation helper."""
 
@@ -73,9 +74,7 @@ class TestWriteCitation:
             external_thread_id="thread-1",
             occurred_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         )
-        with patch(
-            "mirix.services.memory_citation_manager.MemoryCitationManager"
-        ) as MockMgr:
+        with patch("mirix.services.memory_citation_manager.MemoryCitationManager") as MockMgr:
             mock_instance = MockMgr.return_value
             mock_instance.create = AsyncMock(return_value=None)
 
@@ -94,6 +93,7 @@ class TestWriteCitation:
 
 # --- Citation writes per memory type ---
 
+
 class TestEpisodicInsertCitationWrite:
     """episodic_memory_insert writes a citation for each inserted event."""
 
@@ -105,15 +105,21 @@ class TestEpisodicInsertCitationWrite:
         agent.episodic_memory_manager = MagicMock()
         agent.episodic_memory_manager.insert_event = AsyncMock(return_value=mock_event)
 
-        with patch(
-            "mirix.services.memory_citation_manager.MemoryCitationManager"
-        ) as MockMgr:
+        with patch("mirix.services.memory_citation_manager.MemoryCitationManager") as MockMgr:
             mock_instance = MockMgr.return_value
             mock_instance.create = AsyncMock(return_value=None)
 
             await episodic_memory_insert(
                 agent,
-                [{"occurred_at": "2026-01-01T00:00:00Z", "event_type": "test", "actor": "user", "summary": "s", "details": "d"}],
+                [
+                    {
+                        "occurred_at": "2026-01-01T00:00:00Z",
+                        "event_type": "test",
+                        "actor": "user",
+                        "summary": "s",
+                        "details": "d",
+                    }
+                ],
             )
 
             mock_instance.create.assert_awaited_once()
@@ -133,7 +139,15 @@ class TestEpisodicInsertCitationWrite:
 
         result = await episodic_memory_insert(
             agent,
-            [{"occurred_at": "2026-01-01T00:00:00Z", "event_type": "test", "actor": "user", "summary": "s", "details": "d"}],
+            [
+                {
+                    "occurred_at": "2026-01-01T00:00:00Z",
+                    "event_type": "test",
+                    "actor": "user",
+                    "summary": "s",
+                    "details": "d",
+                }
+            ],
         )
 
         assert "inserted" in result.lower()
@@ -153,9 +167,7 @@ class TestEpisodicMergeCitationWrite:
         agent.episodic_memory_manager = MagicMock()
         agent.episodic_memory_manager.update_event = AsyncMock(return_value=mock_event)
 
-        with patch(
-            "mirix.services.memory_citation_manager.MemoryCitationManager"
-        ) as MockMgr:
+        with patch("mirix.services.memory_citation_manager.MemoryCitationManager") as MockMgr:
             mock_instance = MockMgr.return_value
             mock_instance.create = AsyncMock(return_value=None)
 
@@ -181,16 +193,22 @@ class TestEpisodicReplaceCitationWrite:
         agent.episodic_memory_manager.delete_event_by_id = AsyncMock()
         agent.episodic_memory_manager.insert_event = AsyncMock(return_value=mock_event)
 
-        with patch(
-            "mirix.services.memory_citation_manager.MemoryCitationManager"
-        ) as MockMgr:
+        with patch("mirix.services.memory_citation_manager.MemoryCitationManager") as MockMgr:
             mock_instance = MockMgr.return_value
             mock_instance.create = AsyncMock(return_value=None)
 
             await episodic_memory_replace(
                 agent,
                 ["old-1"],
-                [{"occurred_at": "2026-01-01T00:00:00Z", "event_type": "test", "actor": "user", "summary": "s", "details": "d"}],
+                [
+                    {
+                        "occurred_at": "2026-01-01T00:00:00Z",
+                        "event_type": "test",
+                        "actor": "user",
+                        "summary": "s",
+                        "details": "d",
+                    }
+                ],
             )
 
             mock_instance.create.assert_awaited_once()
@@ -215,9 +233,7 @@ class TestCoreMemoryCitationWrite:
         agent = _make_agent(memory_source_id="src-1")
         memory = self._make_memory()
 
-        with patch(
-            "mirix.services.memory_citation_manager.MemoryCitationManager"
-        ) as MockMgr:
+        with patch("mirix.services.memory_citation_manager.MemoryCitationManager") as MockMgr:
             mock_instance = MockMgr.return_value
             mock_instance.create = AsyncMock(return_value=None)
 
@@ -234,9 +250,7 @@ class TestCoreMemoryCitationWrite:
         agent = _make_agent(memory_source_id="src-1")
         memory = self._make_memory(value="old content")
 
-        with patch(
-            "mirix.services.memory_citation_manager.MemoryCitationManager"
-        ) as MockMgr:
+        with patch("mirix.services.memory_citation_manager.MemoryCitationManager") as MockMgr:
             mock_instance = MockMgr.return_value
             mock_instance.create = AsyncMock(return_value=None)
 
@@ -251,9 +265,7 @@ class TestCoreMemoryCitationWrite:
         agent = _make_agent(memory_source_id="src-1")
         memory = self._make_memory(value="same content")
 
-        with patch(
-            "mirix.services.memory_citation_manager.MemoryCitationManager"
-        ) as MockMgr:
+        with patch("mirix.services.memory_citation_manager.MemoryCitationManager") as MockMgr:
             mock_instance = MockMgr.return_value
             mock_instance.create = AsyncMock(return_value=None)
 
@@ -273,9 +285,7 @@ class TestSemanticCitationWrite:
         agent.semantic_memory_manager = MagicMock()
         agent.semantic_memory_manager.insert_semantic_item = AsyncMock(return_value=mock_item)
 
-        with patch(
-            "mirix.services.memory_citation_manager.MemoryCitationManager"
-        ) as MockMgr:
+        with patch("mirix.services.memory_citation_manager.MemoryCitationManager") as MockMgr:
             mock_instance = MockMgr.return_value
             mock_instance.create = AsyncMock(return_value=None)
 
@@ -296,9 +306,7 @@ class TestSemanticCitationWrite:
         agent.semantic_memory_manager.delete_semantic_item_by_id = AsyncMock()
         agent.semantic_memory_manager.insert_semantic_item = AsyncMock(return_value=mock_item)
 
-        with patch(
-            "mirix.services.memory_citation_manager.MemoryCitationManager"
-        ) as MockMgr:
+        with patch("mirix.services.memory_citation_manager.MemoryCitationManager") as MockMgr:
             mock_instance = MockMgr.return_value
             mock_instance.create = AsyncMock(return_value=None)
 
@@ -320,9 +328,7 @@ class TestResourceCitationWrite:
         agent.resource_memory_manager = MagicMock()
         agent.resource_memory_manager.insert_resource = AsyncMock(return_value=mock_item)
 
-        with patch(
-            "mirix.services.memory_citation_manager.MemoryCitationManager"
-        ) as MockMgr:
+        with patch("mirix.services.memory_citation_manager.MemoryCitationManager") as MockMgr:
             mock_instance = MockMgr.return_value
             mock_instance.create = AsyncMock(return_value=None)
 
@@ -344,9 +350,7 @@ class TestProceduralCitationWrite:
         agent.procedural_memory_manager = MagicMock()
         agent.procedural_memory_manager.insert_procedure = AsyncMock(return_value=mock_item)
 
-        with patch(
-            "mirix.services.memory_citation_manager.MemoryCitationManager"
-        ) as MockMgr:
+        with patch("mirix.services.memory_citation_manager.MemoryCitationManager") as MockMgr:
             mock_instance = MockMgr.return_value
             mock_instance.create = AsyncMock(return_value=None)
 
@@ -368,15 +372,21 @@ class TestKnowledgeVaultCitationWrite:
         agent.knowledge_vault_manager = MagicMock()
         agent.knowledge_vault_manager.insert_knowledge = AsyncMock(return_value=mock_item)
 
-        with patch(
-            "mirix.services.memory_citation_manager.MemoryCitationManager"
-        ) as MockMgr:
+        with patch("mirix.services.memory_citation_manager.MemoryCitationManager") as MockMgr:
             mock_instance = MockMgr.return_value
             mock_instance.create = AsyncMock(return_value=None)
 
             await knowledge_vault_insert(
                 agent,
-                [{"entry_type": "credential", "source": "s", "sensitivity": "low", "secret_value": "v", "caption": "c"}],
+                [
+                    {
+                        "entry_type": "credential",
+                        "source": "s",
+                        "sensitivity": "low",
+                        "secret_value": "v",
+                        "caption": "c",
+                    }
+                ],
             )
 
             mock_instance.create.assert_awaited_once()
@@ -384,6 +394,7 @@ class TestKnowledgeVaultCitationWrite:
 
 
 # --- Propagation in trigger_memory_update ---
+
 
 class TestMemorySourceIdPropagation:
     """Verify memory_source_id is propagated to child agents in trigger_memory_update."""

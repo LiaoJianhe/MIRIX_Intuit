@@ -121,9 +121,7 @@ def _setup_agent(memory_source_id, summarize=False, source_summary=None):
 
     # Managers
     agent.memory_source_manager = MagicMock()
-    agent.memory_source_manager.get_by_id = AsyncMock(
-        return_value=_make_pydantic_source(processing_complete=False)
-    )
+    agent.memory_source_manager.get_by_id = AsyncMock(return_value=_make_pydantic_source(processing_complete=False))
     agent.memory_source_manager.mark_processing_complete = AsyncMock()
     agent.memory_source_manager.update_summary = AsyncMock()
     agent._persist_memory_source = AsyncMock()

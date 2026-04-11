@@ -286,12 +286,22 @@ async def test_episodic_insert_creates_citation_row(source_mgr, citation_mgr):
     """episodic_memory_insert with memory_source_id produces a citation in the DB."""
     source_id = await _create_source(source_mgr)
     agent, memory_id = _make_tool_agent(
-        source_id, manager_attr="episodic_memory_manager", insert_method="insert_event",
+        source_id,
+        manager_attr="episodic_memory_manager",
+        insert_method="insert_event",
     )
 
     await episodic_memory_insert(
         agent,
-        [{"occurred_at": "2026-01-01T00:00:00Z", "event_type": "test", "actor": "user", "summary": "s", "details": "d"}],
+        [
+            {
+                "occurred_at": "2026-01-01T00:00:00Z",
+                "event_type": "test",
+                "actor": "user",
+                "summary": "s",
+                "details": "d",
+            }
+        ],
     )
 
     exists = await citation_mgr.check_exists(
@@ -307,7 +317,9 @@ async def test_semantic_insert_creates_citation_row(source_mgr, citation_mgr):
     """semantic_memory_insert with memory_source_id produces a citation in the DB."""
     source_id = await _create_source(source_mgr)
     agent, memory_id = _make_tool_agent(
-        source_id, manager_attr="semantic_memory_manager", insert_method="insert_semantic_item",
+        source_id,
+        manager_attr="semantic_memory_manager",
+        insert_method="insert_semantic_item",
     )
 
     await semantic_memory_insert(
@@ -328,7 +340,9 @@ async def test_resource_insert_creates_citation_row(source_mgr, citation_mgr):
     """resource_memory_insert with memory_source_id produces a citation in the DB."""
     source_id = await _create_source(source_mgr)
     agent, memory_id = _make_tool_agent(
-        source_id, manager_attr="resource_memory_manager", insert_method="insert_resource",
+        source_id,
+        manager_attr="resource_memory_manager",
+        insert_method="insert_resource",
     )
 
     await resource_memory_insert(
@@ -349,7 +363,9 @@ async def test_procedural_insert_creates_citation_row(source_mgr, citation_mgr):
     """procedural_memory_insert with memory_source_id produces a citation in the DB."""
     source_id = await _create_source(source_mgr)
     agent, memory_id = _make_tool_agent(
-        source_id, manager_attr="procedural_memory_manager", insert_method="insert_procedure",
+        source_id,
+        manager_attr="procedural_memory_manager",
+        insert_method="insert_procedure",
     )
 
     await procedural_memory_insert(
@@ -370,7 +386,9 @@ async def test_knowledge_vault_insert_creates_citation_row(source_mgr, citation_
     """knowledge_vault_insert with memory_source_id produces a citation in the DB."""
     source_id = await _create_source(source_mgr)
     agent, memory_id = _make_tool_agent(
-        source_id, manager_attr="knowledge_vault_manager", insert_method="insert_knowledge",
+        source_id,
+        manager_attr="knowledge_vault_manager",
+        insert_method="insert_knowledge",
     )
 
     await knowledge_vault_insert(
@@ -433,10 +451,7 @@ async def test_multiple_items_create_multiple_citations(source_mgr, citation_mgr
 
     await semantic_memory_insert(
         agent,
-        [
-            {"name": f"fact-{i}", "summary": f"s-{i}", "details": f"d-{i}", "source": "conv"}
-            for i in range(3)
-        ],
+        [{"name": f"fact-{i}", "summary": f"s-{i}", "details": f"d-{i}", "source": "conv"} for i in range(3)],
     )
 
     for mid in mem_ids:

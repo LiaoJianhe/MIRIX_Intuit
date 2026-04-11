@@ -812,7 +812,6 @@ async def trigger_memory_update(self: "Agent", user_message: object, memory_type
     Returns:
         Optional[str]: None is always returned as this function does not produce a response.
     """
-
     from mirix.agent import (
         CoreMemoryAgent,
         EpisodicMemoryAgent,

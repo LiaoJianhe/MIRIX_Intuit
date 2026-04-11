@@ -87,8 +87,7 @@ async def test_duplicate_external_id_silently_skipped(manager):
     # get_by_id for the new ID returns None because it was never actually inserted.
     direct_lookup = await manager.get_by_id(src2_id, use_cache=False)
     assert direct_lookup is None, (
-        "Second insert with duplicate external_id should have been skipped; "
-        f"but a record was found at {src2_id}"
+        "Second insert with duplicate external_id should have been skipped; " f"but a record was found at {src2_id}"
     )
 
     # Original record should still exist
@@ -164,6 +163,4 @@ async def test_duplicate_batch_hash_silently_skipped(manager):
     await manager.create(memory_source_id=src2_id, **common)
 
     direct_lookup = await manager.get_by_id(src2_id, use_cache=False)
-    assert direct_lookup is None, (
-        "Second insert with duplicate batch_hash should have been skipped"
-    )
+    assert direct_lookup is None, "Second insert with duplicate batch_hash should have been skipped"
