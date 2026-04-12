@@ -437,11 +437,13 @@ async def test_get_citations_for_memories_batch(source_mgr, citation_mgr):
         use_cache=False,
     )
 
-    result = await citation_mgr.get_citations_for_memories([
-        ("episodic", mem_1),
-        ("semantic", mem_2),
-        ("procedural", "nonexistent"),
-    ])
+    result = await citation_mgr.get_citations_for_memories(
+        [
+            ("episodic", mem_1),
+            ("semantic", mem_2),
+            ("procedural", "nonexistent"),
+        ]
+    )
 
     assert ("episodic", mem_1) in result
     assert len(result[("episodic", mem_1)]) == 2

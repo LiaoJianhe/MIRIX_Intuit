@@ -29,19 +29,11 @@ pytestmark = [
     pytest.mark.usefixtures("isolate_api_key_env"),
 ]
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 BASE_URL = os.environ.get("MIRIX_API_URL", "http://localhost:8000")
-CONFIG_PATH = (
-    Path(__file__).parent.parent
-    / "mirix"
-    / "configs"
-    / "examples"
-    / "mirix_gemini.yaml"
-)
+CONFIG_PATH = Path(__file__).parent.parent / "mirix" / "configs" / "examples" / "mirix_gemini.yaml"
 
 
 # ---------------------------------------------------------------------------
@@ -125,17 +117,13 @@ class TestSearchCitationsIntegration:
             debug=True,
         )
         await c.initialize_meta_agent(config_path=str(CONFIG_PATH), update_agents=True)
-        logger.info(
-            "Client initialized: %s (scope=%s, org=%s)", client_id, scope_value, org_id
-        )
+        logger.info("Client initialized: %s (scope=%s, org=%s)", client_id, scope_value, org_id)
         return c
 
     @pytest_asyncio.fixture(scope="class")
     async def user_id(self, client, org_id):
         uid = f"cit-test-user-{int(time.time())}"
-        await client.create_or_get_user(
-            user_id=uid, user_name="Citation Test User", org_id=org_id
-        )
+        await client.create_or_get_user(user_id=uid, user_name="Citation Test User", org_id=org_id)
         logger.info("User created: %s", uid)
         return uid
 
@@ -186,20 +174,14 @@ class TestSearchCitationsIntegration:
             max_wait_s=60,
             interval_s=10,
         )
-        assert (
-            results.get("count", 0) > 0
-        ), "Memories were not created — agent processing may have failed"
-        logger.info(
-            "Verified: %d memories exist before citation tests", results["count"]
-        )
+        assert results.get("count", 0) > 0, "Memories were not created — agent processing may have failed"
+        logger.info("Verified: %d memories exist before citation tests", results["count"])
 
     # -------------------------------------------------------------------
     # Tests
     # -------------------------------------------------------------------
 
-    async def test_search_without_include_citations_has_no_citations_key(
-        self, client, user_id
-    ):
+    async def test_search_without_include_citations_has_no_citations_key(self, client, user_id):
         """Default search (include_citations=False) should NOT have a citations key on results."""
         results = await client.search(
             user_id=user_id,
@@ -209,9 +191,7 @@ class TestSearchCitationsIntegration:
         assert results["success"]
         assert results["count"] > 0
         for r in results["results"]:
-            assert (
-                "citations" not in r
-            ), f"citations key should not be present by default: {r}"
+            assert "citations" not in r, f"citations key should not be present by default: {r}"
 
     async def test_search_with_include_citations(self, client, user_id):
         """search(include_citations=True) should return citations on results."""
@@ -261,16 +241,12 @@ class TestSearchCitationsIntegration:
                 if cit.get("memory_source_id"):
                     source_ids.add(cit["memory_source_id"])
 
-        assert (
-            len(source_ids) > 0
-        ), "Expected at least one memory_source_id in citations"
+        assert len(source_ids) > 0, "Expected at least one memory_source_id in citations"
 
         # Verify each source ID is retrievable
         for sid in source_ids:
             resp = await client._request("GET", f"/memory-sources/{sid}")
-            assert (
-                resp is not None
-            ), f"memory_source_id {sid} from citation was not found"
+            assert resp is not None, f"memory_source_id {sid} from citation was not found"
             assert resp.get("id") == sid
 
     async def test_search_all_users_with_citations(self, client, user_id, scope_value):
@@ -288,9 +264,7 @@ class TestSearchCitationsIntegration:
             assert "citations" in r
             assert isinstance(r["citations"], list)
 
-        assert _has_any_citation(
-            results["results"]
-        ), "Expected citations in search_all_users results"
+        assert _has_any_citation(results["results"]), "Expected citations in search_all_users results"
 
     async def test_retrieve_with_topic_with_citations(self, client, user_id):
         """retrieve_with_topic(include_citations=True) attaches citations to nested memories."""
@@ -321,9 +295,7 @@ class TestSearchCitationsIntegration:
             messages=[
                 {
                     "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Tell me about the Kubernetes meeting"}
-                    ],
+                    "content": [{"type": "text", "text": "Tell me about the Kubernetes meeting"}],
                 },
             ],
             limit=10,
@@ -338,9 +310,7 @@ class TestSearchCitationsIntegration:
             f"Memory types present: {list(memories.keys())}"
         )
 
-    async def test_retrieve_without_citations_has_no_citations_key(
-        self, client, user_id
-    ):
+    async def test_retrieve_without_citations_has_no_citations_key(self, client, user_id):
         """Default retrieve (no include_citations) should NOT have citations on items."""
         result = await client.retrieve_with_topic(
             user_id=user_id,
@@ -355,17 +325,13 @@ class TestSearchCitationsIntegration:
             if not isinstance(section, dict):
                 continue
             for item in section.get("items", []):
-                assert (
-                    "citations" not in item
-                ), f"citations key should not be present by default: {item}"
+                assert "citations" not in item, f"citations key should not be present by default: {item}"
             for item in section.get("recent", []):
                 assert "citations" not in item
             for item in section.get("relevant", []):
                 assert "citations" not in item
 
-    async def test_multiple_sources_produce_multiple_citations(
-        self, client, user_id, scope_value
-    ):
+    async def test_multiple_sources_produce_multiple_citations(self, client, user_id, scope_value):
         """Adding a second conversation about the same topic should produce additional citations."""
         # Add a second conversation about Kubernetes
         await client.add(
@@ -405,17 +371,13 @@ class TestSearchCitationsIntegration:
                 limit=10,
                 include_citations=True,
             ),
-            is_ready=lambda r: any(
-                len(x.get("citations", [])) > 1 for x in r.get("results", [])
-            ),
+            is_ready=lambda r: any(len(x.get("citations", [])) > 1 for x in r.get("results", [])),
             max_wait_s=60,
             interval_s=10,
         )
 
         # Find results with multiple citations (memory updated by both sources)
-        multi_citation_results = [
-            r for r in results["results"] if len(r.get("citations", [])) > 1
-        ]
+        multi_citation_results = [r for r in results["results"] if len(r.get("citations", [])) > 1]
         logger.info(
             "Results with multiple citations: %d / %d",
             len(multi_citation_results),

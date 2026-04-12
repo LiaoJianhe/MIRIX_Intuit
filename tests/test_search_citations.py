@@ -118,9 +118,7 @@ class TestGetCitationsForMemories:
         execute_result.scalars.return_value.all.return_value = [row1, row2, row3]
         mock_session.execute = AsyncMock(return_value=execute_result)
 
-        result = await citation_mgr.get_citations_for_memories(
-            [("episodic", "mem-1"), ("semantic", "mem-2")]
-        )
+        result = await citation_mgr.get_citations_for_memories([("episodic", "mem-1"), ("semantic", "mem-2")])
 
         assert ("episodic", "mem-1") in result
         assert ("semantic", "mem-2") in result
@@ -157,9 +155,7 @@ class TestAttachCitationsToResults:
             ],
         }
 
-        with patch(
-            "mirix.services.memory_citation_manager.MemoryCitationManager"
-        ) as MockMgr:
+        with patch("mirix.services.memory_citation_manager.MemoryCitationManager") as MockMgr:
             instance = MockMgr.return_value
             instance.get_citations_for_memories = AsyncMock(return_value=mock_grouped)
 
@@ -180,13 +176,13 @@ class TestAttachCitationsToResults:
 
         mock_grouped = {
             ("core", "block-1"): [
-                _make_citation(memory_type="core", memory_id="block-1", memory_source_id="src-x", citation_type="updated"),
+                _make_citation(
+                    memory_type="core", memory_id="block-1", memory_source_id="src-x", citation_type="updated"
+                ),
             ],
         }
 
-        with patch(
-            "mirix.services.memory_citation_manager.MemoryCitationManager"
-        ) as MockMgr:
+        with patch("mirix.services.memory_citation_manager.MemoryCitationManager") as MockMgr:
             instance = MockMgr.return_value
             instance.get_citations_for_memories = AsyncMock(return_value=mock_grouped)
 
@@ -214,9 +210,7 @@ class TestAttachCitationsToResults:
             ],
         }
 
-        with patch(
-            "mirix.services.memory_citation_manager.MemoryCitationManager"
-        ) as MockMgr:
+        with patch("mirix.services.memory_citation_manager.MemoryCitationManager") as MockMgr:
             instance = MockMgr.return_value
             instance.get_citations_for_memories = AsyncMock(return_value=mock_grouped)
 
@@ -235,9 +229,7 @@ class TestAttachCitationsToResults:
             ],
         }
 
-        with patch(
-            "mirix.services.memory_citation_manager.MemoryCitationManager"
-        ) as MockMgr:
+        with patch("mirix.services.memory_citation_manager.MemoryCitationManager") as MockMgr:
             instance = MockMgr.return_value
             instance.get_citations_for_memories = AsyncMock(return_value=mock_grouped)
 
@@ -269,9 +261,7 @@ class TestAttachCitationsToMemoriesDict:
             ],
         }
 
-        with patch(
-            "mirix.services.memory_citation_manager.MemoryCitationManager"
-        ) as MockMgr:
+        with patch("mirix.services.memory_citation_manager.MemoryCitationManager") as MockMgr:
             instance = MockMgr.return_value
             instance.get_citations_for_memories = AsyncMock(return_value=mock_grouped)
 
@@ -301,13 +291,13 @@ class TestAttachCitationsToMemoriesDict:
             ],
             ("resource", "res-1"): [
                 _make_citation(memory_type="resource", memory_id="res-1", memory_source_id="src-c"),
-                _make_citation(memory_type="resource", memory_id="res-1", memory_source_id="src-d", citation_type="updated"),
+                _make_citation(
+                    memory_type="resource", memory_id="res-1", memory_source_id="src-d", citation_type="updated"
+                ),
             ],
         }
 
-        with patch(
-            "mirix.services.memory_citation_manager.MemoryCitationManager"
-        ) as MockMgr:
+        with patch("mirix.services.memory_citation_manager.MemoryCitationManager") as MockMgr:
             instance = MockMgr.return_value
             instance.get_citations_for_memories = AsyncMock(return_value=mock_grouped)
 
@@ -332,13 +322,13 @@ class TestAttachCitationsToMemoriesDict:
 
         mock_grouped = {
             ("core", "block-1"): [
-                _make_citation(memory_type="core", memory_id="block-1", memory_source_id="src-z", citation_type="updated"),
+                _make_citation(
+                    memory_type="core", memory_id="block-1", memory_source_id="src-z", citation_type="updated"
+                ),
             ],
         }
 
-        with patch(
-            "mirix.services.memory_citation_manager.MemoryCitationManager"
-        ) as MockMgr:
+        with patch("mirix.services.memory_citation_manager.MemoryCitationManager") as MockMgr:
             instance = MockMgr.return_value
             instance.get_citations_for_memories = AsyncMock(return_value=mock_grouped)
 
@@ -372,9 +362,7 @@ class TestAttachCitationsToMemoriesDict:
             ],
         }
 
-        with patch(
-            "mirix.services.memory_citation_manager.MemoryCitationManager"
-        ) as MockMgr:
+        with patch("mirix.services.memory_citation_manager.MemoryCitationManager") as MockMgr:
             instance = MockMgr.return_value
             instance.get_citations_for_memories = AsyncMock(return_value=mock_grouped)
 
