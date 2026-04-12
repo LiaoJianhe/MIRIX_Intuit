@@ -2135,6 +2135,7 @@ class RetrieveMemoryRequest(BaseModel):
     # NEW: Optional date range for temporal filtering (ISO 8601 format)
     start_date: Optional[str] = None  # e.g., "2025-11-19T00:00:00" or "2025-11-19T00:00:00+00:00"
     end_date: Optional[str] = None  # e.g., "2025-11-19T23:59:59" or "2025-11-19T23:59:59+00:00"
+    include_citations: bool = False  # When True, attach citation provenance to each memory result
 
 
 async def retrieve_memories_by_keywords(
@@ -2546,6 +2547,9 @@ async def retrieve_memory_with_conversation(
         end_date=end_date,
     )
 
+    if request.include_citations:
+        memories = await _attach_citations_to_memories_dict(memories)
+
     return {
         "success": True,
         "topics": topics,
@@ -2570,6 +2574,7 @@ async def retrieve_memory_with_topic(
     limit: int = 10,
     filter_tags: Optional[str] = None,
     use_cache: bool = True,
+    include_citations: bool = Query(False, description="When True, attach citation provenance to each result."),
     x_client_id: Optional[str] = Header(None),
     x_org_id: Optional[str] = Header(None),
 ):
@@ -2582,6 +2587,7 @@ async def retrieve_memory_with_topic(
         limit: Maximum number of items to retrieve per memory type (default: 10)
         filter_tags: Optional JSON string of tags to filter memories (default: None)
         use_cache: Whether to use cached results (default: True)
+        include_citations: When True, attach citation provenance to each result (default: False)
     """
     server = get_server()
     client_id, org_id = await get_client_and_org(x_client_id, x_org_id)
@@ -2633,6 +2639,9 @@ async def retrieve_memory_with_topic(
         use_cache=use_cache,
     )
 
+    if include_citations:
+        memories = await _attach_citations_to_memories_dict(memories)
+
     return {
         "success": True,
         "topic": topic,
@@ -2678,6 +2687,107 @@ async def _precompute_embedding_for_search(
     return embedded_text, embedded_text_padded
 
 
+async def _attach_citations_to_results(results: list[dict]) -> list[dict]:
+    """Batch-fetch citations for search results and attach them to each result dict.
+
+    Each result gets a ``citations`` list containing dicts with
+    ``memory_source_id``, ``citation_type``, ``occurred_at``, and ``external_thread_id``.
+    """
+    from mirix.services.memory_citation_manager import MemoryCitationManager
+
+    memory_keys = [(r["memory_type"], r["id"]) for r in results if r.get("id")]
+    if not memory_keys:
+        for r in results:
+            r["citations"] = []
+        return results
+
+    citation_mgr = MemoryCitationManager()
+    grouped = await citation_mgr.get_citations_for_memories(memory_keys)
+
+    for r in results:
+        key = (r.get("memory_type"), r.get("id"))
+        cits = grouped.get(key, [])
+        r["citations"] = [
+            {
+                "memory_source_id": c.memory_source_id,
+                "citation_type": c.citation_type,
+                "occurred_at": c.occurred_at.isoformat() if c.occurred_at else None,
+                "external_thread_id": c.external_thread_id,
+            }
+            for c in cits
+        ]
+    return results
+
+
+async def _attach_citations_to_memories_dict(memories: dict) -> dict:
+    """Attach citations to the nested memories dict returned by conversation/topic retrieval.
+
+    Structure:
+        episodic:        { recent: [{id, ...}], relevant: [{id, ...}] }
+        semantic/resource/procedural/knowledge_vault: { items: [{id, ...}] }
+        core:            { scopes: { <scope>: { items: [{id, ...}] } } }
+
+    Mutates the dicts in place, adding a ``citations`` key to each item.
+    """
+    from mirix.services.memory_citation_manager import MemoryCitationManager
+
+    # Collect all (memory_type, id) pairs and track which list items they came from
+    memory_keys: list[tuple[str, str]] = []
+    items_by_key: dict[tuple[str, str], list[dict]] = {}
+
+    for memory_type, section in memories.items():
+        if not isinstance(section, dict):
+            continue
+
+        item_lists = []
+
+        # Core: nested under scopes.<scope>.items[]
+        if memory_type == "core":
+            scopes_dict = section.get("scopes", {})
+            for scope_data in scopes_dict.values():
+                if isinstance(scope_data, dict) and "items" in scope_data:
+                    item_lists.append(scope_data["items"])
+        else:
+            # Episodic has recent[] and relevant[]
+            if "recent" in section:
+                item_lists.append(section["recent"])
+            if "relevant" in section:
+                item_lists.append(section["relevant"])
+            if "items" in section:
+                item_lists.append(section["items"])
+
+        for item_list in item_lists:
+            for item in item_list:
+                item_id = item.get("id")
+                if item_id:
+                    key = (memory_type, item_id)
+                    memory_keys.append(key)
+                    items_by_key.setdefault(key, []).append(item)
+
+    if not memory_keys:
+        return memories
+
+    citation_mgr = MemoryCitationManager()
+    grouped = await citation_mgr.get_citations_for_memories(memory_keys)
+
+    # Attach citations to each item
+    for key, item_list in items_by_key.items():
+        cits = grouped.get(key, [])
+        serialized = [
+            {
+                "memory_source_id": c.memory_source_id,
+                "citation_type": c.citation_type,
+                "occurred_at": c.occurred_at.isoformat() if c.occurred_at else None,
+                "external_thread_id": c.external_thread_id,
+            }
+            for c in cits
+        ]
+        for item in item_list:
+            item["citations"] = serialized
+
+    return memories
+
+
 @router.get("/memory/search")
 @with_langfuse_tracing
 async def search_memory(
@@ -2693,6 +2803,7 @@ async def search_memory(
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
     include_core_memory: bool = Query(False, description="When True, include core (block) memory in the response."),
+    include_citations: bool = Query(False, description="When True, attach citation provenance to each result."),
     x_client_id: Optional[str] = Header(None),
     x_org_id: Optional[str] = Header(None),
 ):
@@ -3223,6 +3334,9 @@ async def search_memory(
         except Exception as e:
             logger.error("Error retrieving core memory blocks for single-user search: %s", e, exc_info=True)
 
+    if include_citations:
+        all_results = await _attach_citations_to_results(all_results)
+
     return {
         "success": True,
         "query": query,
@@ -3263,6 +3377,7 @@ async def search_memory_all_users(
     similarity_threshold: Optional[float] = Query(None),
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
+    include_citations: bool = Query(False, description="When True, attach citation provenance to each result."),
     x_client_id: Optional[str] = Header(None),
     x_org_id: Optional[str] = Header(None),
 ):
@@ -3792,6 +3907,9 @@ async def search_memory_all_users(
             raise
         except Exception as e:
             logger.error("Error retrieving core memory blocks for cross-user search: %s", e, exc_info=True)
+
+    if include_citations:
+        all_results = await _attach_citations_to_results(all_results)
 
     return {
         "success": True,

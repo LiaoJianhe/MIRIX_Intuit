@@ -405,6 +405,61 @@ async def test_knowledge_vault_insert_creates_citation_row(source_mgr, citation_
     assert exists is True, "knowledge_vault_insert should have created a citation row"
 
 
+async def test_get_citations_for_memories_batch(source_mgr, citation_mgr):
+    """get_citations_for_memories returns citations grouped by (memory_type, memory_id)."""
+    source_id_a = await _create_source(source_mgr)
+    source_id_b = await _create_source(source_mgr)
+
+    mem_1 = _unique("mem")
+    mem_2 = _unique("mem")
+
+    # Two citations for mem_1 (from different sources)
+    await citation_mgr.create(
+        memory_source_id=source_id_a,
+        memory_type="episodic",
+        memory_id=mem_1,
+        citation_type="created",
+        use_cache=False,
+    )
+    await citation_mgr.create(
+        memory_source_id=source_id_b,
+        memory_type="episodic",
+        memory_id=mem_1,
+        citation_type="updated",
+        use_cache=False,
+    )
+    # One citation for mem_2
+    await citation_mgr.create(
+        memory_source_id=source_id_a,
+        memory_type="semantic",
+        memory_id=mem_2,
+        citation_type="created",
+        use_cache=False,
+    )
+
+    result = await citation_mgr.get_citations_for_memories([
+        ("episodic", mem_1),
+        ("semantic", mem_2),
+        ("procedural", "nonexistent"),
+    ])
+
+    assert ("episodic", mem_1) in result
+    assert len(result[("episodic", mem_1)]) == 2
+    assert ("semantic", mem_2) in result
+    assert len(result[("semantic", mem_2)]) == 1
+    assert ("procedural", "nonexistent") not in result
+
+    # Verify source IDs are correct
+    source_ids = {c.memory_source_id for c in result[("episodic", mem_1)]}
+    assert source_ids == {source_id_a, source_id_b}
+
+
+async def test_get_citations_for_memories_empty_list(citation_mgr):
+    """get_citations_for_memories with empty list returns empty dict."""
+    result = await citation_mgr.get_citations_for_memories([])
+    assert result == {}
+
+
 async def test_no_citation_without_memory_source_id(source_mgr, citation_mgr):
     """When memory_source_id is None, no citation row should be created."""
     agent, memory_id = _make_tool_agent(

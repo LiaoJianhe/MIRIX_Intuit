@@ -1,9 +1,10 @@
 """Manager for MemoryCitation CRUD operations."""
 
+from collections import defaultdict
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select, tuple_
 
 from mirix.log import get_logger
 from mirix.orm.memory_citation import MemoryCitation as MemoryCitationModel
@@ -162,3 +163,41 @@ class MemoryCitationManager:
                 )
             )
             return result.scalar_one_or_none()
+
+    async def get_citations_for_memories(
+        self,
+        memory_keys: List[Tuple[str, str]],
+    ) -> Dict[Tuple[str, str], List[PydanticMemoryCitation]]:
+        """Batch-fetch citations for a list of (memory_type, memory_id) pairs.
+
+        Returns a dict keyed by (memory_type, memory_id) -> list of citations.
+        Used by search endpoints to attach citation provenance to results.
+        """
+        if not memory_keys:
+            return {}
+
+        async with self.session_maker() as session:
+            stmt = select(MemoryCitationModel).where(
+                tuple_(MemoryCitationModel.memory_type, MemoryCitationModel.memory_id).in_(memory_keys),
+                ~MemoryCitationModel.is_deleted,
+            )
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
+
+        grouped: Dict[Tuple[str, str], List[PydanticMemoryCitation]] = defaultdict(list)
+        for row in rows:
+            citation = PydanticMemoryCitation(
+                id=row.id,
+                memory_type=row.memory_type,
+                memory_id=row.memory_id,
+                memory_source_id=row.memory_source_id,
+                external_thread_id=row.external_thread_id,
+                occurred_at=row.occurred_at,
+                citation_type=row.citation_type,
+                message_ids=row.message_ids,
+                created_at=row.created_at,
+                updated_at=row.updated_at,
+            )
+            grouped[(row.memory_type, row.memory_id)].append(citation)
+
+        return dict(grouped)
