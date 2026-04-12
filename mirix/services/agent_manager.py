@@ -191,7 +191,8 @@ class AgentManager:
         # Get organization's default user to serve as the template for block seeding
         user_manager = UserManager()
         assert actor.organization_id is not None
-        assert actor.write_scope is not None
+        # write_scope can be None for read-only clients — agents are still created
+        # for search (embedding config), but block seeding is skipped.
         default_user = await user_manager.get_or_create_org_default_user(org_id=actor.organization_id)
         logger.debug(
             "Using organization default user %s for block templates in org %s",
