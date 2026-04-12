@@ -106,7 +106,8 @@ class BlockManager:
         Returns:
             PydanticBlock: The created or updated block
         """
-        assert actor.write_scope is not None
+        if actor.write_scope is None:
+            return None
         scope = actor.write_scope
 
         # Look for existing block by key: (user_id, scope, label)

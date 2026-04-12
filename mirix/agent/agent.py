@@ -1367,14 +1367,20 @@ class Agent(BaseAgent):
         # and its messages before running any memory extraction. This is gated on
         # the meta_memory_agent type so sub-agents don't re-persist.
         if self.agent_state.is_type(AgentType.meta_memory_agent) and self.memory_source_id:
+            self._source_deduped = False
             await self._persist_memory_source(
                 memory_source_id=self.memory_source_id,
                 input_messages=raw_input_messages,
             )
 
-            # Skip processing if this source was already fully processed.
-            # On redelivery the INSERT above is a no-op, so the existing record's
-            # processing_complete flag tells us whether all agents already succeeded.
+            # Source was deduped at DB level (external_id or batch_hash conflict).
+            # A prior submission already created the source and was processed.
+            # Skip all agent processing to avoid duplicate memories.
+            if self._source_deduped:
+                logger.info("Source %s deduped, skipping agent processing", self.memory_source_id)
+                return MirixUsageStatistics(step_count=0)
+
+            # Skip processing if this source was already fully processed (redelivery case).
             source = await self.memory_source_manager.get_by_id(self.memory_source_id)
             if source and source.processing_complete:
                 logger.info("Source %s already processed, skipping", self.memory_source_id)
@@ -1582,7 +1588,7 @@ class Agent(BaseAgent):
                     messages=msg_dicts,
                 )
 
-            await self.memory_source_manager.create(
+            source = await self.memory_source_manager.create(
                 memory_source_id=memory_source_id,
                 actor=self.actor,
                 user_id=self.user_id,
@@ -1598,6 +1604,12 @@ class Agent(BaseAgent):
                 batch_hash=batch_hash,
                 filter_tags=self.filter_tags,
             )
+
+            if source is None:
+                # Deduped — source already exists from a prior submission.
+                # Skip message persistence and signal caller to skip agent processing.
+                self._source_deduped = True
+                return
 
             if msg_dicts:
                 await self.source_message_manager.bulk_insert(

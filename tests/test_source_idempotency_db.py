@@ -98,10 +98,13 @@ async def test_duplicate_external_id_silently_skipped(manager):
 
 async def test_same_content_different_thread_produces_different_batch_hash(manager):
     """Same messages but different external_thread_id → different batch_hash → both records inserted."""
-    messages = [{"role": "user", "content": {"text": "hello world"}}]
+    unique_content = f"hello world {_unique('msg')}"
+    messages = [{"role": "user", "content": {"text": unique_content}}]
 
-    hash_a = compute_batch_hash("thread-A", None, messages)
-    hash_b = compute_batch_hash("thread-B", None, messages)
+    thread_a = _unique("thread")
+    thread_b = _unique("thread")
+    hash_a = compute_batch_hash(thread_a, None, messages)
+    hash_b = compute_batch_hash(thread_b, None, messages)
 
     # Hashes must differ
     assert hash_a != hash_b, "batch_hash should differ when thread IDs differ"
@@ -118,13 +121,13 @@ async def test_same_content_different_thread_produces_different_batch_hash(manag
     src_a = await manager.create(
         memory_source_id=_unique(),
         batch_hash=hash_a,
-        external_thread_id="thread-A",
+        external_thread_id=thread_a,
         **common,
     )
     src_b = await manager.create(
         memory_source_id=_unique(),
         batch_hash=hash_b,
-        external_thread_id="thread-B",
+        external_thread_id=thread_b,
         **common,
     )
 
@@ -143,8 +146,10 @@ async def test_same_content_different_thread_produces_different_batch_hash(manag
 
 async def test_duplicate_batch_hash_silently_skipped(manager):
     """Same (client_id, user_id, batch_hash) submitted twice: second INSERT is silently skipped."""
-    messages = [{"role": "user", "content": {"text": "duplicate batch content"}}]
-    batch_hash = compute_batch_hash("thread-X", "2026-01-01T00:00:00Z", messages)
+    unique_content = f"duplicate batch content {_unique('msg')}"
+    messages = [{"role": "user", "content": {"text": unique_content}}]
+    thread_id = _unique("thread")
+    batch_hash = compute_batch_hash(thread_id, "2026-01-01T00:00:00Z", messages)
 
     actor = await _get_actor()
     common = dict(
