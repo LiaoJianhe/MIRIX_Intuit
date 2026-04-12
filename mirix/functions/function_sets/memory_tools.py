@@ -41,6 +41,12 @@ async def _write_citation(agent: "Agent", memory_type: str, memory_id: str, cita
     external_thread_id = getattr(agent, "external_thread_id", None)
     occurred_at = getattr(agent, "occurred_at", None)
 
+    # Parse string timestamps to datetime (occurred_at may be a string from the API)
+    if isinstance(occurred_at, str):
+        from datetime import datetime
+
+        occurred_at = datetime.fromisoformat(occurred_at.replace("Z", "+00:00"))
+
     await citation_mgr.create(
         memory_source_id=memory_source_id,
         memory_type=memory_type,
@@ -61,6 +67,12 @@ async def _should_update_memory(agent: "Agent", memory_type: str, memory_id: str
     occurred_at = getattr(agent, "occurred_at", None)
     if occurred_at is None:
         return True
+
+    # Parse string timestamps to datetime (occurred_at may be a string from the API)
+    if isinstance(occurred_at, str):
+        from datetime import datetime
+
+        occurred_at = datetime.fromisoformat(occurred_at.replace("Z", "+00:00"))
 
     memory_source_id = getattr(agent, "memory_source_id", None)
     if not memory_source_id:

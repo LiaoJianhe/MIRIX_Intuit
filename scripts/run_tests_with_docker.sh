@@ -167,7 +167,10 @@ if [ "$START_SERVER" = true ]; then
         exit 1
     fi
     
-    # Rebuild server container to pick up code changes (uses layer cache for deps)
+    # Rebuild server container to pick up code changes (uses layer cache for deps).
+    # SOURCE_HASH busts the podman COPY cache which may not detect file changes in large dirs.
+    # Using epoch seconds means only the source COPY layer rebuilds — deps stay cached.
+    export SOURCE_HASH=$(date +%s)
     BUILD_ARGS=""
     if [ "$NO_CACHE" = true ]; then
         BUILD_ARGS="--no-cache"

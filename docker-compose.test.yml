@@ -73,6 +73,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        SOURCE_HASH: ${SOURCE_HASH:-dev}
     container_name: mirix_test_server
     restart: "no"
     depends_on:
