@@ -43,9 +43,11 @@ async def _write_citation(agent: "Agent", memory_type: str, memory_id: str, cita
 
     # Parse string timestamps to datetime (occurred_at may be a string from the API)
     if isinstance(occurred_at, str):
-        from datetime import datetime
+        from datetime import datetime, timezone
 
         occurred_at = datetime.fromisoformat(occurred_at.replace("Z", "+00:00"))
+        if occurred_at.tzinfo is None:
+            occurred_at = occurred_at.replace(tzinfo=timezone.utc)
 
     await citation_mgr.create(
         memory_source_id=memory_source_id,
@@ -70,9 +72,15 @@ async def _should_update_memory(agent: "Agent", memory_type: str, memory_id: str
 
     # Parse string timestamps to datetime (occurred_at may be a string from the API)
     if isinstance(occurred_at, str):
-        from datetime import datetime
+        from datetime import datetime, timezone
 
         occurred_at = datetime.fromisoformat(occurred_at.replace("Z", "+00:00"))
+
+    # Ensure timezone-aware — DB stores timestamptz so max_occurred_at is always aware
+    if hasattr(occurred_at, "tzinfo") and occurred_at.tzinfo is None:
+        from datetime import timezone
+
+        occurred_at = occurred_at.replace(tzinfo=timezone.utc)
 
     memory_source_id = getattr(agent, "memory_source_id", None)
     if not memory_source_id:
