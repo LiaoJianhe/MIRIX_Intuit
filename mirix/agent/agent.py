@@ -1617,6 +1617,7 @@ class Agent(BaseAgent):
                     memory_source_id=memory_source_id,
                     external_thread_id=self.external_thread_id,
                     fallback_occurred_at=self.occurred_at,
+                    created_by_id=self.actor.id,
                 )
 
             logger.info(

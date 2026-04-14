@@ -49,6 +49,9 @@ async def _write_citation(agent: "Agent", memory_type: str, memory_id: str, cita
         if occurred_at.tzinfo is None:
             occurred_at = occurred_at.replace(tzinfo=timezone.utc)
 
+    actor = getattr(agent, "actor", None)
+    created_by_id = getattr(actor, "id", None) if actor else None
+
     await citation_mgr.create(
         memory_source_id=memory_source_id,
         memory_type=memory_type,
@@ -56,6 +59,7 @@ async def _write_citation(agent: "Agent", memory_type: str, memory_id: str, cita
         citation_type=citation_type,
         external_thread_id=external_thread_id,
         occurred_at=occurred_at,
+        created_by_id=created_by_id,
         use_cache=use_cache,
     )
 

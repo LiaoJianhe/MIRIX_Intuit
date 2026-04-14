@@ -87,6 +87,7 @@ class TestWriteCitation:
                 citation_type="updated",
                 external_thread_id="thread-1",
                 occurred_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                created_by_id="client-1",
                 use_cache=True,
             )
 
