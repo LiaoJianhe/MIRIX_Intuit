@@ -48,7 +48,6 @@ class MemoryCitationManager:
         citation_type: str,
         external_thread_id: Optional[str] = None,
         occurred_at: Optional[datetime] = None,
-        message_ids: Optional[List[str]] = None,
         use_cache: bool = True,
     ) -> Optional[PydanticMemoryCitation]:
         """Create a citation record using INSERT ON CONFLICT DO NOTHING.
@@ -67,7 +66,6 @@ class MemoryCitationManager:
             citation_type=citation_type,
             external_thread_id=external_thread_id,
             occurred_at=occurred_at,
-            message_ids=message_ids,
             created_at=now,
             updated_at=now,
             is_deleted=False,
@@ -194,7 +192,6 @@ class MemoryCitationManager:
                 external_thread_id=row.external_thread_id,
                 occurred_at=row.occurred_at,
                 citation_type=row.citation_type,
-                message_ids=row.message_ids,
                 created_at=row.created_at,
                 updated_at=row.updated_at,
             )

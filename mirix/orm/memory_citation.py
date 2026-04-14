@@ -64,12 +64,6 @@ class MemoryCitation(SqlalchemyBase):
         doc="How citation links source to memory: created or updated",
     )
 
-    message_ids: Mapped[Optional[list]] = mapped_column(
-        JSON,
-        nullable=True,
-        doc="Array of source_message IDs relevant to this citation",
-    )
-
     __table_args__ = tuple(
         filter(
             None,

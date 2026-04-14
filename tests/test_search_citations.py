@@ -85,7 +85,7 @@ class TestGetCitationsForMemories:
             external_thread_id=None,
             occurred_at=datetime(2026, 4, 10, tzinfo=timezone.utc),
             citation_type="created",
-            message_ids=None,
+
             created_at=datetime(2026, 4, 10, tzinfo=timezone.utc),
             updated_at=datetime(2026, 4, 10, tzinfo=timezone.utc),
         )
@@ -97,7 +97,7 @@ class TestGetCitationsForMemories:
             external_thread_id="thread-1",
             occurred_at=datetime(2026, 4, 9, tzinfo=timezone.utc),
             citation_type="updated",
-            message_ids=None,
+
             created_at=datetime(2026, 4, 9, tzinfo=timezone.utc),
             updated_at=datetime(2026, 4, 9, tzinfo=timezone.utc),
         )
@@ -109,7 +109,7 @@ class TestGetCitationsForMemories:
             external_thread_id=None,
             occurred_at=None,
             citation_type="created",
-            message_ids=None,
+
             created_at=datetime(2026, 4, 10, tzinfo=timezone.utc),
             updated_at=datetime(2026, 4, 10, tzinfo=timezone.utc),
         )

@@ -190,7 +190,6 @@ class TestMemoryCitationSchema:
         )
         assert mc.external_thread_id is None
         assert mc.occurred_at is None
-        assert mc.message_ids is None
 
     def test_all_fields(self):
         now = datetime.now(timezone.utc)
@@ -202,11 +201,9 @@ class TestMemoryCitationSchema:
             external_thread_id="thread-abc",
             occurred_at=now,
             citation_type="updated",
-            message_ids=["smsg-1", "smsg-2"],
         )
         assert mc.memory_type == "semantic"
         assert mc.citation_type == "updated"
-        assert mc.message_ids == ["smsg-1", "smsg-2"]
 
     def test_generate_id(self):
         generated = MemoryCitationSchema._generate_id()

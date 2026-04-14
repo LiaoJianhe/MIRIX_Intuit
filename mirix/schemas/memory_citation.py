@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import List, Optional
+from typing import Optional
 
 from pydantic import Field
 
@@ -24,6 +24,5 @@ class MemoryCitation(MemoryCitationBase):
     external_thread_id: Optional[str] = Field(None, description="Denormalized thread ID")
     occurred_at: Optional[datetime] = Field(None, description="Denormalized from memory source")
     citation_type: str = Field(..., description="How citation links source to memory: created or updated")
-    message_ids: Optional[List[str]] = Field(None, description="Array of source_message IDs relevant to this citation")
     created_at: Optional[datetime] = Field(None, description="When the record was created")
     updated_at: Optional[datetime] = Field(None, description="When the record was last updated")
