@@ -48,6 +48,7 @@ class MemoryCitationManager:
         citation_type: str,
         external_thread_id: Optional[str] = None,
         occurred_at: Optional[datetime] = None,
+        created_by_id: Optional[str] = None,
         use_cache: bool = True,
     ) -> Optional[PydanticMemoryCitation]:
         """Create a citation record using INSERT ON CONFLICT DO NOTHING.
@@ -66,6 +67,8 @@ class MemoryCitationManager:
             citation_type=citation_type,
             external_thread_id=external_thread_id,
             occurred_at=occurred_at,
+            _created_by_id=created_by_id,
+            _last_updated_by_id=created_by_id,
             created_at=now,
             updated_at=now,
             is_deleted=False,
@@ -90,7 +93,11 @@ class MemoryCitationManager:
                 memory_id,
                 memory_source_id,
             )
-            pydantic_values = {k: v for k, v in values.items() if k != "is_deleted"}
+            pydantic_values = {
+                k: v
+                for k, v in values.items()
+                if k != "is_deleted" and not k.startswith("_")
+            }
             return PydanticMemoryCitation(**pydantic_values)
         return None
 

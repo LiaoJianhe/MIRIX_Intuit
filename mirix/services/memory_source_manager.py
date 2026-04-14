@@ -94,6 +94,8 @@ class MemorySourceManager:
                 batch_hash=batch_hash,
                 filter_tags=filter_tags,
                 processing_complete=False,
+                _created_by_id=actor.id,
+                _last_updated_by_id=actor.id,
                 created_at=now,
                 updated_at=now,
                 is_deleted=False,

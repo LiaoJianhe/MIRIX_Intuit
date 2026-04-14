@@ -139,6 +139,7 @@ class SourceMessageManager:
         memory_source_id: str,
         external_thread_id: Optional[str] = None,
         fallback_occurred_at: Optional[str] = None,
+        created_by_id: Optional[str] = None,
     ) -> int:
         """Insert source messages in bulk using ORM bulk_create_or_ignore.
 
@@ -161,23 +162,24 @@ class SourceMessageManager:
             content = msg["content"]
             content_hash = compute_content_hash(role, content)
 
-            rows.append(
-                dict(
-                    id=PydanticSourceMessage._generate_id(),
-                    memory_source_id=memory_source_id,
-                    external_thread_id=external_thread_id,
-                    external_message_id=msg.get("external_message_id"),
-                    role=role,
-                    content=content if isinstance(content, dict) else {"text": content},
-                    occurred_at=parse_occurred_at(msg.get("occurred_at") or fallback_occurred_at),
-                    sequence_num=seq,
-                    content_hash=content_hash,
-                    message_metadata=msg.get("metadata"),
-                    created_at=now,
-                    updated_at=now,
-                    is_deleted=False,
-                )
+            row = dict(
+                id=PydanticSourceMessage._generate_id(),
+                memory_source_id=memory_source_id,
+                external_thread_id=external_thread_id,
+                external_message_id=msg.get("external_message_id"),
+                role=role,
+                content=content if isinstance(content, dict) else {"text": content},
+                occurred_at=parse_occurred_at(msg.get("occurred_at") or fallback_occurred_at),
+                sequence_num=seq,
+                content_hash=content_hash,
+                message_metadata=msg.get("metadata"),
+                _created_by_id=created_by_id,
+                _last_updated_by_id=created_by_id,
+                created_at=now,
+                updated_at=now,
+                is_deleted=False,
             )
+            rows.append(row)
 
         async with self.session_maker() as session:
             inserted = await SourceMessageModel.bulk_create_or_ignore(
