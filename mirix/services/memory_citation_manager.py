@@ -93,11 +93,7 @@ class MemoryCitationManager:
                 memory_id,
                 memory_source_id,
             )
-            pydantic_values = {
-                k: v
-                for k, v in values.items()
-                if k != "is_deleted" and not k.startswith("_")
-            }
+            pydantic_values = {k: v for k, v in values.items() if k != "is_deleted" and not k.startswith("_")}
             return PydanticMemoryCitation(**pydantic_values)
         return None
 
@@ -176,11 +172,15 @@ class MemoryCitationManager:
     ) -> List[PydanticMemoryCitation]:
         """Fetch all citations for a single memory."""
         async with self.session_maker() as session:
-            stmt = select(MemoryCitationModel).where(
-                MemoryCitationModel.memory_type == memory_type,
-                MemoryCitationModel.memory_id == memory_id,
-                ~MemoryCitationModel.is_deleted,
-            ).order_by(MemoryCitationModel.occurred_at.desc().nulls_last())
+            stmt = (
+                select(MemoryCitationModel)
+                .where(
+                    MemoryCitationModel.memory_type == memory_type,
+                    MemoryCitationModel.memory_id == memory_id,
+                    ~MemoryCitationModel.is_deleted,
+                )
+                .order_by(MemoryCitationModel.occurred_at.desc().nulls_last())
+            )
             result = await session.execute(stmt)
             rows = result.scalars().all()
 

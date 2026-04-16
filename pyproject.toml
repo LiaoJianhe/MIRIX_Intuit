@@ -47,6 +47,7 @@ dependencies = [
     "pathvalidate",
     "docstring_parser",
     "sqlalchemy[asyncio] (>=2.0.48,<3.0.0)",
+    "greenlet (>=3.0.0)",
     "asyncpg",
     "aiosqlite",
     "httpx",

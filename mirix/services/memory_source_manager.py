@@ -255,9 +255,7 @@ class MemorySourceManager:
                 query = query.where(MemorySourceModel.occurred_at <= until)
 
             if cursor:
-                cursor_result = await session.execute(
-                    select(MemorySourceModel).where(MemorySourceModel.id == cursor)
-                )
+                cursor_result = await session.execute(select(MemorySourceModel).where(MemorySourceModel.id == cursor))
                 cursor_obj = cursor_result.scalar_one_or_none()
                 if cursor_obj:
                     ref = cursor_obj.occurred_at or cursor_obj.created_at
