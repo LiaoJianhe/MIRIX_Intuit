@@ -169,6 +169,36 @@ class MemoryCitationManager:
             )
             return result.scalar_one_or_none()
 
+    async def get_citations_for_memory(
+        self,
+        memory_type: str,
+        memory_id: str,
+    ) -> List[PydanticMemoryCitation]:
+        """Fetch all citations for a single memory."""
+        async with self.session_maker() as session:
+            stmt = select(MemoryCitationModel).where(
+                MemoryCitationModel.memory_type == memory_type,
+                MemoryCitationModel.memory_id == memory_id,
+                ~MemoryCitationModel.is_deleted,
+            ).order_by(MemoryCitationModel.occurred_at.desc().nulls_last())
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
+
+        return [
+            PydanticMemoryCitation(
+                id=row.id,
+                memory_type=row.memory_type,
+                memory_id=row.memory_id,
+                memory_source_id=row.memory_source_id,
+                external_thread_id=row.external_thread_id,
+                occurred_at=row.occurred_at,
+                citation_type=row.citation_type,
+                created_at=row.created_at,
+                updated_at=row.updated_at,
+            )
+            for row in rows
+        ]
+
     async def get_citations_for_memories(
         self,
         memory_keys: List[Tuple[str, str]],
