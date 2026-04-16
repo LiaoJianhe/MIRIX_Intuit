@@ -218,6 +218,71 @@ class MemorySourceManager:
                 has_more=has_more,
             )
 
+    async def list_sources(
+        self,
+        user_id: Optional[str] = None,
+        client_id: Optional[str] = None,
+        scope: Optional[str] = None,
+        since: Optional[datetime] = None,
+        until: Optional[datetime] = None,
+        limit: int = 50,
+        cursor: Optional[str] = None,
+    ) -> PaginatedResponse[PydanticMemorySource]:
+        """List memory sources ordered by occurred_at descending.
+
+        No scope-based access control — intended for admin use.
+        Supports filtering by user_id, client_id, scope, and time range.
+        """
+        async with self.session_maker() as session:
+            query = (
+                select(MemorySourceModel)
+                .where(~MemorySourceModel.is_deleted)
+                .order_by(
+                    MemorySourceModel.occurred_at.desc().nulls_last(),
+                    MemorySourceModel.created_at.desc(),
+                )
+            )
+
+            if user_id:
+                query = query.where(MemorySourceModel.user_id == user_id)
+            if client_id:
+                query = query.where(MemorySourceModel.client_id == client_id)
+            if scope:
+                query = query.where(MemorySourceModel.filter_tags["scope"].astext == scope)
+            if since:
+                query = query.where(MemorySourceModel.occurred_at >= since)
+            if until:
+                query = query.where(MemorySourceModel.occurred_at <= until)
+
+            if cursor:
+                cursor_result = await session.execute(
+                    select(MemorySourceModel).where(MemorySourceModel.id == cursor)
+                )
+                cursor_obj = cursor_result.scalar_one_or_none()
+                if cursor_obj:
+                    ref = cursor_obj.occurred_at or cursor_obj.created_at
+                    query = query.where(
+                        (MemorySourceModel.occurred_at < ref)
+                        | (
+                            (MemorySourceModel.occurred_at == ref)
+                            & (MemorySourceModel.created_at < cursor_obj.created_at)
+                        )
+                    )
+
+            query = query.limit(limit + 1)
+            result = await session.execute(query)
+            records = result.scalars().all()
+
+            has_more = len(records) > limit
+            records = records[:limit]
+            items = [rec.to_pydantic() for rec in records]
+
+            return PaginatedResponse(
+                items=items,
+                next_cursor=items[-1].id if has_more and items else None,
+                has_more=has_more,
+            )
+
     @enforce_types
     async def mark_processing_complete(self, memory_source_id: str) -> None:
         """Set processing_complete = True after all agents finish successfully.
