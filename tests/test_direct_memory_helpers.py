@@ -93,6 +93,30 @@ async def test_persist_source_with_messages_happy_path():
     assert msgs_page.items[1].role == "assistant"
 
 
+async def test_persist_source_scope_injection_overrides_client_provided_scope():
+    """filter_tags['scope'] is always overwritten with actor.write_scope, even
+    when the caller (hypothetical attacker) passes a different scope."""
+    from mirix.server.rest_api import MemorySourceInput, _persist_source_with_messages
+
+    actor = await _get_actor()
+    memory_source_id = _unique("src")
+
+    src_in = MemorySourceInput(external_id=_unique("ext-scope"))
+    source, _ = await _persist_source_with_messages(
+        memory_source_id=memory_source_id,
+        actor=actor,
+        user_id=TEST_USER_ID,
+        organization_id=TEST_ORG_ID,
+        source_input=src_in,
+        fallback_occurred_at=None,
+        filter_tags={"scope": "attacker-scope", "other": "ok"},
+    )
+    assert source is not None
+    assert source.filter_tags["scope"] == actor.write_scope
+    assert source.filter_tags["scope"] != "attacker-scope"
+    assert source.filter_tags["other"] == "ok"
+
+
 async def test_persist_source_dedup_on_replay():
     """Second call with same external_id returns the original source and deduped=True."""
     from mirix.server.rest_api import MemorySourceInput, _persist_source_with_messages

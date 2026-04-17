@@ -2004,7 +2004,7 @@ class CreateEpisodicMemoryDirectRequest(BaseModel):
 async def _persist_source_with_messages(
     *,
     memory_source_id: str,
-    actor,  # PydanticClient
+    actor: Client,
     user_id: str,
     organization_id: str,
     source_input: MemorySourceInput,
@@ -2058,6 +2058,16 @@ async def _persist_source_with_messages(
             raise RuntimeError(f"Source {memory_source_id} dedup reported but not found")
         return existing, True
 
+    # Defensive check: if an existing source with the same memory_source_id but
+    # different external_id is returned (near-zero probability with random IDs,
+    # but prevents silent correctness bugs), treat as dedup and skip message insert.
+    if (
+        source_input.external_id is not None
+        and source.external_id is not None
+        and source.external_id != source_input.external_id
+    ):
+        return source, True
+
     # Not deduped — persist messages if provided.
     if source_input.messages:
         msg_dicts = [
@@ -2089,23 +2099,18 @@ async def _write_citation_for_memory(
     memory_id: str,
     citation_type: str,
     external_thread_id: Optional[str],
-    occurred_at,  # Optional[datetime] or ISO8601 str
+    occurred_at: Optional[datetime],
     created_by_id: str,
 ):
     """Write a citation row linking a memory write to its source (type-agnostic).
 
     Idempotent: INSERT ON CONFLICT DO NOTHING on (memory_source_id, memory_type, memory_id).
     Returns the newly-created PydanticMemoryCitation, or None if it already existed.
+    Callers must parse ISO8601 strings to datetime before calling.
     """
-    from datetime import datetime
-
     from mirix.services.memory_citation_manager import MemoryCitationManager
 
     citation_mgr = MemoryCitationManager()
-
-    parsed_occurred_at = occurred_at
-    if isinstance(parsed_occurred_at, str):
-        parsed_occurred_at = datetime.fromisoformat(parsed_occurred_at.replace("Z", "+00:00"))
 
     return await citation_mgr.create(
         memory_source_id=memory_source_id,
@@ -2113,7 +2118,7 @@ async def _write_citation_for_memory(
         memory_id=memory_id,
         citation_type=citation_type,
         external_thread_id=external_thread_id,
-        occurred_at=parsed_occurred_at,
+        occurred_at=occurred_at,
         created_by_id=created_by_id,
     )
 
@@ -2122,7 +2127,7 @@ async def _should_apply_update(
     *,
     memory_type: str,
     memory_id: str,
-    occurred_at,  # Optional[datetime]
+    occurred_at: Optional[datetime],
 ) -> bool:
     """Temporal guard (type-agnostic): return False when `occurred_at` is older
     than the latest citation.occurred_at for (memory_type, memory_id).
