@@ -245,6 +245,78 @@ async def test_write_citation_type_agnostic():
         assert citation.memory_id == memory_id
 
 
+async def test_write_citation_idempotent_on_duplicate():
+    """Second call with same (memory_source_id, memory_type, memory_id) creates no duplicate row.
+
+    Per memory_citation_manager.create()'s ON CONFLICT DO NOTHING semantics, the second
+    call returns None. Verify only one citation row exists for the memory afterwards.
+    """
+    from mirix.server.rest_api import (
+        MemorySourceInput,
+        _persist_source_with_messages,
+        _write_citation_for_memory,
+    )
+    from mirix.services.memory_citation_manager import MemoryCitationManager
+
+    actor = await _get_actor()
+    source, _ = await _persist_source_with_messages(
+        memory_source_id=_unique("src"),
+        actor=actor,
+        user_id=TEST_USER_ID,
+        organization_id=TEST_ORG_ID,
+        source_input=MemorySourceInput(external_id=_unique("ext-cit-idem")),
+        fallback_occurred_at=None,
+        filter_tags=None,
+    )
+    memory_id = _unique("episodic-idem")
+
+    first = await _write_citation_for_memory(
+        memory_source_id=source.id,
+        memory_type="episodic",
+        memory_id=memory_id,
+        citation_type="created",
+        external_thread_id=None,
+        occurred_at=None,
+        created_by_id=actor.id,
+    )
+    assert first is not None
+    assert first.memory_id == memory_id
+
+    # Second call with the same triple should be a no-op (returns None per ON CONFLICT DO NOTHING).
+    second = await _write_citation_for_memory(
+        memory_source_id=source.id,
+        memory_type="episodic",
+        memory_id=memory_id,
+        citation_type="created",
+        external_thread_id=None,
+        occurred_at=None,
+        created_by_id=actor.id,
+    )
+    assert second is None
+
+    citations = await MemoryCitationManager().get_citations_for_memory(
+        memory_type="episodic",
+        memory_id=memory_id,
+    )
+    assert len(citations) == 1
+    assert citations[0].memory_source_id == source.id
+
+
+async def test_should_apply_update_type_agnostic_happy_path():
+    """Guard has no episodic-specific branching: unknown (type, id) with no prior
+    citations always yields True regardless of memory_type.
+    """
+    from mirix.server.rest_api import _should_apply_update
+
+    for mtype in ("semantic", "procedural"):
+        ok = await _should_apply_update(
+            memory_type=mtype,
+            memory_id=_unique(f"{mtype}-guard-agnostic"),
+            occurred_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
+        )
+        assert ok is True, f"_should_apply_update returned False for memory_type={mtype!r}"
+
+
 async def test_should_apply_update_no_prior_citations():
     from mirix.server.rest_api import _should_apply_update
 
