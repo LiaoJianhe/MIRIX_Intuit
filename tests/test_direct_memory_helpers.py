@@ -173,3 +173,72 @@ async def test_persist_source_occurred_at_fallback():
     assert source.occurred_at.year == 2026
     assert source.occurred_at.month == 1
     assert source.occurred_at.day == 1
+
+
+async def test_write_citation_for_memory_happy_path():
+    """Creates a citation row for (memory_type, memory_id)."""
+    from mirix.server.rest_api import (
+        MemorySourceInput,
+        _persist_source_with_messages,
+        _write_citation_for_memory,
+    )
+
+    actor = await _get_actor()
+    source, _ = await _persist_source_with_messages(
+        memory_source_id=_unique("src"),
+        actor=actor,
+        user_id=TEST_USER_ID,
+        organization_id=TEST_ORG_ID,
+        source_input=MemorySourceInput(external_id=_unique("ext-cit")),
+        fallback_occurred_at=None,
+        filter_tags=None,
+    )
+    memory_id = _unique("episodic-fake")
+    citation = await _write_citation_for_memory(
+        memory_source_id=source.id,
+        memory_type="episodic",
+        memory_id=memory_id,
+        citation_type="created",
+        external_thread_id=None,
+        occurred_at=None,
+        created_by_id=actor.id,
+    )
+    assert citation is not None
+    assert citation.memory_type == "episodic"
+    assert citation.memory_id == memory_id
+    assert citation.citation_type == "created"
+    assert citation.memory_source_id == source.id
+
+
+async def test_write_citation_type_agnostic():
+    """Helper accepts arbitrary memory_type with no episodic-specific branching."""
+    from mirix.server.rest_api import (
+        MemorySourceInput,
+        _persist_source_with_messages,
+        _write_citation_for_memory,
+    )
+
+    actor = await _get_actor()
+    source, _ = await _persist_source_with_messages(
+        memory_source_id=_unique("src"),
+        actor=actor,
+        user_id=TEST_USER_ID,
+        organization_id=TEST_ORG_ID,
+        source_input=MemorySourceInput(external_id=_unique("ext-cit-agnostic")),
+        fallback_occurred_at=None,
+        filter_tags=None,
+    )
+    for mtype in ("semantic", "procedural", "resource", "knowledge_vault", "core"):
+        memory_id = _unique(f"{mtype}-fake")
+        citation = await _write_citation_for_memory(
+            memory_source_id=source.id,
+            memory_type=mtype,
+            memory_id=memory_id,
+            citation_type="created",
+            external_thread_id=None,
+            occurred_at=None,
+            created_by_id=actor.id,
+        )
+        assert citation is not None
+        assert citation.memory_type == mtype
+        assert citation.memory_id == memory_id

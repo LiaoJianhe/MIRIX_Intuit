@@ -2082,6 +2082,42 @@ async def _persist_source_with_messages(
     return source, False
 
 
+async def _write_citation_for_memory(
+    *,
+    memory_source_id: str,
+    memory_type: str,
+    memory_id: str,
+    citation_type: str,
+    external_thread_id: Optional[str],
+    occurred_at,  # Optional[datetime] or ISO8601 str
+    created_by_id: str,
+):
+    """Write a citation row linking a memory write to its source (type-agnostic).
+
+    Idempotent: INSERT ON CONFLICT DO NOTHING on (memory_source_id, memory_type, memory_id).
+    Returns the newly-created PydanticMemoryCitation, or None if it already existed.
+    """
+    from datetime import datetime
+
+    from mirix.services.memory_citation_manager import MemoryCitationManager
+
+    citation_mgr = MemoryCitationManager()
+
+    parsed_occurred_at = occurred_at
+    if isinstance(parsed_occurred_at, str):
+        parsed_occurred_at = datetime.fromisoformat(parsed_occurred_at.replace("Z", "+00:00"))
+
+    return await citation_mgr.create(
+        memory_source_id=memory_source_id,
+        memory_type=memory_type,
+        memory_id=memory_id,
+        citation_type=citation_type,
+        external_thread_id=external_thread_id,
+        occurred_at=parsed_occurred_at,
+        created_by_id=created_by_id,
+    )
+
+
 @router.post("/memory/add")
 @with_langfuse_tracing
 async def add_memory(
