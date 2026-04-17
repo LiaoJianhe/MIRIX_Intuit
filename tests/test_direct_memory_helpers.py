@@ -1,6 +1,7 @@
 """Tests for the private type-agnostic helpers in rest_api.py."""
 
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 import pytest_asyncio
@@ -242,3 +243,99 @@ async def test_write_citation_type_agnostic():
         assert citation is not None
         assert citation.memory_type == mtype
         assert citation.memory_id == memory_id
+
+
+async def test_should_apply_update_no_prior_citations():
+    from mirix.server.rest_api import _should_apply_update
+
+    ok = await _should_apply_update(
+        memory_type="episodic",
+        memory_id=_unique("never-seen"),
+        occurred_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
+    )
+    assert ok is True
+
+
+async def test_should_apply_update_none_timestamp_allows():
+    from mirix.server.rest_api import _should_apply_update
+
+    ok = await _should_apply_update(
+        memory_type="episodic",
+        memory_id="anything",
+        occurred_at=None,
+    )
+    assert ok is True
+
+
+async def test_should_apply_update_newer_allows():
+    from mirix.server.rest_api import (
+        MemorySourceInput,
+        _persist_source_with_messages,
+        _should_apply_update,
+        _write_citation_for_memory,
+    )
+
+    actor = await _get_actor()
+    source, _ = await _persist_source_with_messages(
+        memory_source_id=_unique("src"),
+        actor=actor,
+        user_id=TEST_USER_ID,
+        organization_id=TEST_ORG_ID,
+        source_input=MemorySourceInput(external_id=_unique("ext-guard-newer")),
+        fallback_occurred_at=None,
+        filter_tags=None,
+    )
+    memory_id = _unique("ep-guard-newer")
+    old = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    await _write_citation_for_memory(
+        memory_source_id=source.id,
+        memory_type="episodic",
+        memory_id=memory_id,
+        citation_type="created",
+        external_thread_id=None,
+        occurred_at=old,
+        created_by_id=actor.id,
+    )
+
+    newer = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    assert (
+        await _should_apply_update(memory_type="episodic", memory_id=memory_id, occurred_at=newer)
+        is True
+    )
+
+
+async def test_should_apply_update_older_blocks():
+    from mirix.server.rest_api import (
+        MemorySourceInput,
+        _persist_source_with_messages,
+        _should_apply_update,
+        _write_citation_for_memory,
+    )
+
+    actor = await _get_actor()
+    source, _ = await _persist_source_with_messages(
+        memory_source_id=_unique("src"),
+        actor=actor,
+        user_id=TEST_USER_ID,
+        organization_id=TEST_ORG_ID,
+        source_input=MemorySourceInput(external_id=_unique("ext-guard-older")),
+        fallback_occurred_at=None,
+        filter_tags=None,
+    )
+    memory_id = _unique("ep-guard-older")
+    current = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    await _write_citation_for_memory(
+        memory_source_id=source.id,
+        memory_type="episodic",
+        memory_id=memory_id,
+        citation_type="created",
+        external_thread_id=None,
+        occurred_at=current,
+        created_by_id=actor.id,
+    )
+
+    stale = datetime(2025, 12, 1, tzinfo=timezone.utc)
+    assert (
+        await _should_apply_update(memory_type="episodic", memory_id=memory_id, occurred_at=stale)
+        is False
+    )

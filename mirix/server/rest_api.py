@@ -2118,6 +2118,37 @@ async def _write_citation_for_memory(
     )
 
 
+async def _should_apply_update(
+    *,
+    memory_type: str,
+    memory_id: str,
+    occurred_at,  # Optional[datetime]
+) -> bool:
+    """Temporal guard (type-agnostic): return False when `occurred_at` is older
+    than the latest citation.occurred_at for (memory_type, memory_id).
+
+    Returns True when occurred_at is None (no timestamp -> no guard).
+    Returns True when no prior citations exist.
+    """
+    from datetime import timezone
+
+    from mirix.services.memory_citation_manager import MemoryCitationManager
+
+    if occurred_at is None:
+        return True
+
+    if hasattr(occurred_at, "tzinfo") and occurred_at.tzinfo is None:
+        occurred_at = occurred_at.replace(tzinfo=timezone.utc)
+
+    citation_mgr = MemoryCitationManager()
+    max_seen = await citation_mgr.get_max_occurred_at(memory_type=memory_type, memory_id=memory_id)
+    if max_seen is None:
+        return True
+    if max_seen.tzinfo is None:
+        max_seen = max_seen.replace(tzinfo=timezone.utc)
+    return occurred_at >= max_seen
+
+
 @router.post("/memory/add")
 @with_langfuse_tracing
 async def add_memory(
