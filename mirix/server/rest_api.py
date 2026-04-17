@@ -2001,6 +2001,87 @@ class CreateEpisodicMemoryDirectRequest(BaseModel):
     source: MemorySourceInput
 
 
+async def _persist_source_with_messages(
+    *,
+    memory_source_id: str,
+    actor,  # PydanticClient
+    user_id: str,
+    organization_id: str,
+    source_input: MemorySourceInput,
+    fallback_occurred_at: Optional[str],
+    filter_tags: Optional[Dict[str, Any]],
+):
+    """Persist a MemorySource and its SourceMessages (type-agnostic).
+
+    Returns (source, deduped) where `deduped` is True when the source already
+    existed (matched by external_id via the partial unique index) and this call
+    did not insert a new row. On dedup, the pre-existing source is fetched and
+    returned. Scope injection is delegated to memory_source_manager.create.
+    """
+    from mirix.services.memory_source_manager import MemorySourceManager
+    from mirix.services.source_message_manager import SourceMessageManager, normalize_message
+
+    source_mgr = MemorySourceManager()
+    source_messages_mgr = SourceMessageManager()
+
+    effective_occurred_at = source_input.occurred_at or fallback_occurred_at
+
+    source = await source_mgr.create(
+        memory_source_id=memory_source_id,
+        actor=actor,
+        user_id=user_id,
+        organization_id=organization_id,
+        source_type=source_input.source_type,
+        external_id=source_input.external_id,
+        external_thread_id=source_input.external_thread_id,
+        source_system=source_input.source_system,
+        source_metadata=source_input.source_metadata,
+        occurred_at=effective_occurred_at,
+        summary=None,
+        summary_source=None,
+        batch_hash=None,
+        filter_tags=filter_tags,
+    )
+
+    if source is None:
+        # Deduped — partial unique index on external_id matched a prior row.
+        if source_input.external_id is None:
+            raise RuntimeError(
+                f"Source {memory_source_id} dedup reported but no external_id to resolve existing row"
+            )
+        existing = await source_mgr.get_by_external_id(
+            client_id=actor.id,
+            user_id=user_id,
+            external_id=source_input.external_id,
+        )
+        if existing is None:
+            raise RuntimeError(f"Source {memory_source_id} dedup reported but not found")
+        return existing, True
+
+    # Not deduped — persist messages if provided.
+    if source_input.messages:
+        msg_dicts = [
+            normalize_message(
+                {
+                    "role": m.role,
+                    "content": m.content,
+                    "external_message_id": m.external_message_id,
+                    "occurred_at": m.occurred_at,
+                }
+            )
+            for m in source_input.messages
+        ]
+        await source_messages_mgr.bulk_insert(
+            messages=msg_dicts,
+            memory_source_id=source.id,
+            external_thread_id=source_input.external_thread_id,
+            fallback_occurred_at=effective_occurred_at,
+            created_by_id=actor.id,
+        )
+
+    return source, False
+
+
 @router.post("/memory/add")
 @with_langfuse_tracing
 async def add_memory(

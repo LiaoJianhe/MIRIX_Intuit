@@ -155,6 +155,32 @@ class MemorySourceManager:
 
         return pydantic_source
 
+    async def get_by_external_id(
+        self,
+        *,
+        client_id: str,
+        user_id: str,
+        external_id: str,
+    ) -> Optional[PydanticMemorySource]:
+        """Fetch a memory source by (client_id, user_id, external_id).
+
+        Used to resolve dedup after create() returns None because the partial
+        unique index on external_id matched a prior row.
+        """
+        async with self.session_maker() as session:
+            result = await session.execute(
+                select(MemorySourceModel).where(
+                    MemorySourceModel.client_id == client_id,
+                    MemorySourceModel.user_id == user_id,
+                    MemorySourceModel.external_id == external_id,
+                    ~MemorySourceModel.is_deleted,
+                )
+            )
+            record = result.scalar_one_or_none()
+            if record is None:
+                return None
+            return record.to_pydantic()
+
     async def get_sources_by_thread_id(
         self,
         external_thread_id: str,
