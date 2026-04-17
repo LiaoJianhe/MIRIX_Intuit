@@ -187,3 +187,169 @@ async def test_create_episodic_memory_direct_no_meta_agent(tmp_client_no_meta, t
     assert len(citations) == 1
     assert citations[0].memory_source_id == source.id
     assert citations[0].citation_type == "created"
+
+
+@pytest.mark.asyncio
+async def test_create_episodic_with_messages(tmp_client_no_meta, tmp_user, tmp_org):
+    from mirix.server.rest_api import (
+        CreateEpisodicMemoryDirectRequest,
+        MemorySourceInput,
+        SourceMessageInput,
+        create_episodic_memory_direct,
+    )
+    from mirix.services.source_message_manager import SourceMessageManager
+
+    req = CreateEpisodicMemoryDirectRequest(
+        user_id=tmp_user.id,
+        event_type="chat",
+        summary="s",
+        details="d",
+        event_actor="user",
+        occurred_at="2026-04-17T10:00:00Z",
+        source=MemorySourceInput(
+            external_id=_unique("ext-with-msgs"),
+            messages=[
+                SourceMessageInput(role="user", content="hi"),
+                SourceMessageInput(role="assistant", content="hello"),
+            ],
+        ),
+    )
+    result = await create_episodic_memory_direct(client_id=tmp_client_no_meta.id, request=req)
+    msgs_page = await SourceMessageManager().get_messages_by_source_id(result["memory_source_id"])
+    assert len(msgs_page.items) == 2
+
+
+@pytest.mark.asyncio
+async def test_create_episodic_dedup_returns_same_source(tmp_client_no_meta, tmp_user, tmp_org):
+    from mirix.server.rest_api import (
+        CreateEpisodicMemoryDirectRequest,
+        MemorySourceInput,
+        create_episodic_memory_direct,
+    )
+
+    ext = _unique("ext-dedup")
+    req = CreateEpisodicMemoryDirectRequest(
+        user_id=tmp_user.id,
+        event_type="e",
+        summary="s",
+        details="d",
+        event_actor="system",
+        occurred_at="2026-04-17T10:00:00Z",
+        source=MemorySourceInput(external_id=ext),
+    )
+    r1 = await create_episodic_memory_direct(client_id=tmp_client_no_meta.id, request=req)
+    r2 = await create_episodic_memory_direct(client_id=tmp_client_no_meta.id, request=req)
+    assert r1["memory_source_id"] == r2["memory_source_id"]
+    assert r2["deduped"] is True
+    assert r2["memory"] is None
+    assert r2["citation_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_create_episodic_scope_injection_overrides_client_tags(tmp_client_no_meta, tmp_user, tmp_org):
+    from mirix.server.rest_api import (
+        CreateEpisodicMemoryDirectRequest,
+        MemorySourceInput,
+        create_episodic_memory_direct,
+    )
+    from mirix.services.memory_source_manager import MemorySourceManager
+
+    req = CreateEpisodicMemoryDirectRequest(
+        user_id=tmp_user.id,
+        event_type="e",
+        summary="s",
+        details="d",
+        event_actor="system",
+        filter_tags={"scope": "attacker-scope", "other": "ok"},
+        occurred_at="2026-04-17T10:00:00Z",
+        source=MemorySourceInput(external_id=_unique("ext-scope")),
+    )
+    r = await create_episodic_memory_direct(client_id=tmp_client_no_meta.id, request=req)
+    src = await MemorySourceManager().get_by_id(r["memory_source_id"])
+    assert src.filter_tags["scope"] == tmp_client_no_meta.write_scope
+    assert src.filter_tags["scope"] != "attacker-scope"
+    assert src.filter_tags.get("other") == "ok"
+
+
+@pytest.mark.asyncio
+async def test_create_episodic_source_type_default(tmp_client_no_meta, tmp_user, tmp_org):
+    from mirix.server.rest_api import (
+        CreateEpisodicMemoryDirectRequest,
+        MemorySourceInput,
+        create_episodic_memory_direct,
+    )
+    from mirix.services.memory_source_manager import MemorySourceManager
+
+    req = CreateEpisodicMemoryDirectRequest(
+        user_id=tmp_user.id,
+        event_type="e",
+        summary="s",
+        details="d",
+        event_actor="system",
+        source=MemorySourceInput(external_id=_unique("ext-default-type")),
+        occurred_at="2026-04-17T10:00:00Z",
+    )
+    r = await create_episodic_memory_direct(client_id=tmp_client_no_meta.id, request=req)
+    src = await MemorySourceManager().get_by_id(r["memory_source_id"])
+    assert src.source_type == "conversation"
+
+
+@pytest.mark.asyncio
+async def test_create_episodic_source_occurred_at_fallback(tmp_client_no_meta, tmp_user, tmp_org):
+    from mirix.server.rest_api import (
+        CreateEpisodicMemoryDirectRequest,
+        MemorySourceInput,
+        create_episodic_memory_direct,
+    )
+    from mirix.services.memory_source_manager import MemorySourceManager
+
+    req = CreateEpisodicMemoryDirectRequest(
+        user_id=tmp_user.id,
+        event_type="e",
+        summary="s",
+        details="d",
+        event_actor="system",
+        occurred_at="2026-02-14T00:00:00Z",
+        source=MemorySourceInput(external_id=_unique("ext-fallback")),
+    )
+    r = await create_episodic_memory_direct(client_id=tmp_client_no_meta.id, request=req)
+    src = await MemorySourceManager().get_by_id(r["memory_source_id"])
+    assert src.occurred_at is not None
+    assert src.occurred_at.year == 2026
+    assert src.occurred_at.month == 2
+
+
+@pytest.mark.asyncio
+async def test_create_episodic_no_write_scope_rejects(tmp_org, tmp_user):
+    from fastapi import HTTPException
+
+    from mirix.schemas.client import Client as PydanticClient
+    from mirix.server.rest_api import (
+        CreateEpisodicMemoryDirectRequest,
+        MemorySourceInput,
+        create_episodic_memory_direct,
+    )
+    from mirix.services.client_manager import ClientManager
+
+    client = await ClientManager().create_client(
+        PydanticClient(
+            id=_unique("client-no-scope"),
+            name="No Scope Client",
+            organization_id=tmp_org.id,
+            write_scope=None,
+            read_scopes=[],
+        )
+    )
+
+    req = CreateEpisodicMemoryDirectRequest(
+        user_id=tmp_user.id,
+        event_type="e",
+        summary="s",
+        details="d",
+        event_actor="system",
+        source=MemorySourceInput(external_id=_unique("ext-no-scope")),
+        occurred_at="2026-04-17T00:00:00Z",
+    )
+    with pytest.raises(HTTPException) as exc:
+        await create_episodic_memory_direct(client_id=client.id, request=req)
+    assert exc.value.status_code == 403
