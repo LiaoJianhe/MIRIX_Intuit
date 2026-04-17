@@ -1967,6 +1967,40 @@ class AddMemoryRequest(BaseModel):
     source_metadata: Optional[Dict[str, Any]] = None  # Client-provided lineage context bag
 
 
+class SourceMessageInput(BaseModel):
+    """One message/turn associated with a memory source."""
+
+    role: str  # user | assistant | system
+    content: str
+    external_message_id: Optional[str] = None
+    occurred_at: Optional[str] = None  # ISO 8601
+
+
+class MemorySourceInput(BaseModel):
+    """Memory-source fields on direct memory-write endpoints."""
+
+    external_id: Optional[str] = None
+    external_thread_id: Optional[str] = None
+    source_type: str = "conversation"
+    source_system: Optional[str] = None
+    source_metadata: Optional[Dict[str, Any]] = None
+    occurred_at: Optional[str] = None  # ISO 8601 source-level event time
+    messages: Optional[List[SourceMessageInput]] = None
+
+
+class CreateEpisodicMemoryDirectRequest(BaseModel):
+    """Request body for create_episodic_memory_direct."""
+
+    user_id: str
+    event_type: str
+    summary: str
+    details: str
+    event_actor: str
+    filter_tags: Optional[Dict[str, str]] = None
+    occurred_at: Optional[str] = None  # episodic event time
+    source: MemorySourceInput
+
+
 @router.post("/memory/add")
 @with_langfuse_tracing
 async def add_memory(
