@@ -2154,6 +2154,179 @@ async def _should_apply_update(
     return occurred_at >= max_seen
 
 
+@router.post("/memory/episodic/direct")
+async def create_episodic_memory_direct(
+    request: CreateEpisodicMemoryDirectRequest,
+    client_id: Optional[str] = Header(None, alias="X-Client-UUID"),
+) -> Dict[str, Any]:
+    """Create one episodic memory with full source/citation provenance.
+
+    Persists a memory_source (and optional source_messages), inserts one
+    episodic_memory row (via insert_event when a root meta_memory_agent exists,
+    otherwise via create_episodic_memory), and writes one memory_citations row
+    linking the new memory to its source. Idempotent on source.external_id via
+    the partial unique index on memory_sources.external_id: replaying the same
+    source short-circuits after _persist_source_with_messages returns deduped=True.
+
+    Callable directly (no HTTP) from ECMS's thin wrapper.
+    """
+    import uuid as _uuid
+    from datetime import timezone
+
+    server = get_server()
+
+    if not client_id:
+        raise HTTPException(status_code=400, detail="X-Client-UUID header required")
+
+    client = await server.client_manager.get_client_by_id(client_id)
+    if client is None:
+        raise HTTPException(status_code=404, detail=f"Client {client_id} not found")
+    if client.write_scope is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Client has no write_scope - cannot create memories",
+        )
+
+    from mirix.schemas.user import User as PydanticUser
+    from mirix.services.user_manager import UserManager
+
+    user_manager = UserManager()
+    try:
+        await user_manager.get_user_by_id(request.user_id)
+    except NoResultFound:
+        await user_manager.create_user(
+            pydantic_user=PydanticUser(
+                id=request.user_id,
+                name=request.user_id,
+                organization_id=str(client.organization_id),
+                timezone=user_manager.DEFAULT_TIME_ZONE,
+                status="active",
+                is_deleted=False,
+                is_admin=False,
+            )
+        )
+
+    filter_tags: Dict[str, Any] = dict(request.filter_tags or {})
+    filter_tags["scope"] = client.write_scope
+
+    memory_source_id = f"src-{_uuid.uuid4()}"
+
+    source, deduped = await _persist_source_with_messages(
+        memory_source_id=memory_source_id,
+        actor=client,
+        user_id=request.user_id,
+        organization_id=str(client.organization_id),
+        source_input=request.source,
+        fallback_occurred_at=request.occurred_at,
+        filter_tags=filter_tags,
+    )
+
+    if deduped:
+        return {
+            "success": True,
+            "memory": None,
+            "memory_source_id": source.id,
+            "citation_id": None,
+            "deduped": True,
+        }
+
+    if request.occurred_at:
+        val = request.occurred_at
+        if val.endswith("Z"):
+            occurred_dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
+        else:
+            occurred_dt = datetime.fromisoformat(val)
+        if occurred_dt.tzinfo is not None:
+            occurred_dt = occurred_dt.astimezone(timezone.utc).replace(tzinfo=None)
+    else:
+        occurred_dt = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    if not await _should_apply_update(
+        memory_type="episodic",
+        memory_id="",
+        occurred_at=occurred_dt,
+    ):
+        return {
+            "success": True,
+            "memory": None,
+            "memory_source_id": source.id,
+            "citation_id": None,
+            "skipped_by_temporal_guard": True,
+        }
+
+    agent_state = None
+    try:
+        root_agents = await server.agent_manager.list_agents(actor=client)
+        meta_roots = [a for a in root_agents if a.agent_type == AgentType.meta_memory_agent]
+        if meta_roots:
+            meta_roots.sort(key=lambda a: a.id)
+            agent_state = meta_roots[0]
+    except Exception:
+        agent_state = None
+
+    if agent_state is not None:
+        event_result = await server.episodic_memory_manager.insert_event(
+            actor=client,
+            agent_state=agent_state,
+            agent_id=agent_state.id,
+            event_type=request.event_type,
+            timestamp=occurred_dt,
+            event_actor=request.event_actor,
+            details=request.details,
+            summary=request.summary,
+            organization_id=str(client.organization_id),
+            filter_tags=filter_tags,
+            client_id=client.id,
+            user_id=request.user_id,
+        )
+    else:
+        from mirix.schemas.episodic_memory import EpisodicEvent as PydanticEpisodicEvent
+
+        event_model = PydanticEpisodicEvent(
+            occurred_at=occurred_dt,
+            event_type=request.event_type,
+            client_id=client.id,
+            user_id=request.user_id,
+            agent_id=None,
+            actor=request.event_actor,
+            summary=request.summary,
+            details=request.details,
+            organization_id=str(client.organization_id),
+            summary_embedding=None,
+            details_embedding=None,
+            embedding_config=None,
+            filter_tags=filter_tags,
+            last_modify={
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "operation": "created",
+            },
+        )
+        event_result = await server.episodic_memory_manager.create_episodic_memory(
+            event_model,
+            actor=client,
+            client_id=client.id,
+            user_id=request.user_id,
+        )
+
+    citation = await _write_citation_for_memory(
+        memory_source_id=source.id,
+        memory_type="episodic",
+        memory_id=event_result.id,
+        citation_type="created",
+        external_thread_id=request.source.external_thread_id,
+        occurred_at=occurred_dt,
+        created_by_id=client.id,
+    )
+
+    return {
+        "success": True,
+        "memory": event_result.model_dump(mode="json"),
+        "memory_source_id": source.id,
+        "citation_id": citation.id if citation else None,
+        "deduped": False,
+    }
+
+
 @router.post("/memory/add")
 @with_langfuse_tracing
 async def add_memory(
