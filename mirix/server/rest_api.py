@@ -2157,7 +2157,7 @@ async def _should_apply_update(
 @router.post("/memory/episodic/direct")
 async def create_episodic_memory_direct(
     request: CreateEpisodicMemoryDirectRequest,
-    client_id: Optional[str] = Header(None, alias="X-Client-UUID"),
+    x_client_id: Optional[str] = Header(None),
 ) -> Dict[str, Any]:
     """Create one episodic memory with full source/citation provenance.
 
@@ -2175,12 +2175,12 @@ async def create_episodic_memory_direct(
 
     server = get_server()
 
-    if not client_id:
-        raise HTTPException(status_code=400, detail="X-Client-UUID header required")
+    if not x_client_id:
+        raise HTTPException(status_code=400, detail="X-Client-Id header required")
 
-    client = await server.client_manager.get_client_by_id(client_id)
+    client = await server.client_manager.get_client_by_id(x_client_id)
     if client is None:
-        raise HTTPException(status_code=404, detail=f"Client {client_id} not found")
+        raise HTTPException(status_code=404, detail=f"Client {x_client_id} not found")
     if client.write_scope is None:
         raise HTTPException(
             status_code=403,
@@ -2255,14 +2255,11 @@ async def create_episodic_memory_direct(
         }
 
     agent_state = None
-    try:
-        root_agents = await server.agent_manager.list_agents(actor=client)
-        meta_roots = [a for a in root_agents if a.agent_type == AgentType.meta_memory_agent]
-        if meta_roots:
-            meta_roots.sort(key=lambda a: a.id)
-            agent_state = meta_roots[0]
-    except Exception:
-        agent_state = None
+    root_agents = await server.agent_manager.list_agents(actor=client)
+    meta_roots = [a for a in root_agents if a.agent_type == AgentType.meta_memory_agent]
+    if meta_roots:
+        meta_roots.sort(key=lambda a: a.id)
+        agent_state = meta_roots[0]
 
     if agent_state is not None:
         event_result = await server.episodic_memory_manager.insert_event(

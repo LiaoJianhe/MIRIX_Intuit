@@ -163,7 +163,7 @@ async def test_create_episodic_memory_direct_no_meta_agent(tmp_client_no_meta, t
     )
 
     result = await create_episodic_memory_direct(
-        client_id=tmp_client_no_meta.id,
+        x_client_id=tmp_client_no_meta.id,
         request=req,
     )
 
@@ -214,9 +214,15 @@ async def test_create_episodic_with_messages(tmp_client_no_meta, tmp_user, tmp_o
             ],
         ),
     )
-    result = await create_episodic_memory_direct(client_id=tmp_client_no_meta.id, request=req)
+    result = await create_episodic_memory_direct(x_client_id=tmp_client_no_meta.id, request=req)
     msgs_page = await SourceMessageManager().get_messages_by_source_id(result["memory_source_id"])
     assert len(msgs_page.items) == 2
+
+    items = sorted(msgs_page.items, key=lambda m: m.sequence_num)
+    assert items[0].role == "user"
+    assert items[0].content == {"text": "hi"}
+    assert items[1].role == "assistant"
+    assert items[1].content == {"text": "hello"}
 
 
 @pytest.mark.asyncio
@@ -237,8 +243,8 @@ async def test_create_episodic_dedup_returns_same_source(tmp_client_no_meta, tmp
         occurred_at="2026-04-17T10:00:00Z",
         source=MemorySourceInput(external_id=ext),
     )
-    r1 = await create_episodic_memory_direct(client_id=tmp_client_no_meta.id, request=req)
-    r2 = await create_episodic_memory_direct(client_id=tmp_client_no_meta.id, request=req)
+    r1 = await create_episodic_memory_direct(x_client_id=tmp_client_no_meta.id, request=req)
+    r2 = await create_episodic_memory_direct(x_client_id=tmp_client_no_meta.id, request=req)
     assert r1["memory_source_id"] == r2["memory_source_id"]
     assert r2["deduped"] is True
     assert r2["memory"] is None
@@ -264,7 +270,7 @@ async def test_create_episodic_scope_injection_overrides_client_tags(tmp_client_
         occurred_at="2026-04-17T10:00:00Z",
         source=MemorySourceInput(external_id=_unique("ext-scope")),
     )
-    r = await create_episodic_memory_direct(client_id=tmp_client_no_meta.id, request=req)
+    r = await create_episodic_memory_direct(x_client_id=tmp_client_no_meta.id, request=req)
     src = await MemorySourceManager().get_by_id(r["memory_source_id"])
     assert src.filter_tags["scope"] == tmp_client_no_meta.write_scope
     assert src.filter_tags["scope"] != "attacker-scope"
@@ -289,7 +295,7 @@ async def test_create_episodic_source_type_default(tmp_client_no_meta, tmp_user,
         source=MemorySourceInput(external_id=_unique("ext-default-type")),
         occurred_at="2026-04-17T10:00:00Z",
     )
-    r = await create_episodic_memory_direct(client_id=tmp_client_no_meta.id, request=req)
+    r = await create_episodic_memory_direct(x_client_id=tmp_client_no_meta.id, request=req)
     src = await MemorySourceManager().get_by_id(r["memory_source_id"])
     assert src.source_type == "conversation"
 
@@ -312,7 +318,7 @@ async def test_create_episodic_source_occurred_at_fallback(tmp_client_no_meta, t
         occurred_at="2026-02-14T00:00:00Z",
         source=MemorySourceInput(external_id=_unique("ext-fallback")),
     )
-    r = await create_episodic_memory_direct(client_id=tmp_client_no_meta.id, request=req)
+    r = await create_episodic_memory_direct(x_client_id=tmp_client_no_meta.id, request=req)
     src = await MemorySourceManager().get_by_id(r["memory_source_id"])
     assert src.occurred_at is not None
     assert src.occurred_at.year == 2026
@@ -351,5 +357,5 @@ async def test_create_episodic_no_write_scope_rejects(tmp_org, tmp_user):
         occurred_at="2026-04-17T00:00:00Z",
     )
     with pytest.raises(HTTPException) as exc:
-        await create_episodic_memory_direct(client_id=client.id, request=req)
+        await create_episodic_memory_direct(x_client_id=client.id, request=req)
     assert exc.value.status_code == 403
