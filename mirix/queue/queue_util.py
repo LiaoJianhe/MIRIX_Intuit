@@ -1,11 +1,12 @@
 import json
 import logging
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from google.protobuf.json_format import MessageToDict, ParseDict
 
 import mirix.queue as queue
 from mirix.observability import add_trace_to_queue_message
+from mirix.queue.message_pb2 import DirectMemoryWrite as ProtoDirectMemoryWrite
 from mirix.queue.message_pb2 import MessageCreate as ProtoMessageCreate
 from mirix.queue.message_pb2 import QueueMessage
 from mirix.schemas.client import Client
@@ -92,6 +93,7 @@ async def put_messages(
     summary: Optional[str] = None,
     summarize: bool = False,
     source_messages: Optional[List[dict]] = None,
+    direct_writes: Optional[List[Dict[str, Any]]] = None,
 ):
     """
     Create QueueMessage protobuf and send to queue.
@@ -109,6 +111,9 @@ async def put_messages(
         block_filter_tags_update_mode: "merge" (default) or "replace" for existing block filter_tags
         use_cache: Control Redis cache behavior
         occurred_at: Optional ISO 8601 timestamp string for episodic memory
+        direct_writes: Optional list of direct memory writes. Each entry is a dict
+            {"memory_type": str, "payload": dict}. When set, the meta-agent skips
+            LLM dispatch and calls the registered handler per entry instead.
     """
     logger.debug("Creating queue message for agent_id=%s, client_id=%s", agent_id, actor.id)
 
@@ -256,6 +261,16 @@ async def put_messages(
                 proto_src_msg.message_metadata.update(msg_dict["metadata"])
 
             queue_msg.source_messages.append(proto_src_msg)
+
+    # Serialize direct_writes — each entry is {memory_type: str, payload: dict}.
+    # The worker deserializes these back into dicts and passes them to the
+    # meta-agent, which short-circuits LLM dispatch when set.
+    if direct_writes:
+        for write in direct_writes:
+            proto_write = ProtoDirectMemoryWrite()
+            proto_write.memory_type = write["memory_type"]
+            proto_write.payload_json = json.dumps(write["payload"])
+            queue_msg.direct_writes.append(proto_write)
 
     # Add LangFuse trace context for distributed tracing
     queue_msg = add_trace_to_queue_message(queue_msg)
