@@ -1943,33 +1943,35 @@ async def initialize_meta_agent(
     return meta_agent
 
 
-class DirectEpisodicPayload(BaseModel):
-    """Payload schema for direct episodic writes.
+# Per-memory-type item-schema map. The payload shape for each memory_type is
+# {"items": List[<item_schema>]} — the same shape the corresponding
+# *_insert memory tool consumes — so the meta-agent can call the tool
+# directly without a translation shim.
+#
+# Extend alongside DIRECT_WRITE_HANDLERS when new memory types gain
+# direct-write support.
+from mirix.schemas.episodic_memory import EpisodicEventForLLM
+from mirix.schemas.knowledge_vault import KnowledgeVaultItemBase
+from mirix.schemas.procedural_memory import ProceduralMemoryItemBase
+from mirix.schemas.resource_memory import ResourceMemoryItemBase
+from mirix.schemas.semantic_memory import SemanticMemoryItemBase
 
-    Validates shape at the REST API boundary so callers get 422 at HTTP time
-    instead of an obscure KeyError from the worker.
-    """
-
-    event_type: str
-    summary: str
-    details: str
-    event_actor: str
-    occurred_at: Optional[str] = None
-
-
-# Per-memory-type payload validators. Extend alongside DIRECT_WRITE_HANDLERS
-# when new memory types gain direct-write support.
-_DIRECT_WRITE_PAYLOAD_SCHEMAS: Dict[str, type] = {
-    "episodic": DirectEpisodicPayload,
+_DIRECT_WRITE_ITEM_SCHEMAS: Dict[str, type] = {
+    "episodic": EpisodicEventForLLM,
+    "semantic": SemanticMemoryItemBase,
+    "procedural": ProceduralMemoryItemBase,
+    "resource": ResourceMemoryItemBase,
+    "knowledge_vault": KnowledgeVaultItemBase,
 }
 
 
 class DirectWriteInput(BaseModel):
     """One direct memory write - bypasses LLM dispatch at the meta-agent.
 
-    The meta-agent looks up a registered handler for memory_type and calls it
-    with payload unpacked as kwargs. Skips the usual topic-extraction / LLM
-    dispatch path entirely.
+    The meta-agent looks up a handler for memory_type in DIRECT_WRITE_HANDLERS
+    and calls it with payload unpacked as kwargs. Because payload matches the
+    target memory tool's signature exactly (``{"items": [...]}``), the handler
+    is the memory tool itself — no translation layer.
     """
 
     memory_type: str
@@ -1979,17 +1981,22 @@ class DirectWriteInput(BaseModel):
     @classmethod
     def _validate_payload_for_memory_type(cls, payload, info):
         memory_type = info.data.get("memory_type")
-        schema = _DIRECT_WRITE_PAYLOAD_SCHEMAS.get(memory_type)
-        if schema is None:
+        item_schema = _DIRECT_WRITE_ITEM_SCHEMAS.get(memory_type)
+        if item_schema is None:
             raise ValueError(
                 f"Unsupported memory_type for direct write: {memory_type!r}. "
-                f"Supported: {sorted(_DIRECT_WRITE_PAYLOAD_SCHEMAS)}"
+                f"Supported: {sorted(_DIRECT_WRITE_ITEM_SCHEMAS)}"
             )
-        # Coerce through the schema to surface missing / wrong-typed fields
-        # as a ValidationError at HTTP boundary, then hand back a dict so
-        # the protobuf round-trip stays simple.
-        validated = schema(**payload)
-        return validated.model_dump()
+        items = payload.get("items")
+        if not isinstance(items, list) or not items:
+            raise ValueError(
+                f"Direct write payload for memory_type={memory_type!r} must include "
+                f"a non-empty 'items' list matching the tool's item schema."
+            )
+        # Coerce each item through the item schema to surface missing / wrong-typed
+        # fields as a ValidationError at the HTTP boundary.
+        validated_items = [item_schema(**item).model_dump() for item in items]
+        return {"items": validated_items}
 
 
 class AddMemoryRequest(BaseModel):

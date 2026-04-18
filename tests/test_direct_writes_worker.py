@@ -219,11 +219,15 @@ async def test_worker_direct_writes_writes_source_and_citation_to_db(monkeypatch
         memory_source_id=memory_source_id,
         external_id=external_id,
         direct_write_payload={
-            "event_type": "engagement_created",
-            "summary": "e2e summary",
-            "details": "e2e details",
-            "event_actor": "system",
-            "occurred_at": "2026-04-17T10:00:00Z",
+            "items": [
+                {
+                    "event_type": "engagement_created",
+                    "summary": "e2e summary",
+                    "details": "e2e details",
+                    "actor": "system",
+                    "occurred_at": "2026-04-17T10:00:00Z",
+                }
+            ]
         },
     )
 
@@ -303,11 +307,15 @@ async def test_worker_direct_writes_is_idempotent_on_duplicate_external_id(monke
         memory_source_id=memory_source_id_1,
         external_id=external_id,
         direct_write_payload={
-            "event_type": "engagement_created",
-            "summary": "first",
-            "details": "first",
-            "event_actor": "system",
-            "occurred_at": "2026-04-17T10:00:00Z",
+            "items": [
+                {
+                    "event_type": "engagement_created",
+                    "summary": "first",
+                    "details": "first",
+                    "actor": "system",
+                    "occurred_at": "2026-04-17T10:00:00Z",
+                }
+            ]
         },
     )
 
@@ -325,11 +333,15 @@ async def test_worker_direct_writes_is_idempotent_on_duplicate_external_id(monke
             memory_source_id=memory_source_id_2,
             external_id=external_id,
             direct_write_payload={
-                "event_type": "engagement_created",
-                "summary": "second",
-                "details": "second",
-                "event_actor": "system",
-                "occurred_at": "2026-04-17T10:00:00Z",
+                "items": [
+                    {
+                        "event_type": "engagement_created",
+                        "summary": "second",
+                        "details": "second",
+                        "actor": "system",
+                        "occurred_at": "2026-04-17T10:00:00Z",
+                    }
+                ]
             },
         )
         await worker._process_message_async(msg_2)

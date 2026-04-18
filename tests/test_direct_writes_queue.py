@@ -46,11 +46,15 @@ async def test_put_messages_serializes_direct_writes(monkeypatch):
             {
                 "memory_type": "episodic",
                 "payload": {
-                    "event_type": "e",
-                    "summary": "s",
-                    "details": "d",
-                    "event_actor": "system",
-                    "occurred_at": "2026-04-17T10:00:00Z",
+                    "items": [
+                        {
+                            "event_type": "e",
+                            "summary": "s",
+                            "details": "d",
+                            "actor": "system",
+                            "occurred_at": "2026-04-17T10:00:00Z",
+                        }
+                    ]
                 },
             },
         ],
@@ -60,8 +64,8 @@ async def test_put_messages_serializes_direct_writes(monkeypatch):
     assert len(msg.direct_writes) == 1
     assert msg.direct_writes[0].memory_type == "episodic"
     payload = json.loads(msg.direct_writes[0].payload_json)
-    assert payload["event_type"] == "e"
-    assert payload["event_actor"] == "system"
+    assert payload["items"][0]["event_type"] == "e"
+    assert payload["items"][0]["actor"] == "system"
 
 
 @pytest.mark.asyncio
