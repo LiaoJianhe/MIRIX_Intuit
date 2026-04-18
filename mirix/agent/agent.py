@@ -1366,6 +1366,7 @@ class Agent(BaseAgent):
         # If memory_source_id is set on this agent instance, persist the source
         # and its messages before running any memory extraction. This is gated on
         # the meta_memory_agent type so sub-agents don't re-persist.
+        summary_task: Optional[asyncio.Task] = None
         if self.agent_state.is_type(AgentType.meta_memory_agent) and self.memory_source_id:
             self._source_deduped = False
             await self._persist_memory_source(
@@ -1385,6 +1386,13 @@ class Agent(BaseAgent):
             if source and source.processing_complete:
                 logger.info("Source %s already processed, skipping", self.memory_source_id)
                 return MirixUsageStatistics(step_count=0)
+
+            # Dispatch summary generation in parallel with the memory sub-agents.
+            # Awaited before mark_processing_complete so a completed source always
+            # has its summary, but failures are swallowed so processing_complete
+            # is still set.
+            if self.summarize and not self.source_summary:
+                summary_task = asyncio.create_task(self._generate_source_summary_traced())
 
         if self.agent_state.is_type(AgentType.meta_memory_agent):
             # Extract topics from retained context + current input messages.
@@ -1520,6 +1528,14 @@ class Agent(BaseAgent):
                 keep_newest_n=retention,
             )
 
+        # Await the parallel summary task (dispatched before sub-agents ran).
+        # Failures are logged but do not prevent processing_complete.
+        if summary_task is not None:
+            try:
+                await summary_task
+            except Exception as e:
+                logger.warning("Failed to generate summary for source %s: %s", self.memory_source_id, e)
+
         # Mark memory source as fully processed after all agents complete
         if self.agent_state.is_type(AgentType.meta_memory_agent) and self.memory_source_id:
             try:
@@ -1527,15 +1543,6 @@ class Agent(BaseAgent):
             except Exception as e:
                 logger.warning("Failed to mark source %s complete: %s", self.memory_source_id, e)
                 raise
-
-            # Generate summary if opt-in and no client-provided summary.
-            # Failure does not affect processing_complete (already set above).
-            if self.summarize and not self.source_summary:
-                try:
-                    await self._generate_source_summary()
-                except Exception as e:
-                    logger.warning("Failed to generate summary for source %s: %s", self.memory_source_id, e)
-                    raise
 
         return MirixUsageStatistics(**total_usage.model_dump(), step_count=step_count)
 
@@ -1628,6 +1635,52 @@ class Agent(BaseAgent):
         except Exception as e:
             logger.error("Failed to persist memory source %s: %s", memory_source_id, e)
             raise
+
+    async def _generate_source_summary_traced(self) -> None:
+        """Wrap _generate_source_summary in a LangFuse child span.
+
+        Captures the trace context at dispatch time so the span lands as a
+        sibling of the memory sub-agent spans under the meta_memory_agent trace,
+        not as an orphan created by the background task.
+        """
+        parent_trace_context = get_trace_context()
+        langfuse = get_langfuse_client()
+        trace_id = parent_trace_context.get("trace_id") if parent_trace_context else None
+        parent_span_id = parent_trace_context.get("observation_id") if parent_trace_context else None
+
+        if not (langfuse and trace_id):
+            await self._generate_source_summary()
+            return
+
+        from typing import cast
+
+        from langfuse.types import TraceContext
+
+        from mirix.observability.context import set_trace_context
+
+        trace_context_dict: dict = {"trace_id": trace_id}
+        if parent_span_id:
+            trace_context_dict["parent_span_id"] = parent_span_id
+
+        with langfuse.start_as_current_observation(
+            name="Summary Agent",
+            as_type="agent",
+            trace_context=cast(TraceContext, trace_context_dict),
+            metadata={
+                "memory_source_id": self.memory_source_id,
+                "agent_name": self.agent_state.name,
+            },
+        ) as span:
+            mark_observation_as_child(span)
+            span_observation_id = getattr(span, "id", None)
+            if span_observation_id:
+                set_trace_context(
+                    trace_id=trace_id,
+                    observation_id=span_observation_id,
+                    user_id=parent_trace_context.get("user_id"),
+                    session_id=parent_trace_context.get("session_id"),
+                )
+            await self._generate_source_summary()
 
     async def _generate_source_summary(self) -> None:
         """Generate a summary for the memory source using the agent's LLM.
