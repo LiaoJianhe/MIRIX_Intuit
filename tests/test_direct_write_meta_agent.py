@@ -64,7 +64,7 @@ async def _get_user():
 async def test_apply_direct_write_dispatches_to_registered_handler():
     """_apply_direct_write looks up handler in DIRECT_WRITE_HANDLERS and calls with payload kwargs."""
     from mirix.agent.agent import Agent
-    from mirix.functions.function_sets import memory_tools
+    from mirix.functions import direct_write_handlers as memory_tools
 
     agent = Agent.__new__(Agent)
 
@@ -175,7 +175,7 @@ def _make_meta_agent_stub(
 
 async def test_step_direct_writes_skips_llm_and_calls_handler():
     """Meta-agent with direct_writes set runs handler, marks processing complete, returns step_count=0."""
-    from mirix.functions.function_sets import memory_tools
+    from mirix.functions import direct_write_handlers as memory_tools
 
     actor = await _get_actor()
     user = await _get_user()
@@ -212,7 +212,7 @@ async def test_step_direct_writes_skips_llm_and_calls_handler():
 
 async def test_step_direct_writes_respects_source_dedup():
     """If source dedupes at _persist_memory_source, direct_writes branch does NOT run."""
-    from mirix.functions.function_sets import memory_tools
+    from mirix.functions import direct_write_handlers as memory_tools
 
     actor = await _get_actor()
     user = await _get_user()
@@ -248,7 +248,7 @@ async def test_step_direct_writes_respects_source_dedup():
 
 async def test_step_direct_writes_respects_processing_complete():
     """If source already has processing_complete=True, direct_writes branch does NOT run."""
-    from mirix.functions.function_sets import memory_tools
+    from mirix.functions import direct_write_handlers as memory_tools
 
     actor = await _get_actor()
     user = await _get_user()

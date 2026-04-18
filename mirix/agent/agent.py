@@ -1556,7 +1556,7 @@ class Agent(BaseAgent):
         Handlers write the memory row via the appropriate manager and call
         the shared _write_citation helper. No LLM involvement.
         """
-        from mirix.functions.function_sets.memory_tools import DIRECT_WRITE_HANDLERS
+        from mirix.functions.direct_write_handlers import DIRECT_WRITE_HANDLERS
 
         handler = DIRECT_WRITE_HANDLERS.get(memory_type)
         if handler is None:

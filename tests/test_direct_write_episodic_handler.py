@@ -1,4 +1,4 @@
-"""Unit + DB-level tests for direct_write_episodic in memory_tools.py.
+"""Unit + DB-level tests for direct_write_episodic in direct_write_handlers.py.
 
 Exercises both the meta_memory_agent insert_event path and the non-meta
 create_episodic_memory path. The citation write hits the real DB via
@@ -121,7 +121,7 @@ def _build_agent_stub(
 
 
 async def test_direct_write_handlers_registry_has_episodic():
-    from mirix.functions.function_sets.memory_tools import (
+    from mirix.functions.direct_write_handlers import (
         DIRECT_WRITE_HANDLERS,
         direct_write_episodic,
     )
@@ -136,7 +136,7 @@ async def test_direct_write_handlers_registry_has_episodic():
 
 async def test_direct_write_episodic_meta_agent_uses_insert_event():
     """meta_memory_agent: calls episodic_memory_manager.insert_event with correct args."""
-    from mirix.functions.function_sets.memory_tools import direct_write_episodic
+    from mirix.functions.direct_write_handlers import direct_write_episodic
     from mirix.services.memory_citation_manager import MemoryCitationManager
 
     source_id = await _create_source()
@@ -192,7 +192,7 @@ async def test_direct_write_episodic_meta_agent_uses_insert_event():
 
 async def test_direct_write_episodic_non_meta_uses_create_episodic_memory():
     """Non-meta agent: calls episodic_memory_manager.create_episodic_memory instead."""
-    from mirix.functions.function_sets.memory_tools import direct_write_episodic
+    from mirix.functions.direct_write_handlers import direct_write_episodic
     from mirix.services.memory_citation_manager import MemoryCitationManager
 
     source_id = await _create_source()
@@ -230,7 +230,7 @@ async def test_direct_write_episodic_non_meta_uses_create_episodic_memory():
 
 async def test_direct_write_episodic_preserves_existing_scope_in_filter_tags():
     """If agent.filter_tags already has scope, handler does NOT overwrite it."""
-    from mirix.functions.function_sets.memory_tools import direct_write_episodic
+    from mirix.functions.direct_write_handlers import direct_write_episodic
 
     source_id = await _create_source()
     actor = await _get_actor()
