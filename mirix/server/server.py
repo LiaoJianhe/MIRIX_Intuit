@@ -706,6 +706,7 @@ class AsyncServer(Server):
         summary: Optional[str] = None,
         summarize: bool = False,
         source_messages: Optional[list] = None,
+        direct_writes: Optional[List[dict]] = None,
     ) -> MirixUsageStatistics:
         """Send the input message through the agent"""
         logger.debug("Got input messages: %s", input_messages)
@@ -751,6 +752,8 @@ class AsyncServer(Server):
                 mirix_agent.summarize = summarize
             if source_messages is not None:
                 mirix_agent.source_messages = source_messages
+            if direct_writes is not None:
+                mirix_agent.direct_writes = direct_writes
 
             # Determine whether or not to token stream based on the capability of the interface
             token_streaming = (
@@ -1062,6 +1065,7 @@ class AsyncServer(Server):
         summary: Optional[str] = None,
         summarize: bool = False,
         source_messages: Optional[list] = None,
+        direct_writes: Optional[List[dict]] = None,
     ) -> MirixUsageStatistics:
         """Send a list of messages to the agent.
 
@@ -1114,6 +1118,7 @@ class AsyncServer(Server):
                 summary=summary,
                 summarize=summarize,
                 source_messages=source_messages,
+                direct_writes=direct_writes,
             )
         finally:
             # No cleanup needed - context automatically isolated per request
