@@ -1400,8 +1400,7 @@ class Agent(BaseAgent):
         # Placed AFTER _persist_memory_source + dedup/processing_complete checks so
         # deduped or already-processed sources short-circuit before this runs.
         if self.agent_state.is_type(AgentType.meta_memory_agent) and self.direct_writes:
-            for write in self.direct_writes:
-                await self._apply_direct_write(write["memory_type"], write["payload"])
+            await self._apply_direct_writes_traced()
             if summary_task is not None:
                 try:
                     await summary_task
@@ -1578,6 +1577,56 @@ class Agent(BaseAgent):
         if handler is None:
             raise ValueError(f"No direct-write handler registered for memory_type: {memory_type}")
         await handler(self, **payload)
+
+    async def _apply_direct_writes_traced(self) -> None:
+        """Apply all self.direct_writes under a single LangFuse span so the
+        direct-write path is observable alongside the LLM-driven sub-agent
+        spans.
+        """
+        parent_trace_context = get_trace_context()
+        langfuse = get_langfuse_client()
+        trace_id = parent_trace_context.get("trace_id") if parent_trace_context else None
+        parent_span_id = parent_trace_context.get("observation_id") if parent_trace_context else None
+
+        async def _run_all():
+            for write in self.direct_writes:
+                await self._apply_direct_write(write["memory_type"], write["payload"])
+
+        if not (langfuse and trace_id):
+            await _run_all()
+            return
+
+        from typing import cast
+
+        from langfuse.types import TraceContext
+
+        from mirix.observability.context import set_trace_context
+
+        trace_context_dict: dict = {"trace_id": trace_id}
+        if parent_span_id:
+            trace_context_dict["parent_span_id"] = parent_span_id
+
+        with langfuse.start_as_current_observation(
+            name="Direct Writes",
+            as_type="agent",
+            trace_context=cast(TraceContext, trace_context_dict),
+            metadata={
+                "memory_source_id": self.memory_source_id,
+                "agent_name": self.agent_state.name,
+                "direct_write_count": len(self.direct_writes),
+                "memory_types": [w["memory_type"] for w in self.direct_writes],
+            },
+        ) as span:
+            mark_observation_as_child(span)
+            span_observation_id = getattr(span, "id", None)
+            if span_observation_id:
+                set_trace_context(
+                    trace_id=trace_id,
+                    observation_id=span_observation_id,
+                    user_id=parent_trace_context.get("user_id"),
+                    session_id=parent_trace_context.get("session_id"),
+                )
+            await _run_all()
 
     async def _persist_memory_source(
         self,

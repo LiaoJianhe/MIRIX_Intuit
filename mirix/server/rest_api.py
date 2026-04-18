@@ -15,7 +15,7 @@ import httpx
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from mirix.helpers.message_helpers import prepare_input_message_create
 from mirix.llm_api.llm_client import LLMClient
@@ -1943,6 +1943,27 @@ async def initialize_meta_agent(
     return meta_agent
 
 
+class DirectEpisodicPayload(BaseModel):
+    """Payload schema for direct episodic writes.
+
+    Validates shape at the REST API boundary so callers get 422 at HTTP time
+    instead of an obscure KeyError from the worker.
+    """
+
+    event_type: str
+    summary: str
+    details: str
+    event_actor: str
+    occurred_at: Optional[str] = None
+
+
+# Per-memory-type payload validators. Extend alongside DIRECT_WRITE_HANDLERS
+# when new memory types gain direct-write support.
+_DIRECT_WRITE_PAYLOAD_SCHEMAS: Dict[str, type] = {
+    "episodic": DirectEpisodicPayload,
+}
+
+
 class DirectWriteInput(BaseModel):
     """One direct memory write - bypasses LLM dispatch at the meta-agent.
 
@@ -1953,6 +1974,22 @@ class DirectWriteInput(BaseModel):
 
     memory_type: str
     payload: Dict[str, Any]
+
+    @field_validator("payload")
+    @classmethod
+    def _validate_payload_for_memory_type(cls, payload, info):
+        memory_type = info.data.get("memory_type")
+        schema = _DIRECT_WRITE_PAYLOAD_SCHEMAS.get(memory_type)
+        if schema is None:
+            raise ValueError(
+                f"Unsupported memory_type for direct write: {memory_type!r}. "
+                f"Supported: {sorted(_DIRECT_WRITE_PAYLOAD_SCHEMAS)}"
+            )
+        # Coerce through the schema to surface missing / wrong-typed fields
+        # as a ValidationError at HTTP boundary, then hand back a dict so
+        # the protobuf round-trip stays simple.
+        validated = schema(**payload)
+        return validated.model_dump()
 
 
 class AddMemoryRequest(BaseModel):

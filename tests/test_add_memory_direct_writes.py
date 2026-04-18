@@ -180,6 +180,7 @@ async def test_add_memory_with_empty_messages_and_direct_writes_does_not_crash()
                 "summary": "s",
                 "details": "d",
                 "event_actor": "system",
+                "occurred_at": None,
             },
         }
     ]
@@ -220,3 +221,54 @@ async def test_add_memory_direct_writes_none_passes_none_to_put_messages():
 
     kwargs = mock_put.call_args.kwargs
     assert kwargs.get("direct_writes") is None
+
+
+@pytest.mark.asyncio
+async def test_direct_write_episodic_payload_missing_field_raises_validation():
+    """Payload missing a required episodic field fails at AddMemoryRequest construction
+    with a ValidationError (→ HTTP 422 via FastAPI), not later at the worker.
+    """
+    from pydantic import ValidationError
+
+    from mirix.server.rest_api import DirectWriteInput
+
+    with pytest.raises(ValidationError):
+        # Missing details + event_actor
+        DirectWriteInput(
+            memory_type="episodic",
+            payload={"event_type": "e", "summary": "s"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_direct_write_unsupported_memory_type_rejected_at_request_time():
+    """A memory_type with no registered payload schema is rejected up front."""
+    from pydantic import ValidationError
+
+    from mirix.server.rest_api import DirectWriteInput
+
+    with pytest.raises(ValidationError):
+        DirectWriteInput(
+            memory_type="telepathic",
+            payload={"anything": "goes"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_direct_write_episodic_payload_happy_path_coerces_to_dict():
+    """Valid payload survives validation and is preserved as a plain dict."""
+    from mirix.server.rest_api import DirectWriteInput
+
+    dw = DirectWriteInput(
+        memory_type="episodic",
+        payload={
+            "event_type": "engagement_created",
+            "summary": "s",
+            "details": "d",
+            "event_actor": "system",
+            "occurred_at": "2026-04-17T10:00:00Z",
+        },
+    )
+    assert isinstance(dw.payload, dict)
+    assert dw.payload["event_type"] == "engagement_created"
+    assert dw.payload["occurred_at"] == "2026-04-17T10:00:00Z"

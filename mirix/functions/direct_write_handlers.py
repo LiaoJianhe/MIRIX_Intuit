@@ -4,101 +4,41 @@ Lives outside ``mirix/functions/function_sets/`` because these handlers are
 not agent-callable tools. Placing them under ``function_sets/`` would cause
 ``tool_manager.upsert_base_tools`` to scan them via ``load_function_set``
 (which requires tool-style docstrings, no ``*,`` separators, etc.) and fail.
+
+The handlers are thin shims that delegate to the existing LLM-facing memory
+tool functions (e.g. ``episodic_memory_insert``) so citation-writing, filter
+tag injection, and manager interaction live in exactly one place.
 """
 
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict
 
-from mirix.functions.function_sets.memory_tools import _write_citation
-from mirix.schemas.agent import AgentType
-from mirix.schemas.episodic_memory import EpisodicEvent as PydanticEpisodicEvent
+from mirix.functions.function_sets.memory_tools import episodic_memory_insert
 
 if TYPE_CHECKING:
     from mirix.agent.agent import Agent
 
 
-async def direct_write_episodic(
-    agent: "Agent",
-    *,
-    event_type: str,
-    summary: str,
-    details: str,
-    event_actor: str,
-    occurred_at: Optional[str] = None,
-) -> None:
-    """Direct-insert an episodic memory row + citation without LLM dispatch.
+async def direct_write_episodic(agent: "Agent", **payload: Any) -> None:
+    """Direct-write one episodic memory by delegating to ``episodic_memory_insert``.
 
-    Reads memory_source_id / external_thread_id / filter_tags off the agent
-    (hydrated by AsyncServer._step). Uses insert_event when the agent has
-    a meta_memory_agent state, else create_episodic_memory. Then calls the
-    shared _write_citation helper for the citation row.
+    Accepts the same per-item fields the LLM tool does:
+    ``event_type``, ``summary``, ``details``, ``event_actor`` (aliased to ``actor``
+    for the tool), ``occurred_at``. Wraps the single item in the list-shaped
+    argument the tool expects. Missing ``occurred_at`` defaults to now().
     """
-    effective_occurred_at = occurred_at if occurred_at is not None else getattr(agent, "occurred_at", None)
-    if effective_occurred_at:
-        if isinstance(effective_occurred_at, str):
-            occurred_dt = datetime.fromisoformat(effective_occurred_at.replace("Z", "+00:00"))
-        else:
-            occurred_dt = effective_occurred_at
-        if occurred_dt.tzinfo is not None:
-            occurred_dt = occurred_dt.astimezone(timezone.utc).replace(tzinfo=None)
-    else:
-        occurred_dt = datetime.now(timezone.utc).replace(tzinfo=None)
+    occurred_at = payload.get("occurred_at") or getattr(agent, "occurred_at", None)
+    if occurred_at is None:
+        occurred_at = datetime.now(timezone.utc).isoformat()
 
-    client = agent.actor
-    user_id = getattr(agent, "user_id", None)
-    org_id = str(client.organization_id)
-
-    existing_tags = getattr(agent, "filter_tags", None)
-    filter_tags = dict(existing_tags) if existing_tags else {}
-    if "scope" not in filter_tags and getattr(client, "write_scope", None):
-        filter_tags["scope"] = client.write_scope
-
-    if agent.agent_state.is_type(AgentType.meta_memory_agent):
-        agent_id = agent.agent_state.parent_id or agent.agent_state.id
-        event_result = await agent.episodic_memory_manager.insert_event(
-            actor=client,
-            agent_state=agent.agent_state,
-            agent_id=agent_id,
-            event_type=event_type,
-            timestamp=occurred_dt,
-            event_actor=event_actor,
-            details=details,
-            summary=summary,
-            organization_id=org_id,
-            filter_tags=filter_tags or None,
-            client_id=client.id,
-            user_id=user_id,
-            use_cache=getattr(agent, "use_cache", True),
-        )
-    else:
-        event_model = PydanticEpisodicEvent(
-            occurred_at=occurred_dt,
-            event_type=event_type,
-            client_id=client.id,
-            user_id=user_id,
-            agent_id=None,
-            actor=event_actor,
-            summary=summary,
-            details=details,
-            organization_id=org_id,
-            summary_embedding=None,
-            details_embedding=None,
-            embedding_config=None,
-            filter_tags=filter_tags or None,
-            last_modify={
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "operation": "created",
-            },
-        )
-        event_result = await agent.episodic_memory_manager.create_episodic_memory(
-            event_model,
-            actor=client,
-            client_id=client.id,
-            user_id=user_id,
-            use_cache=getattr(agent, "use_cache", True),
-        )
-
-    await _write_citation(agent, memory_type="episodic", memory_id=event_result.id, citation_type="created")
+    item = {
+        "event_type": payload["event_type"],
+        "summary": payload["summary"],
+        "details": payload["details"],
+        "actor": payload["event_actor"],
+        "occurred_at": occurred_at,
+    }
+    await episodic_memory_insert(agent, items=[item])
 
 
 DIRECT_WRITE_HANDLERS: Dict[str, Any] = {
