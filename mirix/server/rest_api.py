@@ -1943,6 +1943,18 @@ async def initialize_meta_agent(
     return meta_agent
 
 
+class DirectWriteInput(BaseModel):
+    """One direct memory write - bypasses LLM dispatch at the meta-agent.
+
+    The meta-agent looks up a registered handler for memory_type and calls it
+    with payload unpacked as kwargs. Skips the usual topic-extraction / LLM
+    dispatch path entirely.
+    """
+
+    memory_type: str
+    payload: Dict[str, Any]
+
+
 class AddMemoryRequest(BaseModel):
     """Request model for adding memory."""
 
@@ -1965,6 +1977,9 @@ class AddMemoryRequest(BaseModel):
     source_type: str = "conversation"  # Freeform string label for source type
     source_system: Optional[str] = None  # Originating system label
     source_metadata: Optional[Dict[str, Any]] = None  # Client-provided lineage context bag
+    direct_writes: Optional[List[DirectWriteInput]] = (
+        None  # When set, meta-agent skips LLM dispatch and writes memories directly
+    )
 
 
 @router.post("/memory/add")
@@ -2109,6 +2124,14 @@ async def add_memory(
         summary=request.summary,
         summarize=request.summarize,
         source_messages=original_messages,
+        direct_writes=(
+            [
+                {"memory_type": w.memory_type, "payload": w.payload}
+                for w in request.direct_writes
+            ]
+            if request.direct_writes
+            else None
+        ),
     )
 
     logger.debug("Memory queued for processing: %s", meta_agent.id)
