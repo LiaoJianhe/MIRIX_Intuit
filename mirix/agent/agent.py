@@ -1388,9 +1388,10 @@ class Agent(BaseAgent):
                 return MirixUsageStatistics(step_count=0)
 
             # Dispatch summary generation in parallel with the memory sub-agents.
-            # Awaited before mark_processing_complete so a completed source always
-            # has its summary, but failures are swallowed so processing_complete
-            # is still set.
+            # Awaited before mark_processing_complete; on failure the exception
+            # propagates out of step() so the Kafka worker redelivers the message.
+            # Source-level idempotency (external_id / batch_hash + processing_complete)
+            # makes redelivery a safe full retry.
             if self.summarize and not self.source_summary:
                 summary_task = asyncio.create_task(self._generate_source_summary_traced())
 
@@ -1529,12 +1530,14 @@ class Agent(BaseAgent):
             )
 
         # Await the parallel summary task (dispatched before sub-agents ran).
-        # Failures are logged but do not prevent processing_complete.
+        # Raises on failure so the worker redelivers the message — processing_complete
+        # stays False and the retry gets a clean full reprocess.
         if summary_task is not None:
             try:
                 await summary_task
             except Exception as e:
                 logger.warning("Failed to generate summary for source %s: %s", self.memory_source_id, e)
+                raise
 
         # Mark memory source as fully processed after all agents complete
         if self.agent_state.is_type(AgentType.meta_memory_agent) and self.memory_source_id:

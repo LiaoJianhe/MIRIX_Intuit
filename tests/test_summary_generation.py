@@ -358,8 +358,8 @@ class TestSummaryTriggerInStep:
         agent._generate_source_summary_traced.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_summary_failure_does_not_block_processing_complete(self):
-        """Summary failure is swallowed; processing_complete is still set."""
+    async def test_summary_failure_raises_and_leaves_processing_incomplete(self):
+        """Summary failure propagates so worker redelivers; processing_complete stays False."""
         agent, actor, user = _setup_agent("src-abc123", summarize=True)
 
         resp = _make_step_response()
@@ -372,18 +372,19 @@ class TestSummaryTriggerInStep:
         input_msg = MessageCreate(role="user", content="test message")
 
         with patch("mirix.agent.agent.LLMClient"):
-            # Must NOT raise — summary failure is swallowed per AC
-            await agent.step(
-                input_messages=[input_msg],
-                chaining=False,
-                max_chaining_steps=1,
-                stream=False,
-                skip_verify=True,
-                actor=actor,
-                user=user,
-            )
+            with pytest.raises(RuntimeError, match="LLM down"):
+                await agent.step(
+                    input_messages=[input_msg],
+                    chaining=False,
+                    max_chaining_steps=1,
+                    stream=False,
+                    skip_verify=True,
+                    actor=actor,
+                    user=user,
+                )
 
-        agent.memory_source_manager.mark_processing_complete.assert_called_once_with("src-abc123")
+        # processing_complete was NOT called — worker will redeliver, retry will reprocess
+        agent.memory_source_manager.mark_processing_complete.assert_not_called()
         agent._generate_source_summary_traced.assert_awaited_once()
 
     @pytest.mark.asyncio
