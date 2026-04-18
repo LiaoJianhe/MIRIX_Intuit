@@ -111,6 +111,7 @@ def _setup_agent(memory_source_id, summarize=False, source_summary=None):
     agent.source_system = None
     agent.source_metadata = None
     agent.source_messages = None
+    agent.direct_writes = None
     agent.filter_tags = None
     agent.block_filter_tags = None
     agent.use_cache = True
@@ -267,24 +268,24 @@ class TestSummaryGeneration:
 
 
 class TestSummaryTriggerInStep:
-    """Test that step() triggers summary generation at the right time."""
+    """Test that step() dispatches summary in parallel with sub-agents."""
 
     @pytest.mark.asyncio
     async def test_summary_triggered_when_summarize_true(self):
-        """summarize=True triggers _generate_source_summary after processing_complete."""
+        """summarize=True dispatches _generate_source_summary_traced before processing_complete."""
         agent, actor, user = _setup_agent("src-abc123", summarize=True)
 
         resp = _make_step_response()
         agent.inner_step = AsyncMock(return_value=resp)
         agent._extract_topics_from_messages = AsyncMock(return_value=["topic1"])
-        agent._generate_source_summary = AsyncMock()
+        agent._generate_source_summary_traced = AsyncMock()
 
         from mirix.schemas.message import MessageCreate
 
         input_msg = MessageCreate(role="user", content="test message")
 
         with patch("mirix.agent.agent.LLMClient"):
-            result = await agent.step(
+            await agent.step(
                 input_messages=[input_msg],
                 chaining=False,
                 max_chaining_steps=1,
@@ -295,7 +296,7 @@ class TestSummaryTriggerInStep:
             )
 
         agent.memory_source_manager.mark_processing_complete.assert_called_once_with("src-abc123")
-        agent._generate_source_summary.assert_awaited_once()
+        agent._generate_source_summary_traced.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_no_summary_when_summarize_false(self):
@@ -305,14 +306,14 @@ class TestSummaryTriggerInStep:
         resp = _make_step_response()
         agent.inner_step = AsyncMock(return_value=resp)
         agent._extract_topics_from_messages = AsyncMock(return_value=["topic1"])
-        agent._generate_source_summary = AsyncMock()
+        agent._generate_source_summary_traced = AsyncMock()
 
         from mirix.schemas.message import MessageCreate
 
         input_msg = MessageCreate(role="user", content="test message")
 
         with patch("mirix.agent.agent.LLMClient"):
-            result = await agent.step(
+            await agent.step(
                 input_messages=[input_msg],
                 chaining=False,
                 max_chaining_steps=1,
@@ -323,7 +324,7 @@ class TestSummaryTriggerInStep:
             )
 
         agent.memory_source_manager.mark_processing_complete.assert_called_once_with("src-abc123")
-        agent._generate_source_summary.assert_not_awaited()
+        agent._generate_source_summary_traced.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_no_summary_when_client_summary_provided(self):
@@ -337,14 +338,14 @@ class TestSummaryTriggerInStep:
         resp = _make_step_response()
         agent.inner_step = AsyncMock(return_value=resp)
         agent._extract_topics_from_messages = AsyncMock(return_value=["topic1"])
-        agent._generate_source_summary = AsyncMock()
+        agent._generate_source_summary_traced = AsyncMock()
 
         from mirix.schemas.message import MessageCreate
 
         input_msg = MessageCreate(role="user", content="test message")
 
         with patch("mirix.agent.agent.LLMClient"):
-            result = await agent.step(
+            await agent.step(
                 input_messages=[input_msg],
                 chaining=False,
                 max_chaining_steps=1,
@@ -355,17 +356,17 @@ class TestSummaryTriggerInStep:
             )
 
         agent.memory_source_manager.mark_processing_complete.assert_called_once()
-        agent._generate_source_summary.assert_not_awaited()
+        agent._generate_source_summary_traced.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_summary_failure_raises_after_processing_complete(self):
-        """Summary failure propagates, but processing_complete was already set."""
+    async def test_summary_failure_raises_and_leaves_processing_incomplete(self):
+        """Summary failure propagates so worker redelivers; processing_complete stays False."""
         agent, actor, user = _setup_agent("src-abc123", summarize=True)
 
         resp = _make_step_response()
         agent.inner_step = AsyncMock(return_value=resp)
         agent._extract_topics_from_messages = AsyncMock(return_value=["topic1"])
-        agent._generate_source_summary = AsyncMock(side_effect=RuntimeError("LLM down"))
+        agent._generate_source_summary_traced = AsyncMock(side_effect=RuntimeError("LLM down"))
 
         from mirix.schemas.message import MessageCreate
 
@@ -383,8 +384,97 @@ class TestSummaryTriggerInStep:
                     user=user,
                 )
 
-        # processing_complete was set before summary generation was attempted
+        # processing_complete was NOT called — worker will redeliver, retry will reprocess
+        agent.memory_source_manager.mark_processing_complete.assert_not_called()
+        agent._generate_source_summary_traced.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_summary_runs_in_parallel_with_sub_agents(self):
+        """Summary task starts before inner_step (sub-agents) and completes alongside them."""
+        agent, actor, user = _setup_agent("src-abc123", summarize=True)
+
+        order: list[str] = []
+
+        async def fake_inner_step(*args, **kwargs):
+            order.append("inner_step_start")
+            await asyncio.sleep(0.01)
+            order.append("inner_step_end")
+            return _make_step_response()
+
+        async def fake_summary():
+            order.append("summary_start")
+            await asyncio.sleep(0.01)
+            order.append("summary_end")
+
+        agent.inner_step = AsyncMock(side_effect=fake_inner_step)
+        agent._extract_topics_from_messages = AsyncMock(return_value=["topic1"])
+        agent._generate_source_summary_traced = AsyncMock(side_effect=fake_summary)
+
+        from mirix.schemas.message import MessageCreate
+
+        input_msg = MessageCreate(role="user", content="test message")
+
+        with patch("mirix.agent.agent.LLMClient"):
+            await agent.step(
+                input_messages=[input_msg],
+                chaining=False,
+                max_chaining_steps=1,
+                stream=False,
+                skip_verify=True,
+                actor=actor,
+                user=user,
+            )
+
+        # Summary must start before inner_step ends (i.e. concurrently)
+        summary_start_idx = order.index("summary_start")
+        inner_end_idx = order.index("inner_step_end")
+        assert summary_start_idx < inner_end_idx, (
+            f"summary did not start before sub-agents finished; order={order}"
+        )
+        # processing_complete happens after both finish
         agent.memory_source_manager.mark_processing_complete.assert_called_once_with("src-abc123")
+
+
+class TestSummaryTracedSpan:
+    """Test that _generate_source_summary_traced creates a LangFuse child span."""
+
+    @pytest.mark.asyncio
+    async def test_traced_wrapper_creates_child_span(self):
+        """_generate_source_summary_traced wraps the LLM call in a 'Summary Agent' child span."""
+        agent, _, _ = _setup_agent("src-abc123", summarize=True)
+        agent._generate_source_summary = AsyncMock()
+
+        mock_langfuse = MagicMock()
+        span = MagicMock()
+        span.id = "span-xyz"
+        mock_langfuse.start_as_current_observation.return_value.__enter__.return_value = span
+        mock_langfuse.start_as_current_observation.return_value.__exit__.return_value = False
+
+        with patch("mirix.agent.agent.get_langfuse_client", return_value=mock_langfuse), patch(
+            "mirix.agent.agent.get_trace_context",
+            return_value={"trace_id": "trace-123", "observation_id": "obs-parent"},
+        ):
+            await agent._generate_source_summary_traced()
+
+        mock_langfuse.start_as_current_observation.assert_called_once()
+        call_kwargs = mock_langfuse.start_as_current_observation.call_args.kwargs
+        assert call_kwargs["name"] == "Summary Agent"
+        assert call_kwargs["as_type"] == "agent"
+        assert call_kwargs["trace_context"]["trace_id"] == "trace-123"
+        assert call_kwargs["trace_context"]["parent_span_id"] == "obs-parent"
+        agent._generate_source_summary.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_traced_wrapper_no_langfuse_still_runs(self):
+        """When langfuse is not configured, traced wrapper still calls the underlying LLM."""
+        agent, _, _ = _setup_agent("src-abc123", summarize=True)
+        agent._generate_source_summary = AsyncMock()
+
+        with patch("mirix.agent.agent.get_langfuse_client", return_value=None), patch(
+            "mirix.agent.agent.get_trace_context", return_value={}
+        ):
+            await agent._generate_source_summary_traced()
+
         agent._generate_source_summary.assert_awaited_once()
 
 
