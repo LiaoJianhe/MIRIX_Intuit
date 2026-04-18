@@ -5,7 +5,7 @@ import logging
 import traceback
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import httpx
 import numpy as np
@@ -187,6 +187,7 @@ class Agent(BaseAgent):
 
         # Memory source fields — set by _step() when memory_source_id is present
         self.memory_source_id = None
+        self.direct_writes: Optional[List[Dict[str, Any]]] = None
         self.external_id = None
         self.external_thread_id = None
         self.source_type = None
@@ -1386,6 +1387,16 @@ class Agent(BaseAgent):
                 logger.info("Source %s already processed, skipping", self.memory_source_id)
                 return MirixUsageStatistics(step_count=0)
 
+        # Direct-write branch: bypass LLM dispatch and call registered handlers.
+        # Placed AFTER _persist_memory_source + dedup/processing_complete checks so
+        # deduped or already-processed sources short-circuit before this runs.
+        if self.agent_state.is_type(AgentType.meta_memory_agent) and self.direct_writes:
+            for write in self.direct_writes:
+                await self._apply_direct_write(write["memory_type"], write["payload"])
+            if self.memory_source_id:
+                await self.memory_source_manager.mark_processing_complete(self.memory_source_id)
+            return MirixUsageStatistics(step_count=0)
+
         if self.agent_state.is_type(AgentType.meta_memory_agent):
             # Extract topics from retained context + current input messages.
             try:
@@ -1538,6 +1549,19 @@ class Agent(BaseAgent):
                     raise
 
         return MirixUsageStatistics(**total_usage.model_dump(), step_count=step_count)
+
+    async def _apply_direct_write(self, memory_type: str, payload: Dict[str, Any]) -> None:
+        """Dispatch a direct write to the registered handler for memory_type.
+
+        Handlers write the memory row via the appropriate manager and call
+        the shared _write_citation helper. No LLM involvement.
+        """
+        from mirix.functions.function_sets.memory_tools import DIRECT_WRITE_HANDLERS
+
+        handler = DIRECT_WRITE_HANDLERS.get(memory_type)
+        if handler is None:
+            raise ValueError(f"No direct-write handler registered for memory_type: {memory_type}")
+        await handler(self, **payload)
 
     async def _persist_memory_source(
         self,
