@@ -2044,7 +2044,7 @@ async def add_memory(
     # DB table. See the parallel comment in queue_util.py put_messages().
     original_messages = request.messages
 
-    if isinstance(message, list) and "role" in message[0].keys():
+    if isinstance(message, list) and len(message) > 0 and "role" in message[0].keys():
         # This means the input is in the format of [{"role": "user", "content": [{"type": "text", "text": "..."}]}, {"role": "assistant", "content": [{"type": "text", "text": "..."}]}]
         # OR the simpler format: [{"role": "user", "content": "Hello world"}]
 

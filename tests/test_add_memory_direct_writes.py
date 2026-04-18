@@ -117,6 +117,75 @@ async def test_add_memory_threads_direct_writes_to_put_messages():
 
 
 @pytest.mark.asyncio
+async def test_add_memory_with_empty_messages_and_direct_writes_does_not_crash():
+    """add_memory must not crash when messages=[] and only direct_writes are provided.
+
+    ECMS sends requests with an empty messages list for pure direct-write flows.
+    The flattening block in add_memory historically indexed message[0] without a
+    guard, causing IndexError. This test enforces the empty-messages guard.
+    """
+    from mirix.server.rest_api import (
+        AddMemoryRequest,
+        DirectWriteInput,
+        add_memory,
+    )
+
+    req = AddMemoryRequest(
+        meta_agent_id="agent-1",
+        user_id="user-1",
+        messages=[],
+        direct_writes=[
+            DirectWriteInput(
+                memory_type="episodic",
+                payload={
+                    "event_type": "e",
+                    "summary": "s",
+                    "details": "d",
+                    "event_actor": "system",
+                },
+            ),
+        ],
+    )
+
+    fake_client = MagicMock()
+    fake_client.id = "client-1"
+    fake_client.write_scope = "test-scope"
+
+    fake_meta_agent = MagicMock()
+    fake_meta_agent.id = "agent-1"
+
+    fake_server = MagicMock()
+    fake_server.client_manager = MagicMock()
+    fake_server.client_manager.get_client_by_id = AsyncMock(return_value=fake_client)
+    fake_server.agent_manager = MagicMock()
+    fake_server.agent_manager.get_agent_by_id = AsyncMock(return_value=fake_meta_agent)
+
+    with patch("mirix.server.rest_api.get_server", return_value=fake_server), patch(
+        "mirix.server.rest_api.get_client_and_org",
+        new_callable=AsyncMock,
+        return_value=("client-1", "org-1"),
+    ), patch(
+        "mirix.server.rest_api.put_messages", new_callable=AsyncMock
+    ) as mock_put:
+        result = await add_memory(req, x_org_id="org-1", x_client_id="client-1")
+
+    assert result["success"] is True
+    mock_put.assert_awaited_once()
+    kwargs = mock_put.call_args.kwargs
+    assert kwargs["direct_writes"] == [
+        {
+            "memory_type": "episodic",
+            "payload": {
+                "event_type": "e",
+                "summary": "s",
+                "details": "d",
+                "event_actor": "system",
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_add_memory_direct_writes_none_passes_none_to_put_messages():
     """When request.direct_writes is None, put_messages is called with direct_writes=None."""
     from mirix.server.rest_api import AddMemoryRequest, add_memory
