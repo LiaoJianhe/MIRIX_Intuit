@@ -63,7 +63,7 @@ async def test_add_memory_threads_direct_writes_to_put_messages():
     req = AddMemoryRequest(
         meta_agent_id="agent-1",
         user_id="user-1",
-        messages=[{"role": "user", "content": "hello"}],
+        messages=[],  # mutually exclusive with direct_writes — must be empty
         filter_tags={"k": "v"},
         external_id="ext-1",
         source_type="engagement",
@@ -236,3 +236,100 @@ async def test_direct_write_semantic_payload_validated():
         },
     )
     assert dw.payload["items"][0]["name"] == "quarterly revenue target"
+
+
+@pytest.mark.asyncio
+async def test_direct_writes_rejects_non_empty_messages():
+    """direct_writes + non-empty messages → ValidationError."""
+    from pydantic import ValidationError
+
+    from mirix.server.rest_api import AddMemoryRequest, DirectWriteInput
+
+    with pytest.raises(ValidationError, match="mutually exclusive with messages"):
+        AddMemoryRequest(
+            meta_agent_id="agent-1",
+            messages=[{"role": "user", "content": "hi"}],
+            direct_writes=[
+                DirectWriteInput(memory_type="episodic", payload=_episodic_payload()),
+            ],
+        )
+
+
+@pytest.mark.asyncio
+async def test_direct_writes_rejects_summary():
+    """direct_writes + summary → ValidationError."""
+    from pydantic import ValidationError
+
+    from mirix.server.rest_api import AddMemoryRequest, DirectWriteInput
+
+    with pytest.raises(ValidationError, match="mutually exclusive with summary"):
+        AddMemoryRequest(
+            meta_agent_id="agent-1",
+            messages=[],
+            summary="a client-provided summary",
+            direct_writes=[
+                DirectWriteInput(memory_type="episodic", payload=_episodic_payload()),
+            ],
+        )
+
+
+@pytest.mark.asyncio
+async def test_direct_writes_rejects_summarize_true():
+    """direct_writes + summarize=True → ValidationError."""
+    from pydantic import ValidationError
+
+    from mirix.server.rest_api import AddMemoryRequest, DirectWriteInput
+
+    with pytest.raises(ValidationError, match="mutually exclusive with summarize=True"):
+        AddMemoryRequest(
+            meta_agent_id="agent-1",
+            messages=[],
+            summarize=True,
+            direct_writes=[
+                DirectWriteInput(memory_type="episodic", payload=_episodic_payload()),
+            ],
+        )
+
+
+@pytest.mark.asyncio
+async def test_direct_writes_with_empty_messages_summarize_false_no_summary_is_allowed():
+    """Positive case: the mutually-exclusive validator does not reject a
+    well-formed direct-write request (messages=[], summary=None, summarize=False).
+    """
+    from mirix.server.rest_api import AddMemoryRequest, DirectWriteInput
+
+    req = AddMemoryRequest(
+        meta_agent_id="agent-1",
+        messages=[],
+        summarize=False,  # explicit default; equivalent to leaving it off
+        direct_writes=[
+            DirectWriteInput(memory_type="episodic", payload=_episodic_payload()),
+        ],
+    )
+    assert req.summary is None
+    assert req.summarize is False
+    assert len(req.direct_writes) == 1
+
+
+@pytest.mark.asyncio
+async def test_derived_path_still_allows_messages_summary_summarize():
+    """Regression: when direct_writes is None, the derived path's existing
+    combinations (messages + summary, messages + summarize) keep working.
+    """
+    from mirix.server.rest_api import AddMemoryRequest
+
+    # messages + summarize=True (classic opt-in summary path)
+    req1 = AddMemoryRequest(
+        meta_agent_id="agent-1",
+        messages=[{"role": "user", "content": "hi"}],
+        summarize=True,
+    )
+    assert req1.summarize is True
+
+    # messages + client-provided summary
+    req2 = AddMemoryRequest(
+        meta_agent_id="agent-1",
+        messages=[{"role": "user", "content": "hi"}],
+        summary="client wrote this",
+    )
+    assert req2.summary == "client wrote this"

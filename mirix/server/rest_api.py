@@ -15,7 +15,7 @@ import httpx
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from mirix.helpers.message_helpers import prepare_input_message_create
 from mirix.llm_api.llm_client import LLMClient
@@ -2024,6 +2024,38 @@ class AddMemoryRequest(BaseModel):
     direct_writes: Optional[List[DirectWriteInput]] = (
         None  # When set, meta-agent skips LLM dispatch and writes memories directly
     )
+
+    @model_validator(mode="after")
+    def _validate_direct_writes_exclusivity(self):
+        """When direct_writes is set, messages / summary / summarize must be unset.
+
+        The direct-write path authors the memory rows itself (payload carries
+        per-item summary + details), so supplying conversation turns or a
+        source-level summary alongside is a confused intent. Fail fast at the
+        HTTP boundary instead of silently ignoring them.
+        """
+        if not self.direct_writes:
+            return self
+
+        if self.messages:
+            raise ValueError(
+                "direct_writes is mutually exclusive with messages. "
+                "Direct writes carry per-item summary + details; conversation "
+                "turns in `messages` would never be processed by the worker."
+            )
+        if self.summary is not None:
+            raise ValueError(
+                "direct_writes is mutually exclusive with summary. "
+                "Each direct-write item provides its own summary; no source-level "
+                "summary should be supplied."
+            )
+        if self.summarize:
+            raise ValueError(
+                "direct_writes is mutually exclusive with summarize=True. "
+                "Direct writes already carry summary content; LLM summary generation "
+                "would be redundant."
+            )
+        return self
 
 
 @router.post("/memory/add")
