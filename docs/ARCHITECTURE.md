@@ -35,16 +35,40 @@ Agent  Agent   Agent    Agent  Agent    Agent
 
 ## Data Flow
 
-### Write path (add memories)
+### Write path — derived (LLM-driven)
 ```
 Client → POST /memory/add
-       → AsyncServer.add()
+       → put_messages() → Kafka QueueMessage
+       → Worker consumer → AsyncServer._step()
        → MetaAgent.step()
+       → _persist_memory_source() writes memory_sources row
        → Agent chaining loop (see Agent Execution below)
        → Sub-agents extract typed memories via tools
+       → Memory tools write memory rows + memory_citations via _write_citation()
        → Managers (mirix/services/) persist via ORM
+       → mark_processing_complete()
        → PostgreSQL
 ```
+
+### Write path — direct (caller-authored, no LLM)
+```
+Client → POST /memory/add with direct_writes=[{memory_type, payload}]
+       → put_messages() → Kafka QueueMessage.direct_writes
+       → Worker consumer → AsyncServer._step()
+       → MetaAgent.step()
+       → _persist_memory_source() writes memory_sources row
+       → Direct-write branch (skips LLM dispatch)
+       → _apply_direct_write() calls the registered handler
+           (episodic_memory_insert, semantic_memory_insert, …)
+       → Handler writes memory row + memory_citations via _write_citation()
+       → mark_processing_complete()
+       → PostgreSQL
+```
+
+Direct writes are mutually exclusive with `messages` / `summary` / `summarize`
+(AddMemoryRequest validator rejects the combination at HTTP time). `summarize`
+is specifically no-op on direct writes because each item already carries
+`summary` + `details`.
 
 ### Read path (retrieve memories)
 ```
@@ -54,7 +78,15 @@ Client → POST /memory/retrieve/conversation
            - BM25 full-text search (pg_bm25)
            - Vector similarity search (pgvector)
            - Fuzzy match (rapidfuzz)
-       → Results ranked and returned
+       → Results ranked and returned (optionally with citations)
+```
+
+### Read path — provenance (progressive disclosure)
+```
+Client → search(..., include_citations=true)
+       → results[].citations[].memory_source_id
+       → GET /memory-sources/{id}          (source metadata)
+       → GET /memory-sources/{id}/messages (optional raw turns)
 ```
 
 ## Layer Responsibilities
@@ -78,6 +110,21 @@ Client → POST /memory/retrieve/conversation
 | Procedural | `mirix/orm/procedural_memory.py` | `mirix/services/procedural_memory_manager.py` | `procedural_memory_agent` | How-to procedures |
 | Resource | `mirix/orm/resource_memory.py` | `mirix/services/resource_memory_manager.py` | `resource_memory_agent` | Files, links, assets |
 | Knowledge Vault | `mirix/orm/knowledge_vault.py` | `mirix/services/knowledge_vault_manager.py` | `knowledge_vault_memory_agent` | Sensitive/private facts |
+
+### Provenance sidecar tables
+
+Every memory write (derived or direct) lands a row in `memory_sources`
+(client-authored metadata + `external_id` dedup key), and each memory row
+gets a row in `memory_citations` tying it to its source. `source_messages`
+captures the raw conversation turns for the derived path. These tables are
+append-only and survive the underlying memory rows, giving a durable audit
+trail for every memory claim.
+
+| Table | ORM | Manager | Purpose |
+|-------|-----|---------|---------|
+| memory_sources | `mirix/orm/memory_source.py` | `mirix/services/memory_source_manager.py` | One row per save / direct-write, with `external_id`, `source_type`, `source_system`, `source_metadata` |
+| memory_citations | `mirix/orm/memory_citation.py` | `mirix/services/memory_citation_manager.py` | Links (`memory_type`, `memory_id`) → `memory_source_id` |
+| source_messages | `mirix/orm/source_message.py` | `mirix/services/source_message_manager.py` | Raw conversation turns for the derived path |
 
 ## Agent Types
 
@@ -180,6 +227,21 @@ When `max_chaining_steps` is reached, agents are directed to call their terminal
 | PATCH | `/memory/resource/{memory_id}` |
 | DELETE | `/memory/resource/{memory_id}` |
 | DELETE | `/memory/knowledge_vault/{memory_id}` |
+
+`POST /memory/add` accepts source fields (`external_id`, `external_thread_id`,
+`source_type`, `source_system`, `source_metadata`, `summarize`, `summary`) and
+the optional `direct_writes: List[{memory_type, payload}]` for caller-authored
+memory writes that bypass LLM dispatch. Response returns `memory_source_id`
+(async — the worker processes the write after the 202 response).
+
+### Memory Sources
+| Method | Path |
+|--------|------|
+| GET | `/memory-sources/{source_id}` |
+| GET | `/memory-sources/{source_id}/messages` |
+
+Retrieval endpoints for provenance. Filtered by `filter_tags->>'scope'` in
+the caller's `read_scopes`.
 
 ### Tools
 | Method | Path |
