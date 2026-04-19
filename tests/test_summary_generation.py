@@ -111,6 +111,7 @@ def _setup_agent(memory_source_id, summarize=False, source_summary=None):
     agent.source_system = None
     agent.source_metadata = None
     agent.source_messages = None
+    agent.direct_writes = None
     agent.filter_tags = None
     agent.block_filter_tags = None
     agent.use_cache = True

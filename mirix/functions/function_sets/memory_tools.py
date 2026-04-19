@@ -950,7 +950,7 @@ async def trigger_memory_update(self: "Agent", user_message: object, memory_type
             if occurred_at is not None:
                 memory_agent.occurred_at = occurred_at
 
-            # Propagate memory source fields for citation-level dedup (S5)
+            # Propagate memory source fields for citation-level dedup
             memory_source_id = getattr(self, "memory_source_id", None)
             if memory_source_id is not None:
                 memory_agent.memory_source_id = memory_source_id
@@ -1085,3 +1085,5 @@ async def finish_memory_update(self: "Agent") -> str:
         str: Empty string (no response content).
     """
     return ""
+
+

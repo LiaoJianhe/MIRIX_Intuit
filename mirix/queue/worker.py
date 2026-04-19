@@ -297,6 +297,19 @@ class QueueWorker:
             if hasattr(message, "source_messages") and message.source_messages:
                 source_messages = [self._convert_proto_source_message_to_dict(msg) for msg in message.source_messages]
 
+            # Extract direct_writes — each entry tells the meta-agent to call
+            # the registered handler for memory_type instead of dispatching
+            # sub-agents via the LLM. Payloads are opaque JSON blobs here;
+            # the handler's signature validates their shape at call time.
+            direct_writes = None
+            if hasattr(message, "direct_writes") and message.direct_writes:
+                import json as _json
+
+                direct_writes = [
+                    {"memory_type": w.memory_type, "payload": _json.loads(w.payload_json)}
+                    for w in message.direct_writes
+                ]
+
             # Log the processing
             logger.info(
                 "Processing message via server: agent_id=%s, client_id=%s (from actor), user_id=%s, input_messages_count=%s, use_cache=%s, filter_tags=%s, occurred_at=%s",
@@ -330,6 +343,7 @@ class QueueWorker:
                     summary=summary,
                     summarize=summarize,
                     source_messages=source_messages,
+                    direct_writes=direct_writes,
                 )
 
             if langfuse and trace_id:

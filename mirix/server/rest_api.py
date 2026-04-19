@@ -15,7 +15,7 @@ import httpx
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from mirix.helpers.message_helpers import prepare_input_message_create
 from mirix.llm_api.llm_client import LLMClient
@@ -1943,6 +1943,62 @@ async def initialize_meta_agent(
     return meta_agent
 
 
+# Per-memory-type item-schema map. The payload shape for each memory_type is
+# {"items": List[<item_schema>]} — the same shape the corresponding
+# *_insert memory tool consumes — so the meta-agent can call the tool
+# directly without a translation shim.
+#
+# Extend alongside DIRECT_WRITE_HANDLERS when new memory types gain
+# direct-write support.
+from mirix.schemas.episodic_memory import EpisodicEventForLLM
+from mirix.schemas.knowledge_vault import KnowledgeVaultItemBase
+from mirix.schemas.procedural_memory import ProceduralMemoryItemBase
+from mirix.schemas.resource_memory import ResourceMemoryItemBase
+from mirix.schemas.semantic_memory import SemanticMemoryItemBase
+
+_DIRECT_WRITE_ITEM_SCHEMAS: Dict[str, type] = {
+    "episodic": EpisodicEventForLLM,
+    "semantic": SemanticMemoryItemBase,
+    "procedural": ProceduralMemoryItemBase,
+    "resource": ResourceMemoryItemBase,
+    "knowledge_vault": KnowledgeVaultItemBase,
+}
+
+
+class DirectWriteInput(BaseModel):
+    """One direct memory write - bypasses LLM dispatch at the meta-agent.
+
+    The meta-agent looks up a handler for memory_type in DIRECT_WRITE_HANDLERS
+    and calls it with payload unpacked as kwargs. Because payload matches the
+    target memory tool's signature exactly (``{"items": [...]}``), the handler
+    is the memory tool itself — no translation layer.
+    """
+
+    memory_type: str
+    payload: Dict[str, Any]
+
+    @field_validator("payload")
+    @classmethod
+    def _validate_payload_for_memory_type(cls, payload, info):
+        memory_type = info.data.get("memory_type")
+        item_schema = _DIRECT_WRITE_ITEM_SCHEMAS.get(memory_type)
+        if item_schema is None:
+            raise ValueError(
+                f"Unsupported memory_type for direct write: {memory_type!r}. "
+                f"Supported: {sorted(_DIRECT_WRITE_ITEM_SCHEMAS)}"
+            )
+        items = payload.get("items")
+        if not isinstance(items, list) or not items:
+            raise ValueError(
+                f"Direct write payload for memory_type={memory_type!r} must include "
+                f"a non-empty 'items' list matching the tool's item schema."
+            )
+        # Coerce each item through the item schema to surface missing / wrong-typed
+        # fields as a ValidationError at the HTTP boundary.
+        validated_items = [item_schema(**item).model_dump() for item in items]
+        return {"items": validated_items}
+
+
 class AddMemoryRequest(BaseModel):
     """Request model for adding memory."""
 
@@ -1965,6 +2021,41 @@ class AddMemoryRequest(BaseModel):
     source_type: str = "conversation"  # Freeform string label for source type
     source_system: Optional[str] = None  # Originating system label
     source_metadata: Optional[Dict[str, Any]] = None  # Client-provided lineage context bag
+    direct_writes: Optional[List[DirectWriteInput]] = (
+        None  # When set, meta-agent skips LLM dispatch and writes memories directly
+    )
+
+    @model_validator(mode="after")
+    def _validate_direct_writes_exclusivity(self):
+        """When direct_writes is set, messages / summary / summarize must be unset.
+
+        The direct-write path authors the memory rows itself (payload carries
+        per-item summary + details), so supplying conversation turns or a
+        source-level summary alongside is a confused intent. Fail fast at the
+        HTTP boundary instead of silently ignoring them.
+        """
+        if not self.direct_writes:
+            return self
+
+        if self.messages:
+            raise ValueError(
+                "direct_writes is mutually exclusive with messages. "
+                "Direct writes carry per-item summary + details; conversation "
+                "turns in `messages` would never be processed by the worker."
+            )
+        if self.summary is not None:
+            raise ValueError(
+                "direct_writes is mutually exclusive with summary. "
+                "Each direct-write item provides its own summary; no source-level "
+                "summary should be supplied."
+            )
+        if self.summarize:
+            raise ValueError(
+                "direct_writes is mutually exclusive with summarize=True. "
+                "Direct writes already carry summary content; LLM summary generation "
+                "would be redundant."
+            )
+        return self
 
 
 @router.post("/memory/add")
@@ -2029,7 +2120,7 @@ async def add_memory(
     # DB table. See the parallel comment in queue_util.py put_messages().
     original_messages = request.messages
 
-    if isinstance(message, list) and "role" in message[0].keys():
+    if isinstance(message, list) and len(message) > 0 and "role" in message[0].keys():
         # This means the input is in the format of [{"role": "user", "content": [{"type": "text", "text": "..."}]}, {"role": "assistant", "content": [{"type": "text", "text": "..."}]}]
         # OR the simpler format: [{"role": "user", "content": "Hello world"}]
 
@@ -2109,6 +2200,14 @@ async def add_memory(
         summary=request.summary,
         summarize=request.summarize,
         source_messages=original_messages,
+        direct_writes=(
+            [
+                {"memory_type": w.memory_type, "payload": w.payload}
+                for w in request.direct_writes
+            ]
+            if request.direct_writes
+            else None
+        ),
     )
 
     logger.debug("Memory queued for processing: %s", meta_agent.id)

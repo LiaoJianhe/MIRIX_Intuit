@@ -86,6 +86,11 @@ message QueueMessage {
   // These are used for source_message persistence only, not for agent processing.
   // The input_messages field (field 3) carries the packed/flattened messages for the agent.
   repeated MessageCreate source_messages = 24;
+
+  // Direct memory writes — bypasses LLM dispatch at the meta-agent.
+  // Each entry tells the meta-agent to call a registered handler for
+  // memory_type and pass payload_json-decoded fields as kwargs.
+  repeated DirectMemoryWrite direct_writes = 25;
 }
 
 // User representation
@@ -171,5 +176,11 @@ message FileContent {
 
 message CloudFileContent {
   string cloud_file_uri = 1;
+}
+
+// Direct-write request — one memory to be written without LLM dispatch.
+message DirectMemoryWrite {
+  string memory_type = 1;    // "episodic" | "semantic" | ... (handler dict is authoritative)
+  string payload_json = 2;   // JSON-encoded memory-type-specific fields
 }
 
