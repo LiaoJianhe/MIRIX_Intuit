@@ -190,6 +190,7 @@ async def test_worker_direct_writes_writes_source_and_citation_to_db(monkeypatch
     from mirix.queue.worker import QueueWorker
     from mirix.services.memory_citation_manager import MemoryCitationManager
     from mirix.services.memory_source_manager import MemorySourceManager
+    from mirix.services.source_message_manager import SourceMessageManager
 
     actor = await _get_actor()
     user = await _get_user()
@@ -257,6 +258,13 @@ async def test_worker_direct_writes_writes_source_and_citation_to_db(monkeypatch
         assert citations[0].memory_source_id == memory_source_id
         assert citations[0].memory_type == "episodic"
         assert citations[0].citation_type == "created"
+
+        # Direct writes have no conversation turns — no source_messages rows
+        src_page = await SourceMessageManager().get_messages_by_source_id(memory_source_id)
+        assert len(src_page.items) == 0, (
+            f"direct_writes must not persist placeholder or empty input as source_messages; "
+            f"got {len(src_page.items)}"
+        )
 
         # episodic_memory_manager.insert_event called exactly once with expected args
         loaded_agent.episodic_memory_manager.insert_event.assert_awaited_once()

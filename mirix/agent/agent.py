@@ -1575,27 +1575,36 @@ class Agent(BaseAgent):
         await handler(self, **payload)
 
     async def _apply_direct_writes_traced(self) -> None:
-        """Apply all self.direct_writes under a single LangFuse span so the
-        direct-write path is observable alongside the LLM-driven sub-agent
-        spans.
+        """Apply all self.direct_writes under Langfuse so the path matches the
+        meta-agent tree: ``Direct Writes`` (span) → per-type insert span → embeddings.
+
+        Uses ``as_type="span"`` (not nested ``agent``) so observations stay under
+        the queue worker's ``Meta Agent`` span. Each insert span becomes the
+        ``observation_id`` in trace context while its handler runs so embedding
+        observations parent correctly.
+
+        Restores trace context to the Direct Writes span only *after* each insert
+        observation context manager exits, so Langfuse can close child spans
+        before the parent id is switched back (avoids broken / empty subtrees).
         """
         parent_trace_context = get_trace_context()
         langfuse = get_langfuse_client()
         trace_id = parent_trace_context.get("trace_id") if parent_trace_context else None
         parent_span_id = parent_trace_context.get("observation_id") if parent_trace_context else None
 
-        async def _run_all():
+        async def _run_all_untraced():
             for write in self.direct_writes:
                 await self._apply_direct_write(write["memory_type"], write["payload"])
 
         if not (langfuse and trace_id):
-            await _run_all()
+            await _run_all_untraced()
             return
 
         from typing import cast
 
         from langfuse.types import TraceContext
 
+        from mirix.functions.direct_write_handlers import DIRECT_WRITE_HANDLERS
         from mirix.observability.context import set_trace_context
 
         trace_context_dict: dict = {"trace_id": trace_id}
@@ -1604,7 +1613,7 @@ class Agent(BaseAgent):
 
         with langfuse.start_as_current_observation(
             name="Direct Writes",
-            as_type="agent",
+            as_type="span",
             trace_context=cast(TraceContext, trace_context_dict),
             metadata={
                 "memory_source_id": self.memory_source_id,
@@ -1622,7 +1631,75 @@ class Agent(BaseAgent):
                     user_id=parent_trace_context.get("user_id"),
                     session_id=parent_trace_context.get("session_id"),
                 )
-            await _run_all()
+
+            for write in self.direct_writes:
+                memory_type = write["memory_type"]
+                payload = write["payload"]
+                handler = DIRECT_WRITE_HANDLERS.get(memory_type)
+                function_name = handler.__name__ if handler else str(memory_type)
+                insert_span_name = f"insert_{memory_type}_memory"
+
+                trace_input: dict = {
+                    "memory_type": memory_type,
+                    "function": function_name,
+                    "payload_keys": list(payload.keys()),
+                }
+                items = payload.get("items")
+                if isinstance(items, list):
+                    trace_input["items_count"] = len(items)
+
+                if not span_observation_id:
+                    await self._apply_direct_write(memory_type, payload)
+                    continue
+
+                insert_trace_dict: dict = {"trace_id": trace_id, "parent_span_id": span_observation_id}
+                try:
+                    insert_observation_cm = langfuse.start_as_current_observation(
+                        name=insert_span_name,
+                        as_type="span",
+                        trace_context=cast(TraceContext, insert_trace_dict),
+                        input=trace_input,
+                        metadata={
+                            "memory_source_id": self.memory_source_id,
+                            "memory_type": memory_type,
+                            "function": function_name,
+                        },
+                    )
+                except Exception as e:
+                    logger.debug(
+                        "Langfuse direct_write insert observation failed: %s; running handler without insert span",
+                        e,
+                    )
+                    await self._apply_direct_write(memory_type, payload)
+                    continue
+
+                try:
+                    with insert_observation_cm as insert_span:
+                        mark_observation_as_child(insert_span)
+                        insert_observation_id = getattr(insert_span, "id", None)
+                        if insert_observation_id:
+                            set_trace_context(
+                                trace_id=trace_id,
+                                observation_id=insert_observation_id,
+                                user_id=parent_trace_context.get("user_id"),
+                                session_id=parent_trace_context.get("session_id"),
+                            )
+                        await self._apply_direct_write(memory_type, payload)
+                        try:
+                            insert_span.update(
+                                output={"status": "completed"},
+                                metadata={"memory_type": memory_type},
+                            )
+                        except Exception as e:
+                            logger.debug("Langfuse direct_write insert span update failed: %s", e)
+                finally:
+                    if span_observation_id:
+                        set_trace_context(
+                            trace_id=trace_id,
+                            observation_id=span_observation_id,
+                            user_id=parent_trace_context.get("user_id"),
+                            session_id=parent_trace_context.get("session_id"),
+                        )
 
     async def _persist_memory_source(
         self,
@@ -1650,7 +1727,17 @@ class Agent(BaseAgent):
             # fields when the add_memory handler flattened turns into [USER]/[ASSISTANT]
             # markers. Falls back to input_messages for callers that pass memory_source_id
             # without source_messages (nobody does today, but the two params aren't coupled).
-            messages_for_persistence = self.source_messages if self.source_messages else input_messages
+            #
+            # Direct-write jobs: REST enqueues messages=[] which becomes a single placeholder
+            # MessageCreate with empty content — not a real conversation. Persist the
+            # memory_sources row only; source_messages stay empty (provenance is payload +
+            # citations). See memory-sources architecture (direct-write flow).
+            if self.direct_writes:
+                messages_for_persistence = []
+            elif self.source_messages:
+                messages_for_persistence = self.source_messages
+            else:
+                messages_for_persistence = input_messages
 
             # Normalize messages once — reused for hash computation and persistence
             msg_dicts = [normalize_message(msg) for msg in messages_for_persistence] if messages_for_persistence else []
@@ -1706,9 +1793,9 @@ class Agent(BaseAgent):
                 )
 
             logger.info(
-                "Persisted memory source %s with %d messages",
+                "Persisted memory source %s with %d source messages",
                 memory_source_id,
-                len(input_messages),
+                len(msg_dicts),
             )
         except Exception as e:
             logger.error("Failed to persist memory source %s: %s", memory_source_id, e)

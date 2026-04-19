@@ -94,6 +94,49 @@ async def test_apply_direct_write_unknown_memory_type_raises():
         await agent._apply_direct_write("bogus", {})
 
 
+async def test_persist_memory_source_direct_writes_does_not_bulk_insert_placeholder():
+    """direct_writes + REST placeholder MessageCreate must not create source_messages rows.
+
+    add_memory with direct_writes uses messages=[], which becomes one MessageCreate with
+    empty content; that must not be normalized and bulk_inserted as a fake turn.
+    """
+    from mirix.agent.agent import Agent
+    from mirix.schemas.enums import MessageRole
+    from mirix.schemas.message import MessageCreate
+
+    actor = await _get_actor()
+    agent = Agent.__new__(Agent)
+    agent_state = MagicMock()
+    agent_state.organization_id = TEST_ORG_ID
+    agent.agent_state = agent_state
+    agent.actor = actor
+    agent.user_id = TEST_USER_ID
+    agent.external_id = _unique("ext")
+    agent.external_thread_id = None
+    agent.source_type = "engagement"
+    agent.source_system = None
+    agent.source_metadata = None
+    agent.occurred_at = None
+    agent.source_summary = None
+    agent.source_summary_source = None
+    agent.filter_tags = {"scope": "test"}
+    agent.direct_writes = [{"memory_type": "episodic", "payload": {"items": []}}]
+    agent.source_messages = None
+
+    agent.memory_source_manager = MagicMock()
+    agent.memory_source_manager.create = AsyncMock(return_value=SimpleNamespace())
+    agent.source_message_manager = MagicMock()
+    agent.source_message_manager.bulk_insert = AsyncMock()
+
+    memory_source_id = _unique("src")
+    placeholder_input = [MessageCreate(role=MessageRole.user, content=[])]
+
+    await Agent._persist_memory_source(agent, memory_source_id, placeholder_input)
+
+    agent.source_message_manager.bulk_insert.assert_not_called()
+    agent.memory_source_manager.create.assert_awaited_once()
+
+
 # ---------------------------------------------------------------------------
 # Integration test for Agent.step direct-write branch:
 # Uses a real Agent instance built via __new__ + manually wired attrs so we
