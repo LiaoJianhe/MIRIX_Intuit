@@ -1393,7 +1393,9 @@ class Agent(BaseAgent):
             # propagates out of step() so the Kafka worker redelivers the message.
             # Source-level idempotency (external_id / batch_hash + processing_complete)
             # makes redelivery a safe full retry.
-            if self.summarize and not self.source_summary:
+            # Skipped on direct-write requests because the caller provides the
+            # per-item summary directly, so there's nothing to generate.
+            if self.summarize and not self.source_summary and not self.direct_writes:
                 summary_task = asyncio.create_task(self._generate_source_summary_traced())
 
         # Direct-write branch: bypass LLM dispatch and call registered handlers.
@@ -1401,12 +1403,6 @@ class Agent(BaseAgent):
         # deduped or already-processed sources short-circuit before this runs.
         if self.agent_state.is_type(AgentType.meta_memory_agent) and self.direct_writes:
             await self._apply_direct_writes_traced()
-            if summary_task is not None:
-                try:
-                    await summary_task
-                except Exception as e:
-                    logger.warning("Failed to generate summary for source %s: %s", self.memory_source_id, e)
-                    raise
             if self.memory_source_id:
                 await self.memory_source_manager.mark_processing_complete(self.memory_source_id)
             return MirixUsageStatistics(step_count=0)

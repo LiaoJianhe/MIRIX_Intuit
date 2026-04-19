@@ -295,3 +295,39 @@ async def test_step_direct_writes_unknown_type_raises_value_error():
         await agent.step(input_messages=[], actor=actor, user=user)
 
     agent.memory_source_manager.mark_processing_complete.assert_not_called()
+
+
+async def test_step_direct_writes_skips_source_summary_generation():
+    """Even when summarize=True, direct_writes requests must NOT dispatch the
+    source-summary generation task. Caller already provides per-item summary
+    content on each direct-write item, so the LLM-backed summary would be a
+    waste of a round trip.
+    """
+    from unittest.mock import AsyncMock
+
+    from mirix.functions import direct_write_handlers as memory_tools
+
+    actor = await _get_actor()
+    user = await _get_user()
+    memory_source_id = _unique("src")
+
+    agent = _make_meta_agent_stub(
+        memory_source_id=memory_source_id,
+        direct_writes=[{"memory_type": "episodic", "payload": {}}],
+    )
+    # Enable summary generation — the direct-write branch should still skip it.
+    agent.summarize = True
+    # Spy on the summary dispatch path so we can assert it wasn't invoked.
+    agent._generate_source_summary_traced = AsyncMock()
+
+    async def _fake_handler(ag, **kwargs):
+        pass
+
+    orig = memory_tools.DIRECT_WRITE_HANDLERS
+    memory_tools.DIRECT_WRITE_HANDLERS = {"episodic": _fake_handler}
+    try:
+        await agent.step(input_messages=[], actor=actor, user=user)
+    finally:
+        memory_tools.DIRECT_WRITE_HANDLERS = orig
+
+    agent._generate_source_summary_traced.assert_not_called()
