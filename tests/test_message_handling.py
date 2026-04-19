@@ -270,7 +270,7 @@ def build_step_test_agent(agent_state: AgentState, user: User) -> Agent:
     )
     agent.interface = SimpleNamespace(step_complete=lambda: None)
     agent.occurred_at = None
-    # Memory source fields (added by S2/S6)
+    # Memory source fields
     agent.memory_source_id = None
     agent.external_id = None
     agent.external_thread_id = None
