@@ -428,9 +428,7 @@ class TestSummaryTriggerInStep:
         # Summary must start before inner_step ends (i.e. concurrently)
         summary_start_idx = order.index("summary_start")
         inner_end_idx = order.index("inner_step_end")
-        assert summary_start_idx < inner_end_idx, (
-            f"summary did not start before sub-agents finished; order={order}"
-        )
+        assert summary_start_idx < inner_end_idx, f"summary did not start before sub-agents finished; order={order}"
         # processing_complete happens after both finish
         agent.memory_source_manager.mark_processing_complete.assert_called_once_with("src-abc123")
 
@@ -450,9 +448,12 @@ class TestSummaryTracedSpan:
         mock_langfuse.start_as_current_observation.return_value.__enter__.return_value = span
         mock_langfuse.start_as_current_observation.return_value.__exit__.return_value = False
 
-        with patch("mirix.agent.agent.get_langfuse_client", return_value=mock_langfuse), patch(
-            "mirix.agent.agent.get_trace_context",
-            return_value={"trace_id": "trace-123", "observation_id": "obs-parent"},
+        with (
+            patch("mirix.agent.agent.get_langfuse_client", return_value=mock_langfuse),
+            patch(
+                "mirix.agent.agent.get_trace_context",
+                return_value={"trace_id": "trace-123", "observation_id": "obs-parent"},
+            ),
         ):
             await agent._generate_source_summary_traced()
 
@@ -470,8 +471,9 @@ class TestSummaryTracedSpan:
         agent, _, _ = _setup_agent("src-abc123", summarize=True)
         agent._generate_source_summary = AsyncMock()
 
-        with patch("mirix.agent.agent.get_langfuse_client", return_value=None), patch(
-            "mirix.agent.agent.get_trace_context", return_value={}
+        with (
+            patch("mirix.agent.agent.get_langfuse_client", return_value=None),
+            patch("mirix.agent.agent.get_trace_context", return_value={}),
         ):
             await agent._generate_source_summary_traced()
 

@@ -199,9 +199,7 @@ def _make_meta_agent_stub(
 
     agent.memory_source_manager = MagicMock()
     if source_exists_and_complete:
-        agent.memory_source_manager.get_by_id = AsyncMock(
-            return_value=SimpleNamespace(processing_complete=True)
-        )
+        agent.memory_source_manager.get_by_id = AsyncMock(return_value=SimpleNamespace(processing_complete=True))
     else:
         agent.memory_source_manager.get_by_id = AsyncMock(return_value=None)
     agent.memory_source_manager.mark_processing_complete = AsyncMock(return_value=None)

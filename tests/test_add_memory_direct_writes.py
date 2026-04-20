@@ -87,13 +87,15 @@ async def test_add_memory_threads_direct_writes_to_put_messages():
     fake_server.agent_manager = MagicMock()
     fake_server.agent_manager.get_agent_by_id = AsyncMock(return_value=fake_meta_agent)
 
-    with patch("mirix.server.rest_api.get_server", return_value=fake_server), patch(
-        "mirix.server.rest_api.get_client_and_org",
-        new_callable=AsyncMock,
-        return_value=("client-1", "org-1"),
-    ), patch(
-        "mirix.server.rest_api.put_messages", new_callable=AsyncMock
-    ) as mock_put:
+    with (
+        patch("mirix.server.rest_api.get_server", return_value=fake_server),
+        patch(
+            "mirix.server.rest_api.get_client_and_org",
+            new_callable=AsyncMock,
+            return_value=("client-1", "org-1"),
+        ),
+        patch("mirix.server.rest_api.put_messages", new_callable=AsyncMock) as mock_put,
+    ):
         result = await add_memory(req, x_org_id="org-1", x_client_id="client-1")
 
     assert result["success"] is True
@@ -147,13 +149,15 @@ async def test_add_memory_with_empty_messages_and_direct_writes_does_not_crash()
     fake_server.agent_manager = MagicMock()
     fake_server.agent_manager.get_agent_by_id = AsyncMock(return_value=fake_meta_agent)
 
-    with patch("mirix.server.rest_api.get_server", return_value=fake_server), patch(
-        "mirix.server.rest_api.get_client_and_org",
-        new_callable=AsyncMock,
-        return_value=("client-1", "org-1"),
-    ), patch(
-        "mirix.server.rest_api.put_messages", new_callable=AsyncMock
-    ) as mock_put:
+    with (
+        patch("mirix.server.rest_api.get_server", return_value=fake_server),
+        patch(
+            "mirix.server.rest_api.get_client_and_org",
+            new_callable=AsyncMock,
+            return_value=("client-1", "org-1"),
+        ),
+        patch("mirix.server.rest_api.put_messages", new_callable=AsyncMock) as mock_put,
+    ):
         await add_memory(req, x_org_id="org-1", x_client_id="client-1")
 
     kwargs = mock_put.call_args.kwargs

@@ -1103,9 +1103,9 @@ class Agent(BaseAgent):
                     )
 
                     if function_name == "send_message" or function_name == "finish_memory_update":
-                        assert tool_call_idx == len(response_message.tool_calls) - 1, (
-                            f"{function_name} must be the last tool call"
-                        )
+                        assert (
+                            tool_call_idx == len(response_message.tool_calls) - 1
+                        ), f"{function_name} must be the last tool call"
 
                     if tool_call_idx == len(response_message.tool_calls) - 1:
                         if function_name == "send_message":
@@ -2744,9 +2744,9 @@ These keywords have been used to retrieve relevant memories from the database.
         -> agent.step(messages=[Message(role='user', text=...)])
         """
         # Wrap with metadata, dumps to JSON
-        assert user_message_str and isinstance(user_message_str, str), (
-            f"user_message_str should be a non-empty string, got {type(user_message_str)}"
-        )
+        assert user_message_str and isinstance(
+            user_message_str, str
+        ), f"user_message_str should be a non-empty string, got {type(user_message_str)}"
         user_message_json_str = package_user_message(user_message_str)
 
         # Validate JSON via save/load

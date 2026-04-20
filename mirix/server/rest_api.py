@@ -2201,10 +2201,7 @@ async def add_memory(
         summarize=request.summarize,
         source_messages=original_messages,
         direct_writes=(
-            [
-                {"memory_type": w.memory_type, "payload": w.payload}
-                for w in request.direct_writes
-            ]
+            [{"memory_type": w.memory_type, "payload": w.payload} for w in request.direct_writes]
             if request.direct_writes
             else None
         ),

@@ -82,9 +82,7 @@ async def test_worker_extracts_direct_writes_from_queue_message():
     msg.user_id = "user-1"
     write = msg.direct_writes.add()
     write.memory_type = "episodic"
-    write.payload_json = json.dumps(
-        {"event_type": "e", "summary": "s", "details": "d", "event_actor": "system"}
-    )
+    write.payload_json = json.dumps({"event_type": "e", "summary": "s", "details": "d", "event_actor": "system"})
 
     fake_actor = MagicMock()
     fake_actor.id = "client-1"

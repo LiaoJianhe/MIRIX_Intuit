@@ -39,9 +39,7 @@ async def _provision_org_client_and_user():
     from mirix.schemas.user import User as PydanticUser
     from mirix.services.user_manager import UserManager
 
-    await _create_client_and_key(
-        TEST_CLIENT_ID, TEST_ORG_ID, org_name="Direct Writes Worker Org"
-    )
+    await _create_client_and_key(TEST_CLIENT_ID, TEST_ORG_ID, org_name="Direct Writes Worker Org")
 
     user_mgr = UserManager()
     try:
@@ -126,12 +124,8 @@ def _build_loaded_agent(actor, user, ep_memory_id: str):
     agent.message_manager = MessageManager()
     # Stubbed episodic manager — skip embeddings/agent_state setup
     agent.episodic_memory_manager = MagicMock()
-    agent.episodic_memory_manager.insert_event = AsyncMock(
-        return_value=SimpleNamespace(id=ep_memory_id)
-    )
-    agent.episodic_memory_manager.create_episodic_memory = AsyncMock(
-        return_value=SimpleNamespace(id=ep_memory_id)
-    )
+    agent.episodic_memory_manager.insert_event = AsyncMock(return_value=SimpleNamespace(id=ep_memory_id))
+    agent.episodic_memory_manager.create_episodic_memory = AsyncMock(return_value=SimpleNamespace(id=ep_memory_id))
 
     # Interface + streaming defaults so server._step doesn't explode on step_yield.
     agent.interface = MagicMock()
@@ -240,14 +234,13 @@ async def test_worker_direct_writes_writes_source_and_citation_to_db(monkeypatch
         page = await source_mgr.list_sources(client_id=TEST_CLIENT_ID, limit=100)
         matching = [s for s in page.items if s.external_id == external_id]
         assert len(matching) == 1, (
-            f"Expected exactly 1 memory_source for external_id={external_id}, "
-            f"got {len(matching)}: {matching}"
+            f"Expected exactly 1 memory_source for external_id={external_id}, " f"got {len(matching)}: {matching}"
         )
         created_source = matching[0]
         assert created_source.id == memory_source_id
-        assert created_source.processing_complete is True, (
-            "mark_processing_complete should have run after direct-write branch"
-        )
+        assert (
+            created_source.processing_complete is True
+        ), "mark_processing_complete should have run after direct-write branch"
 
         # 1 citation row for the stubbed episodic memory id
         citations = await MemoryCitationManager().get_citations_for_memory(
@@ -358,9 +351,7 @@ async def test_worker_direct_writes_is_idempotent_on_duplicate_external_id(monke
         source_mgr = MemorySourceManager()
         page = await source_mgr.list_sources(client_id=TEST_CLIENT_ID, limit=100)
         matching = [s for s in page.items if s.external_id == external_id]
-        assert len(matching) == 1, (
-            f"Expected exactly 1 memory_source after duplicate submission, got {len(matching)}"
-        )
+        assert len(matching) == 1, f"Expected exactly 1 memory_source after duplicate submission, got {len(matching)}"
 
         # Second agent's handler must NOT have run (deduped before direct-write branch)
         agent_2.episodic_memory_manager.insert_event.assert_not_called()
