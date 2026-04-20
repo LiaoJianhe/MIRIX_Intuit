@@ -40,6 +40,7 @@ from mirix.log import get_logger
 from mirix.memory import summarize_messages
 from mirix.observability.context import get_trace_context, mark_observation_as_child
 from mirix.observability.langfuse_client import get_langfuse_client
+from mirix.observability.skip_spans import emit_idempotency_skip_span
 from mirix.schemas.agent import AgentState, AgentStepResponse
 from mirix.schemas.block import BlockUpdate
 from mirix.schemas.client import Client
@@ -1102,9 +1103,9 @@ class Agent(BaseAgent):
                     )
 
                     if function_name == "send_message" or function_name == "finish_memory_update":
-                        assert (
-                            tool_call_idx == len(response_message.tool_calls) - 1
-                        ), f"{function_name} must be the last tool call"
+                        assert tool_call_idx == len(response_message.tool_calls) - 1, (
+                            f"{function_name} must be the last tool call"
+                        )
 
                     if tool_call_idx == len(response_message.tool_calls) - 1:
                         if function_name == "send_message":
@@ -1219,7 +1220,7 @@ class Agent(BaseAgent):
             # Validate that we have content - LLM returned neither tool_calls nor content
             if not response_message.content:
                 raise ValueError(
-                    f"LLM returned empty response, " f"no tool_calls and no content. Response: {response_message}"
+                    f"LLM returned empty response, no tool_calls and no content. Response: {response_message}"
                 )
             messages.append(
                 Message.dict_to_message(
@@ -1273,7 +1274,7 @@ class Agent(BaseAgent):
         # chat_agent is deprecated - raise immediately
         if self.agent_state.is_type(AgentType.chat_agent):
             raise NotImplementedError(
-                "AgentType.chat_agent is deprecated and no longer supported. " "Use a memory agent type instead."
+                "AgentType.chat_agent is deprecated and no longer supported. Use a memory agent type instead."
             )
 
         if actor is None or user is None:
@@ -1331,7 +1332,7 @@ class Agent(BaseAgent):
                     )
                 )
             else:
-                raise ValueError("input_messages items must be Message or MessageCreate, " f"got {type(m)}")
+                raise ValueError(f"input_messages items must be Message or MessageCreate, got {type(m)}")
 
         # Read retained history from the parent scope (for sub-agents) or from this
         # agent's scope (for top-level agents/meta). This keeps sub-agent inputs as a
@@ -1380,12 +1381,22 @@ class Agent(BaseAgent):
             # Skip all agent processing to avoid duplicate memories.
             if self._source_deduped:
                 logger.info("Source %s deduped, skipping agent processing", self.memory_source_id)
+                emit_idempotency_skip_span(
+                    name="Idempotency Skip: source deduped",
+                    reason="source-deduped",
+                    metadata={"memory_source_id": self.memory_source_id},
+                )
                 return MirixUsageStatistics(step_count=0)
 
             # Skip processing if this source was already fully processed (redelivery case).
             source = await self.memory_source_manager.get_by_id(self.memory_source_id)
             if source and source.processing_complete:
                 logger.info("Source %s already processed, skipping", self.memory_source_id)
+                emit_idempotency_skip_span(
+                    name="Idempotency Skip: processing complete",
+                    reason="processing-complete",
+                    metadata={"memory_source_id": self.memory_source_id},
+                )
                 return MirixUsageStatistics(step_count=0)
 
             # Dispatch summary generation in parallel with the memory sub-agents.
@@ -2678,9 +2689,7 @@ These keywords have been used to retrieve relevant memories from the database.
                     try:
                         summary_msg = await self.summarize_and_replace_retained_messages(retained, existing_file_uris)
                     except Exception as summarize_err:
-                        printv(
-                            f"[Mirix.Agent.{self.agent_state.name}] ERROR: " f"Summarization failed: {summarize_err}"
-                        )
+                        printv(f"[Mirix.Agent.{self.agent_state.name}] ERROR: Summarization failed: {summarize_err}")
                         raise ContextWindowExceededError(
                             f"Context window exceeded for agent id={self.agent_state.id} "
                             f"and summarization recovery failed: {summarize_err}",
@@ -2735,9 +2744,9 @@ These keywords have been used to retrieve relevant memories from the database.
         -> agent.step(messages=[Message(role='user', text=...)])
         """
         # Wrap with metadata, dumps to JSON
-        assert user_message_str and isinstance(
-            user_message_str, str
-        ), f"user_message_str should be a non-empty string, got {type(user_message_str)}"
+        assert user_message_str and isinstance(user_message_str, str), (
+            f"user_message_str should be a non-empty string, got {type(user_message_str)}"
+        )
         user_message_json_str = package_user_message(user_message_str)
 
         # Validate JSON via save/load
