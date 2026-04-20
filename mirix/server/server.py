@@ -179,7 +179,7 @@ def db_error_handler():
         yield
     except Exception as e:
         # Handle other SQLAlchemy errors
-        logger.error(e)
+        logger.error("Database error: %r", e, exc_info=True)
         print_sqlite_schema_error()
         # raise ValueError(f"SQLite DB error: {str(e)}")
         exit(1)
@@ -1545,10 +1545,7 @@ class AsyncServer(Server):
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(e)
-            import traceback
-
-            traceback.print_exc()
+            logger.error("send_messages failed: %r", e, exc_info=True)
             raise HTTPException(status_code=500, detail=f"{e}")
 
 
