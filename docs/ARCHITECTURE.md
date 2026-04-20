@@ -89,6 +89,20 @@ Client → search(..., include_citations=true)
        → GET /memory-sources/{id}/messages (optional raw turns)
 ```
 
+## Idempotency
+
+Three layers, applied in order during the save/process pipeline:
+
+1. **L1 — Source-level dedup.** `(client_id, user_id, external_id)` (or the auto-derived `batch_hash` when `external_id` is absent) is unique on `memory_sources`. A replay of the same batch returns the existing `memory_source_id` without re-ingesting.
+2. **L2 — Processing short-circuit.** Once `memory_source.processing_complete = True`, the worker skips re-processing for that source entirely (`agent._step()` consults the flag before dispatching sub-agents).
+3. **L3 — Citation-level dedup.** Inside `_write_citation`, duplicate `(memory_id, memory_source_id)` pairs are dropped so the same memory is not cited twice by the same source.
+
+Every skip path emits a LangFuse span via `mirix/observability/skip_spans.py::emit_idempotency_skip_span` so dashboards see every ingestion decision (L1/L2/L3).
+
+## Temporal Guard
+
+For derived memory writes, MIRIX computes `MAX(occurred_at)` across existing citations for the `(user, memory_type, external_thread_id)` tuple inside `_should_update_memory`. If the incoming `occurred_at` is older than the current max, the write is dropped (not applied). This prevents an out-of-order or backfilled save from overwriting newer current-state memory. It applies to every sub-agent write; episodic is unaffected because episodic writes append, they do not overwrite.
+
 ## Layer Responsibilities
 
 | Layer | Location | Responsibility |
@@ -139,8 +153,10 @@ trail for every memory claim.
 | `meta_memory_agent` | `AgentType.meta_memory_agent` | Coordinates memory sub-agents |
 | `reflexion_agent` | `AgentType.reflexion_agent` | Self-reflection and learning |
 | `background_agent` | `AgentType.background_agent` | Background processing tasks |
-| `chat_agent` | `AgentType.chat_agent` | User-facing conversation |
+| `chat_agent` | `AgentType.chat_agent` | User-facing conversation (OSS MIRIX; **not initialized under ECMS**) |
 | `coder_agent` | `AgentType.coder_agent` | Specialized coding tasks |
+
+In addition to the registered agents, the meta-agent dispatches a **Summary Agent task** via `asyncio.create_task` in parallel with the sub-agents (traced as a LangFuse "Summary Agent" child span; see `_generate_source_summary_traced` in `mirix/agent/agent.py`). It populates `memory_source.summary` when `summarize=True` is passed on the save request and no client-provided `summary` is set. It is not a registered `AgentType` — it is a task, not an agent.
 
 ## Agent Execution
 
@@ -149,11 +165,13 @@ trail for every memory claim.
 async def step(
     self,
     input_messages,
-    chaining: bool = True,       # enabled by default
+    chaining: bool = True,       # enabled by default in OSS MIRIX
     max_chaining_steps: Optional[int] = None,
     ...
 ) -> MirixUsageStatistics
 ```
+
+> **ECMS deployment note:** ECMS configures MIRIX with `CHAINING_FOR_MEMORY_UPDATE=false` and `CHAINING_FOR_META_AGENT=false` so each agent runs exactly once per save. The chaining loop described below applies only to standalone MIRIX.
 
 ### Chaining loop
 Agents loop through `inner_step()` calls until a terminal tool is called:
