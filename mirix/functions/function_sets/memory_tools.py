@@ -15,6 +15,7 @@ from mirix.observability.context import (
     set_trace_context,
 )
 from mirix.observability.langfuse_client import get_langfuse_client
+from mirix.observability.skip_spans import emit_idempotency_skip_span
 from mirix.schemas.episodic_memory import EpisodicEventForLLM
 from mirix.schemas.knowledge_vault import KnowledgeVaultItemBase
 from mirix.schemas.mirix_message_content import TextContent
@@ -106,14 +107,23 @@ async def _should_update_memory(agent: "Agent", memory_type: str, memory_id: str
             occurred_at,
             max_occurred_at,
         )
+        emit_idempotency_skip_span(
+            name=f"Idempotency Skip: temporal guard ({memory_type})",
+            reason="temporal-guard",
+            metadata={
+                "memory_type": memory_type,
+                "memory_id": memory_id,
+                "memory_source_id": memory_source_id,
+                "source_occurred_at": str(occurred_at),
+                "existing_max_occurred_at": str(max_occurred_at),
+            },
+        )
         return False
 
     return True
 
 
-async def core_memory_append(
-    self: "Agent", blocks_in_memory: "Memory", label: str, content: str
-) -> Optional[str]:  # type: ignore
+async def core_memory_append(self: "Agent", blocks_in_memory: "Memory", label: str, content: str) -> Optional[str]:  # type: ignore
     """
     Append to the contents of core memory. The content will be appended to the end of the block with the given label. If you hit the limit, you can use `core_memory_rewrite` to rewrite the entire block to shorten the content. Note that "Line n:" is only for your visualization of the memory, and you should not include it in the content.
 
@@ -161,9 +171,7 @@ async def core_memory_append(
     return None
 
 
-async def core_memory_rewrite(
-    self: "Agent", blocks_in_memory: "Memory", label: str, content: str
-) -> Optional[str]:  # type: ignore
+async def core_memory_rewrite(self: "Agent", blocks_in_memory: "Memory", label: str, content: str) -> Optional[str]:  # type: ignore
     """
     Rewrite the entire content of block <label> in core memory. The entire content in that block will be replaced with the new content. If the old content is full, and you have to rewrite the entire content, make sure to be extremely concise and make it shorter than 20% of the limit.
 
@@ -1085,5 +1093,3 @@ async def finish_memory_update(self: "Agent") -> str:
         str: Empty string (no response content).
     """
     return ""
-
-
