@@ -272,6 +272,7 @@ def build_step_test_agent(agent_state: AgentState, user: User) -> Agent:
     agent.occurred_at = None
     # Memory source fields
     agent.memory_source_id = None
+    agent.direct_writes = None
     agent.external_id = None
     agent.external_thread_id = None
     agent.source_type = None

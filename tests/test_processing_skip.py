@@ -72,6 +72,7 @@ def _setup_agent(memory_source_id, source_processing_complete=None):
     agent.actor = actor
     agent.user_id = user.id
     agent.memory_source_id = memory_source_id
+    agent.direct_writes = None
     agent.memory_source_manager = MagicMock()
     if source_processing_complete is not None:
         agent.memory_source_manager.get_by_id = AsyncMock(
