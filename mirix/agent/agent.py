@@ -5,7 +5,7 @@ import logging
 import traceback
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import httpx
 import numpy as np
@@ -40,6 +40,7 @@ from mirix.log import get_logger
 from mirix.memory import summarize_messages
 from mirix.observability.context import get_trace_context, mark_observation_as_child
 from mirix.observability.langfuse_client import get_langfuse_client
+from mirix.observability.skip_spans import emit_idempotency_skip_span
 from mirix.schemas.agent import AgentState, AgentStepResponse
 from mirix.schemas.block import BlockUpdate
 from mirix.schemas.client import Client
@@ -60,10 +61,12 @@ from mirix.services.block_manager import BlockManager
 from mirix.services.episodic_memory_manager import EpisodicMemoryManager
 from mirix.services.helpers.agent_manager_helper import check_supports_structured_output
 from mirix.services.knowledge_vault_manager import KnowledgeVaultManager
+from mirix.services.memory_source_manager import MemorySourceManager
 from mirix.services.message_manager import MessageManager
 from mirix.services.procedural_memory_manager import ProceduralMemoryManager
 from mirix.services.resource_memory_manager import ResourceMemoryManager
 from mirix.services.semantic_memory_manager import SemanticMemoryManager
+from mirix.services.source_message_manager import SourceMessageManager
 from mirix.services.step_manager import StepManager
 from mirix.services.tool_execution_sandbox import ToolExecutionSandbox
 from mirix.services.user_manager import UserManager
@@ -183,6 +186,25 @@ class Agent(BaseAgent):
         self.user = user  # Store user for end-user tracking
         self.occurred_at = None  # Optional timestamp for episodic memory, set by server if provided
 
+        # Memory source fields — set by _step() when memory_source_id is present
+        self.memory_source_id = None
+        self.direct_writes: Optional[List[Dict[str, Any]]] = None
+        self.external_id = None
+        self.external_thread_id = None
+        self.source_type = None
+        self.source_system = None
+        self.source_metadata = None
+        self.source_summary = None
+        self.source_summary_source = None
+        self.summarize = False
+        # Original per-turn messages (as plain dicts) for source_message persistence.
+        # These exist separately from the packed input_messages because the add_memory
+        # handler flattens all turns into a single MessageCreate with [USER]/[ASSISTANT]
+        # markers for agent processing, which loses per-message identity. source_messages
+        # preserves the original role, external_message_id, and occurred_at per turn.
+        # See the comment in queue_util.py put_messages() for the full explanation.
+        self.source_messages = None
+
         # Derive block scopes from filter_tags for block_manager.get_blocks() calls.
         # filter_tags["scope"] is the client's write_scope, set by the server when queuing work.
         scope = self.filter_tags.get("scope") if self.filter_tags else None
@@ -230,6 +252,10 @@ class Agent(BaseAgent):
         # state managers
         self.block_manager = BlockManager()
         self.agent_manager = AgentManager()
+
+        # Memory source managers
+        self.memory_source_manager = MemorySourceManager()
+        self.source_message_manager = SourceMessageManager()
 
         # Interface must implement:
         # - internal_monologue
@@ -1194,7 +1220,7 @@ class Agent(BaseAgent):
             # Validate that we have content - LLM returned neither tool_calls nor content
             if not response_message.content:
                 raise ValueError(
-                    f"LLM returned empty response, " f"no tool_calls and no content. Response: {response_message}"
+                    f"LLM returned empty response, no tool_calls and no content. Response: {response_message}"
                 )
             messages.append(
                 Message.dict_to_message(
@@ -1248,7 +1274,7 @@ class Agent(BaseAgent):
         # chat_agent is deprecated - raise immediately
         if self.agent_state.is_type(AgentType.chat_agent):
             raise NotImplementedError(
-                "AgentType.chat_agent is deprecated and no longer supported. " "Use a memory agent type instead."
+                "AgentType.chat_agent is deprecated and no longer supported. Use a memory agent type instead."
             )
 
         if actor is None or user is None:
@@ -1306,7 +1332,7 @@ class Agent(BaseAgent):
                     )
                 )
             else:
-                raise ValueError("input_messages items must be Message or MessageCreate, " f"got {type(m)}")
+                raise ValueError(f"input_messages items must be Message or MessageCreate, got {type(m)}")
 
         # Read retained history from the parent scope (for sub-agents) or from this
         # agent's scope (for top-level agents/meta). This keeps sub-agent inputs as a
@@ -1337,6 +1363,60 @@ class Agent(BaseAgent):
         llm_client = LLMClient.create(
             llm_config=self.agent_state.llm_config,
         )
+
+        # Persist memory source and messages before sub-agent dispatch
+        # If memory_source_id is set on this agent instance, persist the source
+        # and its messages before running any memory extraction. This is gated on
+        # the meta_memory_agent type so sub-agents don't re-persist.
+        summary_task: Optional[asyncio.Task] = None
+        if self.agent_state.is_type(AgentType.meta_memory_agent) and self.memory_source_id:
+            self._source_deduped = False
+            await self._persist_memory_source(
+                memory_source_id=self.memory_source_id,
+                input_messages=raw_input_messages,
+            )
+
+            # Source was deduped at DB level (external_id or batch_hash conflict).
+            # A prior submission already created the source and was processed.
+            # Skip all agent processing to avoid duplicate memories.
+            if self._source_deduped:
+                logger.info("Source %s deduped, skipping agent processing", self.memory_source_id)
+                emit_idempotency_skip_span(
+                    name="Idempotency Skip: source deduped",
+                    reason="source-deduped",
+                    metadata={"memory_source_id": self.memory_source_id},
+                )
+                return MirixUsageStatistics(step_count=0)
+
+            # Skip processing if this source was already fully processed (redelivery case).
+            source = await self.memory_source_manager.get_by_id(self.memory_source_id)
+            if source and source.processing_complete:
+                logger.info("Source %s already processed, skipping", self.memory_source_id)
+                emit_idempotency_skip_span(
+                    name="Idempotency Skip: processing complete",
+                    reason="processing-complete",
+                    metadata={"memory_source_id": self.memory_source_id},
+                )
+                return MirixUsageStatistics(step_count=0)
+
+            # Dispatch summary generation in parallel with the memory sub-agents.
+            # Awaited before mark_processing_complete; on failure the exception
+            # propagates out of step() so the Kafka worker redelivers the message.
+            # Source-level idempotency (external_id / batch_hash + processing_complete)
+            # makes redelivery a safe full retry.
+            # Skipped on direct-write requests because the caller provides the
+            # per-item summary directly, so there's nothing to generate.
+            if self.summarize and not self.source_summary and not self.direct_writes:
+                summary_task = asyncio.create_task(self._generate_source_summary_traced())
+
+        # Direct-write branch: bypass LLM dispatch and call registered handlers.
+        # Placed AFTER _persist_memory_source + dedup/processing_complete checks so
+        # deduped or already-processed sources short-circuit before this runs.
+        if self.agent_state.is_type(AgentType.meta_memory_agent) and self.direct_writes:
+            await self._apply_direct_writes_traced()
+            if self.memory_source_id:
+                await self.memory_source_manager.mark_processing_complete(self.memory_source_id)
+            return MirixUsageStatistics(step_count=0)
 
         if self.agent_state.is_type(AgentType.meta_memory_agent):
             # Extract topics from retained context + current input messages.
@@ -1472,7 +1552,385 @@ class Agent(BaseAgent):
                 keep_newest_n=retention,
             )
 
+        # Await the parallel summary task (dispatched before sub-agents ran).
+        # Raises on failure so the worker redelivers the message — processing_complete
+        # stays False and the retry gets a clean full reprocess.
+        if summary_task is not None:
+            try:
+                await summary_task
+            except Exception as e:
+                logger.warning("Failed to generate summary for source %s: %s", self.memory_source_id, e)
+                raise
+
+        # Mark memory source as fully processed after all agents complete
+        if self.agent_state.is_type(AgentType.meta_memory_agent) and self.memory_source_id:
+            try:
+                await self.memory_source_manager.mark_processing_complete(self.memory_source_id)
+            except Exception as e:
+                logger.warning("Failed to mark source %s complete: %s", self.memory_source_id, e)
+                raise
+
         return MirixUsageStatistics(**total_usage.model_dump(), step_count=step_count)
+
+    async def _apply_direct_write(self, memory_type: str, payload: Dict[str, Any]) -> None:
+        """Dispatch a direct write to the registered handler for memory_type.
+
+        Handlers write the memory row via the appropriate manager and call
+        the shared _write_citation helper. No LLM involvement.
+        """
+        from mirix.functions.direct_write_handlers import DIRECT_WRITE_HANDLERS
+
+        handler = DIRECT_WRITE_HANDLERS.get(memory_type)
+        if handler is None:
+            raise ValueError(f"No direct-write handler registered for memory_type: {memory_type}")
+        await handler(self, **payload)
+
+    async def _apply_direct_writes_traced(self) -> None:
+        """Apply all self.direct_writes under Langfuse so the path matches the
+        meta-agent tree: ``Direct Writes`` (span) → per-type insert span → embeddings.
+
+        Uses ``as_type="span"`` (not nested ``agent``) so observations stay under
+        the queue worker's ``Meta Agent`` span. Each insert span becomes the
+        ``observation_id`` in trace context while its handler runs so embedding
+        observations parent correctly.
+
+        Restores trace context to the Direct Writes span only *after* each insert
+        observation context manager exits, so Langfuse can close child spans
+        before the parent id is switched back (avoids broken / empty subtrees).
+        """
+        parent_trace_context = get_trace_context()
+        langfuse = get_langfuse_client()
+        trace_id = parent_trace_context.get("trace_id") if parent_trace_context else None
+        parent_span_id = parent_trace_context.get("observation_id") if parent_trace_context else None
+
+        async def _run_all_untraced():
+            for write in self.direct_writes:
+                await self._apply_direct_write(write["memory_type"], write["payload"])
+
+        if not (langfuse and trace_id):
+            await _run_all_untraced()
+            return
+
+        from typing import cast
+
+        from langfuse.types import TraceContext
+
+        from mirix.functions.direct_write_handlers import DIRECT_WRITE_HANDLERS
+        from mirix.observability.context import set_trace_context
+
+        trace_context_dict: dict = {"trace_id": trace_id}
+        if parent_span_id:
+            trace_context_dict["parent_span_id"] = parent_span_id
+
+        with langfuse.start_as_current_observation(
+            name="Direct Writes",
+            as_type="span",
+            trace_context=cast(TraceContext, trace_context_dict),
+            metadata={
+                "memory_source_id": self.memory_source_id,
+                "agent_name": self.agent_state.name,
+                "direct_write_count": len(self.direct_writes),
+                "memory_types": [w["memory_type"] for w in self.direct_writes],
+            },
+        ) as span:
+            mark_observation_as_child(span)
+            span_observation_id = getattr(span, "id", None)
+            if span_observation_id:
+                set_trace_context(
+                    trace_id=trace_id,
+                    observation_id=span_observation_id,
+                    user_id=parent_trace_context.get("user_id"),
+                    session_id=parent_trace_context.get("session_id"),
+                )
+
+            for write in self.direct_writes:
+                memory_type = write["memory_type"]
+                payload = write["payload"]
+                handler = DIRECT_WRITE_HANDLERS.get(memory_type)
+                function_name = handler.__name__ if handler else str(memory_type)
+                insert_span_name = f"insert_{memory_type}_memory"
+
+                trace_input: dict = {
+                    "memory_type": memory_type,
+                    "function": function_name,
+                    "payload_keys": list(payload.keys()),
+                }
+                items = payload.get("items")
+                if isinstance(items, list):
+                    trace_input["items_count"] = len(items)
+
+                if not span_observation_id:
+                    await self._apply_direct_write(memory_type, payload)
+                    continue
+
+                insert_trace_dict: dict = {"trace_id": trace_id, "parent_span_id": span_observation_id}
+                try:
+                    insert_observation_cm = langfuse.start_as_current_observation(
+                        name=insert_span_name,
+                        as_type="span",
+                        trace_context=cast(TraceContext, insert_trace_dict),
+                        input=trace_input,
+                        metadata={
+                            "memory_source_id": self.memory_source_id,
+                            "memory_type": memory_type,
+                            "function": function_name,
+                        },
+                    )
+                except Exception as e:
+                    logger.debug(
+                        "Langfuse direct_write insert observation failed: %s; running handler without insert span",
+                        e,
+                    )
+                    await self._apply_direct_write(memory_type, payload)
+                    continue
+
+                try:
+                    with insert_observation_cm as insert_span:
+                        mark_observation_as_child(insert_span)
+                        insert_observation_id = getattr(insert_span, "id", None)
+                        if insert_observation_id:
+                            set_trace_context(
+                                trace_id=trace_id,
+                                observation_id=insert_observation_id,
+                                user_id=parent_trace_context.get("user_id"),
+                                session_id=parent_trace_context.get("session_id"),
+                            )
+                        await self._apply_direct_write(memory_type, payload)
+                        try:
+                            insert_span.update(
+                                output={"status": "completed"},
+                                metadata={"memory_type": memory_type},
+                            )
+                        except Exception as e:
+                            logger.debug("Langfuse direct_write insert span update failed: %s", e)
+                finally:
+                    if span_observation_id:
+                        set_trace_context(
+                            trace_id=trace_id,
+                            observation_id=span_observation_id,
+                            user_id=parent_trace_context.get("user_id"),
+                            session_id=parent_trace_context.get("session_id"),
+                        )
+
+    async def _persist_memory_source(
+        self,
+        memory_source_id: str,
+        input_messages: list,
+    ) -> None:
+        """Persist a MemorySource and its SourceMessages at the start of meta-agent processing.
+
+        Uses INSERT ON CONFLICT DO NOTHING for idempotent redelivery.
+        Called only by meta_memory_agent before sub-agent dispatch.
+
+        Before persisting, computes batch_hash and auto-derives external_id
+        so that duplicate submissions are caught by the partial unique indexes
+        on memory_sources.
+        """
+        from mirix.services.source_message_manager import (
+            compute_batch_hash,
+            derive_external_id_from_message_ids,
+            normalize_message,
+        )
+
+        try:
+            # Prefer source_messages (original per-turn dicts with role, external_message_id,
+            # occurred_at intact) over the packed input_messages which lost per-message
+            # fields when the add_memory handler flattened turns into [USER]/[ASSISTANT]
+            # markers. Falls back to input_messages for callers that pass memory_source_id
+            # without source_messages (nobody does today, but the two params aren't coupled).
+            #
+            # Direct-write jobs: REST enqueues messages=[] which becomes a single placeholder
+            # MessageCreate with empty content — not a real conversation. Persist the
+            # memory_sources row only; source_messages stay empty (provenance is payload +
+            # citations). See memory-sources architecture (direct-write flow).
+            if self.direct_writes:
+                messages_for_persistence = []
+            elif self.source_messages:
+                messages_for_persistence = self.source_messages
+            else:
+                messages_for_persistence = input_messages
+
+            # Normalize messages once — reused for hash computation and persistence
+            msg_dicts = [normalize_message(msg) for msg in messages_for_persistence] if messages_for_persistence else []
+
+            # Compute dedup keys for source-level idempotency
+            external_id = self.external_id
+            batch_hash = None
+
+            if not external_id and msg_dicts:
+                # Auto-derive external_id if all messages have external_message_ids
+                ext_msg_ids = [m["external_message_id"] for m in msg_dicts if m.get("external_message_id")]
+                if len(ext_msg_ids) == len(msg_dicts):
+                    external_id = derive_external_id_from_message_ids(ext_msg_ids)
+
+            if not external_id and msg_dicts:
+                # Fallback: compute batch_hash for content-based dedup
+                batch_hash = compute_batch_hash(
+                    external_thread_id=self.external_thread_id,
+                    occurred_at=self.occurred_at,
+                    messages=msg_dicts,
+                )
+
+            source = await self.memory_source_manager.create(
+                memory_source_id=memory_source_id,
+                actor=self.actor,
+                user_id=self.user_id,
+                organization_id=self.agent_state.organization_id,
+                source_type=self.source_type or "conversation",
+                external_id=external_id,
+                external_thread_id=self.external_thread_id,
+                source_system=self.source_system,
+                source_metadata=self.source_metadata,
+                occurred_at=self.occurred_at,
+                summary=self.source_summary,
+                summary_source=self.source_summary_source,
+                batch_hash=batch_hash,
+                filter_tags=self.filter_tags,
+            )
+
+            if source is None:
+                # Deduped — source already exists from a prior submission.
+                # Skip message persistence and signal caller to skip agent processing.
+                self._source_deduped = True
+                return
+
+            if msg_dicts:
+                await self.source_message_manager.bulk_insert(
+                    messages=msg_dicts,
+                    memory_source_id=memory_source_id,
+                    external_thread_id=self.external_thread_id,
+                    fallback_occurred_at=self.occurred_at,
+                    created_by_id=self.actor.id,
+                )
+
+            logger.info(
+                "Persisted memory source %s with %d source messages",
+                memory_source_id,
+                len(msg_dicts),
+            )
+        except Exception as e:
+            logger.error("Failed to persist memory source %s: %s", memory_source_id, e)
+            raise
+
+    async def _generate_source_summary_traced(self) -> None:
+        """Wrap _generate_source_summary in a LangFuse child span.
+
+        Captures the trace context at dispatch time so the span lands as a
+        sibling of the memory sub-agent spans under the meta_memory_agent trace,
+        not as an orphan created by the background task.
+        """
+        parent_trace_context = get_trace_context()
+        langfuse = get_langfuse_client()
+        trace_id = parent_trace_context.get("trace_id") if parent_trace_context else None
+        parent_span_id = parent_trace_context.get("observation_id") if parent_trace_context else None
+
+        if not (langfuse and trace_id):
+            await self._generate_source_summary()
+            return
+
+        from typing import cast
+
+        from langfuse.types import TraceContext
+
+        from mirix.observability.context import set_trace_context
+
+        trace_context_dict: dict = {"trace_id": trace_id}
+        if parent_span_id:
+            trace_context_dict["parent_span_id"] = parent_span_id
+
+        with langfuse.start_as_current_observation(
+            name="Summary Agent",
+            as_type="agent",
+            trace_context=cast(TraceContext, trace_context_dict),
+            metadata={
+                "memory_source_id": self.memory_source_id,
+                "agent_name": self.agent_state.name,
+            },
+        ) as span:
+            mark_observation_as_child(span)
+            span_observation_id = getattr(span, "id", None)
+            if span_observation_id:
+                set_trace_context(
+                    trace_id=trace_id,
+                    observation_id=span_observation_id,
+                    user_id=parent_trace_context.get("user_id"),
+                    session_id=parent_trace_context.get("session_id"),
+                )
+            await self._generate_source_summary()
+
+    async def _generate_source_summary(self) -> None:
+        """Generate a summary for the memory source using the agent's LLM.
+
+        Retrieves source messages, formats them into a prompt, and calls the LLM.
+        The generated summary is written to memory_sources.summary with
+        summary_source="generated".
+
+        Raises on failure — caller is responsible for error handling.
+        """
+        from mirix.prompts.gpt_summarize_source_messages import SYSTEM as SUMMARY_PROMPT_SYSTEM
+        from mirix.schemas.enums import MessageRole
+        from mirix.schemas.mirix_message_content import TextContent
+        from mirix.utils import count_tokens
+
+        # Retrieve source messages
+        result = await self.source_message_manager.get_messages_by_source_id(
+            memory_source_id=self.memory_source_id,
+            limit=2000,
+        )
+        if not result.items:
+            logger.warning("No source messages found for %s, skipping summary", self.memory_source_id)
+            return
+
+        # Format messages into a conversation transcript
+        transcript_lines = []
+        for msg in result.items:
+            content = msg.content
+            if isinstance(content, dict):
+                text = content.get("text", "") or content.get("content", "")
+            elif isinstance(content, str):
+                text = content
+            else:
+                text = str(content)
+            transcript_lines.append(f"{msg.role}: {text}")
+        transcript = "\n\n".join(transcript_lines)
+
+        # Truncate to fit within ~90% of the context window
+        context_window = self.agent_state.llm_config.context_window
+        max_input_tokens = int(context_window * 0.9)
+        transcript_tokens = count_tokens(transcript)
+        if transcript_tokens > max_input_tokens:
+            ratio = max_input_tokens / transcript_tokens * 0.8
+            keep = max(1, int(len(result.items) * ratio))
+            transcript = "\n\n".join(transcript_lines[-keep:])
+
+        llm_messages = [
+            Message(
+                agent_id=self.agent_state.id,
+                role=MessageRole.system,
+                content=[TextContent(text=SUMMARY_PROMPT_SYSTEM)],
+            ),
+            Message(
+                agent_id=self.agent_state.id,
+                role=MessageRole.user,
+                content=[TextContent(text=transcript)],
+            ),
+        ]
+
+        llm_client = LLMClient.create(
+            llm_config=self.agent_state.llm_config.model_copy(deep=True),
+        )
+        response = await llm_client.send_llm_request(messages=llm_messages)
+        summary_text = response.choices[0].message.content
+
+        if summary_text:
+            await self.memory_source_manager.update_summary(
+                memory_source_id=self.memory_source_id,
+                summary=summary_text,
+                summary_source="generated",
+            )
+            logger.info("Generated summary for memory source %s", self.memory_source_id)
+        else:
+            logger.warning("LLM returned empty summary for source %s", self.memory_source_id)
 
     async def build_system_prompt_with_memories(
         self,
@@ -2231,9 +2689,7 @@ These keywords have been used to retrieve relevant memories from the database.
                     try:
                         summary_msg = await self.summarize_and_replace_retained_messages(retained, existing_file_uris)
                     except Exception as summarize_err:
-                        printv(
-                            f"[Mirix.Agent.{self.agent_state.name}] ERROR: " f"Summarization failed: {summarize_err}"
-                        )
+                        printv(f"[Mirix.Agent.{self.agent_state.name}] ERROR: Summarization failed: {summarize_err}")
                         raise ContextWindowExceededError(
                             f"Context window exceeded for agent id={self.agent_state.id} "
                             f"and summarization recovery failed: {summarize_err}",

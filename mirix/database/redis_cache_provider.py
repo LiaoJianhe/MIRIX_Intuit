@@ -38,6 +38,8 @@ class RedisCacheProvider:
     CLIENT_PREFIX = "client:"
     AGENT_PREFIX = "agent:"
     TOOL_PREFIX = "tool:"
+    MEMORY_SOURCE_PREFIX = "memory_source:"
+    MEMORY_CITATION_PREFIX = "memory_citation:"
 
     def __init__(self, redis_client: "RedisMemoryClient") -> None:
         """

@@ -1,5 +1,11 @@
 ![Mirix Logo](https://github.com/RenKoya1/MIRIX/raw/main/assets/logo.png)
 
+> **⚠️ This is Intuit's fork of MIRIX.** The README below describes the upstream OSS project. For this fork's integration with the Enterprise Context & Memory Service (ECMS), see [`CLAUDE.md`](./CLAUDE.md) and [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md). Key differences:
+> - Screen activity capture is **not used** — memories come from conversations only.
+> - ECMS imports MIRIX as a Python library and does not run MIRIX's FastAPI app.
+> - Agent chaining is disabled; each agent runs exactly once per save.
+> - A provenance sidecar (`memory_source`, `memory_citation`, `source_message`) is written alongside every memory (VEPAGE-760).
+
 ## MIRIX - Multi-Agent Personal Assistant with an Advanced Memory System
 
 Your personal AI that builds memory through screen observation and natural conversation

@@ -426,6 +426,95 @@ class SqlalchemyBase(CommonSqlalchemyMetaMixins, Base):
             logger.error("Unexpected error creating %s with ID %s: %s", self.__class__.__name__, self.id, e)
             raise
 
+    @classmethod
+    @handle_db_timeout
+    @retry_db_operation(max_retries=3, base_delay=0.1, max_delay=2.0)
+    async def create_or_ignore(
+        cls,
+        db_session: AsyncSession,
+        **kwargs,
+    ) -> bool:
+        """INSERT ON CONFLICT DO NOTHING. Returns True if a row was inserted, False if skipped.
+
+        Use for idempotent inserts where any unique constraint conflict means
+        the record already exists and should be silently skipped.
+        Does not update cache — use create_or_ignore_with_redis for cached writes.
+        """
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        stmt = pg_insert(cls).values(**kwargs).on_conflict_do_nothing()
+        result = await db_session.execute(stmt)
+        await db_session.commit()
+        inserted = (result.rowcount or 0) > 0
+        if inserted:
+            logger.debug("Created %s with ID: %s", cls.__name__, kwargs.get("id", "?"))
+        else:
+            logger.debug("Skipped %s (conflict) with ID: %s", cls.__name__, kwargs.get("id", "?"))
+        return inserted
+
+    @classmethod
+    @handle_db_timeout
+    @retry_db_operation(max_retries=3, base_delay=0.1, max_delay=2.0)
+    async def create_or_ignore_with_redis(
+        cls,
+        db_session: AsyncSession,
+        use_cache: bool = True,
+        **kwargs,
+    ) -> bool:
+        """INSERT ON CONFLICT DO NOTHING with cache write.
+
+        After the insert (or conflict skip), reads the row back and updates cache.
+        Returns True if a row was inserted, False if skipped due to conflict.
+        """
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        stmt = pg_insert(cls).values(**kwargs).on_conflict_do_nothing()
+        result = await db_session.execute(stmt)
+        await db_session.commit()
+        inserted = (result.rowcount or 0) > 0
+
+        record_id = kwargs.get("id")
+        if inserted:
+            logger.debug("Created %s with ID: %s", cls.__name__, record_id)
+        else:
+            logger.debug("Skipped %s (conflict) with ID: %s", cls.__name__, record_id)
+
+        # Read back and cache the row (whether just inserted or pre-existing)
+        if use_cache and record_id:
+            try:
+                record = await db_session.get(cls, record_id)
+                if record:
+                    await record._update_redis_cache(operation="create")
+            except Exception as e:
+                logger.error("Cache write failed after create_or_ignore for %s %s: %s", cls.__name__, record_id, e)
+
+        return inserted
+
+    @classmethod
+    @handle_db_timeout
+    @retry_db_operation(max_retries=3, base_delay=0.1, max_delay=2.0)
+    async def bulk_create_or_ignore(
+        cls,
+        db_session: AsyncSession,
+        rows: List[dict],
+        use_cache: bool = False,
+    ) -> int:
+        """Bulk INSERT ON CONFLICT DO NOTHING. Returns the number of rows actually inserted.
+
+        Use for batch idempotent inserts. Cache is off by default for bulk operations
+        since N individual cache writes can be expensive.
+        """
+        if not rows:
+            return 0
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        stmt = pg_insert(cls).values(rows).on_conflict_do_nothing()
+        result = await db_session.execute(stmt)
+        await db_session.commit()
+        count = result.rowcount or 0
+        logger.debug("Bulk inserted %d/%d %s rows", count, len(rows), cls.__name__)
+        return count
+
     @handle_db_timeout
     @retry_db_operation(max_retries=3, base_delay=0.1, max_delay=2.0)
     async def delete(self, db_session: AsyncSession, actor: Optional["Client"] = None) -> "SqlalchemyBase":
@@ -881,7 +970,7 @@ class SqlalchemyBase(CommonSqlalchemyMetaMixins, Base):
                     await cache_provider.set_hash(cache_key, data, ttl=settings.redis_ttl_tools)
                 return
 
-            # JSON-BASED CACHING (memory tables with embeddings)
+            # JSON-BASED CACHING (memory tables and source tracking tables)
             memory_tables = {
                 "episodic_memory": cache_provider.EPISODIC_PREFIX,
                 "semantic_memory": cache_provider.SEMANTIC_PREFIX,
@@ -889,6 +978,8 @@ class SqlalchemyBase(CommonSqlalchemyMetaMixins, Base):
                 "resource_memory": cache_provider.RESOURCE_PREFIX,
                 "knowledge_vault": cache_provider.KNOWLEDGE_PREFIX,
                 "raw_memory": cache_provider.RAW_MEMORY_PREFIX,
+                "memory_sources": cache_provider.MEMORY_SOURCE_PREFIX,
+                "memory_citations": cache_provider.MEMORY_CITATION_PREFIX,
             }
 
             if table_name in memory_tables:

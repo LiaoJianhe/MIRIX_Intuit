@@ -70,6 +70,8 @@ class MessageCreate(BaseModel):
     filter_tags: Optional[Dict[str, Any]] = Field(
         None, description="Optional tags for filtering and categorizing this message and related memories"
     )
+    external_message_id: Optional[str] = Field(None, description="Client-provided stable message ID for deduplication")
+    message_occurred_at: Optional[str] = Field(None, description="Per-message ISO 8601 timestamp")
 
     def model_dump(self, to_orm: bool = False, **kwargs) -> Dict[str, Any]:
         data = super().model_dump(**kwargs)

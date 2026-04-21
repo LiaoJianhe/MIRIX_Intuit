@@ -15,7 +15,7 @@ import httpx
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from mirix.helpers.message_helpers import prepare_input_message_create
 from mirix.llm_api.llm_client import LLMClient
@@ -1943,6 +1943,62 @@ async def initialize_meta_agent(
     return meta_agent
 
 
+# Per-memory-type item-schema map. The payload shape for each memory_type is
+# {"items": List[<item_schema>]} — the same shape the corresponding
+# *_insert memory tool consumes — so the meta-agent can call the tool
+# directly without a translation shim.
+#
+# Extend alongside DIRECT_WRITE_HANDLERS when new memory types gain
+# direct-write support.
+from mirix.schemas.episodic_memory import EpisodicEventForLLM
+from mirix.schemas.knowledge_vault import KnowledgeVaultItemBase
+from mirix.schemas.procedural_memory import ProceduralMemoryItemBase
+from mirix.schemas.resource_memory import ResourceMemoryItemBase
+from mirix.schemas.semantic_memory import SemanticMemoryItemBase
+
+_DIRECT_WRITE_ITEM_SCHEMAS: Dict[str, type] = {
+    "episodic": EpisodicEventForLLM,
+    "semantic": SemanticMemoryItemBase,
+    "procedural": ProceduralMemoryItemBase,
+    "resource": ResourceMemoryItemBase,
+    "knowledge_vault": KnowledgeVaultItemBase,
+}
+
+
+class DirectWriteInput(BaseModel):
+    """One direct memory write - bypasses LLM dispatch at the meta-agent.
+
+    The meta-agent looks up a handler for memory_type in DIRECT_WRITE_HANDLERS
+    and calls it with payload unpacked as kwargs. Because payload matches the
+    target memory tool's signature exactly (``{"items": [...]}``), the handler
+    is the memory tool itself — no translation layer.
+    """
+
+    memory_type: str
+    payload: Dict[str, Any]
+
+    @field_validator("payload")
+    @classmethod
+    def _validate_payload_for_memory_type(cls, payload, info):
+        memory_type = info.data.get("memory_type")
+        item_schema = _DIRECT_WRITE_ITEM_SCHEMAS.get(memory_type)
+        if item_schema is None:
+            raise ValueError(
+                f"Unsupported memory_type for direct write: {memory_type!r}. "
+                f"Supported: {sorted(_DIRECT_WRITE_ITEM_SCHEMAS)}"
+            )
+        items = payload.get("items")
+        if not isinstance(items, list) or not items:
+            raise ValueError(
+                f"Direct write payload for memory_type={memory_type!r} must include "
+                f"a non-empty 'items' list matching the tool's item schema."
+            )
+        # Coerce each item through the item schema to surface missing / wrong-typed
+        # fields as a ValidationError at the HTTP boundary.
+        validated_items = [item_schema(**item).model_dump() for item in items]
+        return {"items": validated_items}
+
+
 class AddMemoryRequest(BaseModel):
     """Request model for adding memory."""
 
@@ -1958,6 +2014,48 @@ class AddMemoryRequest(BaseModel):
     block_filter_tags_update_mode: Optional[str] = "merge"  # "merge" or "replace"
     use_cache: bool = True  # Control Redis cache behavior
     occurred_at: Optional[str] = None  # Optional ISO 8601 timestamp string for episodic memory
+    external_id: Optional[str] = None  # Client-provided stable dedup key
+    external_thread_id: Optional[str] = None  # Groups multiple saves into a thread
+    summarize: bool = False  # Opt-in async summary generation
+    summary: Optional[str] = None  # Client-provided summary (bypasses generation)
+    source_type: str = "conversation"  # Freeform string label for source type
+    source_system: Optional[str] = None  # Originating system label
+    source_metadata: Optional[Dict[str, Any]] = None  # Client-provided lineage context bag
+    direct_writes: Optional[List[DirectWriteInput]] = (
+        None  # When set, meta-agent skips LLM dispatch and writes memories directly
+    )
+
+    @model_validator(mode="after")
+    def _validate_direct_writes_exclusivity(self):
+        """When direct_writes is set, messages / summary / summarize must be unset.
+
+        The direct-write path authors the memory rows itself (payload carries
+        per-item summary + details), so supplying conversation turns or a
+        source-level summary alongside is a confused intent. Fail fast at the
+        HTTP boundary instead of silently ignoring them.
+        """
+        if not self.direct_writes:
+            return self
+
+        if self.messages:
+            raise ValueError(
+                "direct_writes is mutually exclusive with messages. "
+                "Direct writes carry per-item summary + details; conversation "
+                "turns in `messages` would never be processed by the worker."
+            )
+        if self.summary is not None:
+            raise ValueError(
+                "direct_writes is mutually exclusive with summary. "
+                "Each direct-write item provides its own summary; no source-level "
+                "summary should be supplied."
+            )
+        if self.summarize:
+            raise ValueError(
+                "direct_writes is mutually exclusive with summarize=True. "
+                "Direct writes already carry summary content; LLM summary generation "
+                "would be redundant."
+            )
+        return self
 
 
 @router.post("/memory/add")
@@ -2009,7 +2107,20 @@ async def add_memory(
 
     message = request.messages
 
-    if isinstance(message, list) and "role" in message[0].keys():
+    # WHY original_messages?
+    #
+    # The flattening below destroys per-message identity: it merges all turns into
+    # a flat content list with [USER]/[ASSISTANT] text markers, then packs them into
+    # a single MessageCreate. Per-message metadata (role, external_message_id,
+    # occurred_at) is lost.
+    #
+    # original_messages preserves the raw per-turn dicts so they can travel through
+    # protobuf (as QueueMessage.source_messages, field 24) to the MetaAgent's
+    # _persist_memory_source(), which stores them individually in the source_messages
+    # DB table. See the parallel comment in queue_util.py put_messages().
+    original_messages = request.messages
+
+    if isinstance(message, list) and len(message) > 0 and "role" in message[0].keys():
         # This means the input is in the format of [{"role": "user", "content": [{"type": "text", "text": "..."}]}, {"role": "assistant", "content": [{"type": "text", "text": "..."}]}]
         # OR the simpler format: [{"role": "user", "content": "Hello world"}]
 
@@ -2060,6 +2171,11 @@ async def add_memory(
         raise HTTPException(status_code=403, detail="Client has no write_scope - cannot create memories")
     filter_tags["scope"] = client.write_scope
 
+    # Pre-generate memory_source_id for citation tracking
+    import uuid
+
+    memory_source_id = f"src-{uuid.uuid4()}"
+
     # Queue for async processing instead of synchronous execution
     # Note: actor is Client for org-level access control
     #       user_id represents the actual end-user (or admin user if not provided)
@@ -2075,6 +2191,20 @@ async def add_memory(
         block_filter_tags_update_mode=request.block_filter_tags_update_mode,
         use_cache=request.use_cache,
         occurred_at=request.occurred_at,  # Optional timestamp for episodic memory
+        memory_source_id=memory_source_id,
+        external_id=request.external_id,
+        external_thread_id=request.external_thread_id,
+        source_type=request.source_type,
+        source_system=request.source_system,
+        source_metadata=request.source_metadata,
+        summary=request.summary,
+        summarize=request.summarize,
+        source_messages=original_messages,
+        direct_writes=(
+            [{"memory_type": w.memory_type, "payload": w.payload} for w in request.direct_writes]
+            if request.direct_writes
+            else None
+        ),
     )
 
     logger.debug("Memory queued for processing: %s", meta_agent.id)
@@ -2085,6 +2215,7 @@ async def add_memory(
         "status": "queued",
         "agent_id": meta_agent.id,
         "message_count": len(input_messages),
+        "memory_source_id": memory_source_id,
     }
 
 
@@ -2100,6 +2231,7 @@ class RetrieveMemoryRequest(BaseModel):
     # NEW: Optional date range for temporal filtering (ISO 8601 format)
     start_date: Optional[str] = None  # e.g., "2025-11-19T00:00:00" or "2025-11-19T00:00:00+00:00"
     end_date: Optional[str] = None  # e.g., "2025-11-19T23:59:59" or "2025-11-19T23:59:59+00:00"
+    include_citations: bool = False  # When True, attach citation provenance to each memory result
 
 
 async def retrieve_memories_by_keywords(
@@ -2511,6 +2643,9 @@ async def retrieve_memory_with_conversation(
         end_date=end_date,
     )
 
+    if request.include_citations:
+        memories = await _attach_citations_to_memories_dict(memories)
+
     return {
         "success": True,
         "topics": topics,
@@ -2535,6 +2670,7 @@ async def retrieve_memory_with_topic(
     limit: int = 10,
     filter_tags: Optional[str] = None,
     use_cache: bool = True,
+    include_citations: bool = Query(False, description="When True, attach citation provenance to each result."),
     x_client_id: Optional[str] = Header(None),
     x_org_id: Optional[str] = Header(None),
 ):
@@ -2547,6 +2683,7 @@ async def retrieve_memory_with_topic(
         limit: Maximum number of items to retrieve per memory type (default: 10)
         filter_tags: Optional JSON string of tags to filter memories (default: None)
         use_cache: Whether to use cached results (default: True)
+        include_citations: When True, attach citation provenance to each result (default: False)
     """
     server = get_server()
     client_id, org_id = await get_client_and_org(x_client_id, x_org_id)
@@ -2598,6 +2735,9 @@ async def retrieve_memory_with_topic(
         use_cache=use_cache,
     )
 
+    if include_citations:
+        memories = await _attach_citations_to_memories_dict(memories)
+
     return {
         "success": True,
         "topic": topic,
@@ -2643,6 +2783,107 @@ async def _precompute_embedding_for_search(
     return embedded_text, embedded_text_padded
 
 
+async def _attach_citations_to_results(results: list[dict]) -> list[dict]:
+    """Batch-fetch citations for search results and attach them to each result dict.
+
+    Each result gets a ``citations`` list containing dicts with
+    ``memory_source_id``, ``citation_type``, ``occurred_at``, and ``external_thread_id``.
+    """
+    from mirix.services.memory_citation_manager import MemoryCitationManager
+
+    memory_keys = [(r["memory_type"], r["id"]) for r in results if r.get("id")]
+    if not memory_keys:
+        for r in results:
+            r["citations"] = []
+        return results
+
+    citation_mgr = MemoryCitationManager()
+    grouped = await citation_mgr.get_citations_for_memories(memory_keys)
+
+    for r in results:
+        key = (r.get("memory_type"), r.get("id"))
+        cits = grouped.get(key, [])
+        r["citations"] = [
+            {
+                "memory_source_id": c.memory_source_id,
+                "citation_type": c.citation_type,
+                "occurred_at": c.occurred_at.isoformat() if c.occurred_at else None,
+                "external_thread_id": c.external_thread_id,
+            }
+            for c in cits
+        ]
+    return results
+
+
+async def _attach_citations_to_memories_dict(memories: dict) -> dict:
+    """Attach citations to the nested memories dict returned by conversation/topic retrieval.
+
+    Structure:
+        episodic:        { recent: [{id, ...}], relevant: [{id, ...}] }
+        semantic/resource/procedural/knowledge_vault: { items: [{id, ...}] }
+        core:            { scopes: { <scope>: { items: [{id, ...}] } } }
+
+    Mutates the dicts in place, adding a ``citations`` key to each item.
+    """
+    from mirix.services.memory_citation_manager import MemoryCitationManager
+
+    # Collect all (memory_type, id) pairs and track which list items they came from
+    memory_keys: list[tuple[str, str]] = []
+    items_by_key: dict[tuple[str, str], list[dict]] = {}
+
+    for memory_type, section in memories.items():
+        if not isinstance(section, dict):
+            continue
+
+        item_lists = []
+
+        # Core: nested under scopes.<scope>.items[]
+        if memory_type == "core":
+            scopes_dict = section.get("scopes", {})
+            for scope_data in scopes_dict.values():
+                if isinstance(scope_data, dict) and "items" in scope_data:
+                    item_lists.append(scope_data["items"])
+        else:
+            # Episodic has recent[] and relevant[]
+            if "recent" in section:
+                item_lists.append(section["recent"])
+            if "relevant" in section:
+                item_lists.append(section["relevant"])
+            if "items" in section:
+                item_lists.append(section["items"])
+
+        for item_list in item_lists:
+            for item in item_list:
+                item_id = item.get("id")
+                if item_id:
+                    key = (memory_type, item_id)
+                    memory_keys.append(key)
+                    items_by_key.setdefault(key, []).append(item)
+
+    if not memory_keys:
+        return memories
+
+    citation_mgr = MemoryCitationManager()
+    grouped = await citation_mgr.get_citations_for_memories(memory_keys)
+
+    # Attach citations to each item
+    for key, item_list in items_by_key.items():
+        cits = grouped.get(key, [])
+        serialized = [
+            {
+                "memory_source_id": c.memory_source_id,
+                "citation_type": c.citation_type,
+                "occurred_at": c.occurred_at.isoformat() if c.occurred_at else None,
+                "external_thread_id": c.external_thread_id,
+            }
+            for c in cits
+        ]
+        for item in item_list:
+            item["citations"] = serialized
+
+    return memories
+
+
 @router.get("/memory/search")
 @with_langfuse_tracing
 async def search_memory(
@@ -2658,6 +2899,7 @@ async def search_memory(
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
     include_core_memory: bool = Query(False, description="When True, include core (block) memory in the response."),
+    include_citations: bool = Query(False, description="When True, attach citation provenance to each result."),
     x_client_id: Optional[str] = Header(None),
     x_org_id: Optional[str] = Header(None),
 ):
@@ -2849,7 +3091,7 @@ async def search_memory(
                     agent_state=agent_state,
                     user=user,
                     query=query,
-                    embedded_text=(embedded_text if search_method == "embedding" and query else None),
+                    embedded_text=(embedded_text_padded if search_method == "embedding" and query else None),
                     search_field=(
                         search_field
                         if search_field != "null"
@@ -2883,7 +3125,7 @@ async def search_memory(
                     agent_state=agent_state,
                     user=user,
                     query=query,
-                    embedded_text=(embedded_text if search_method == "embedding" and query else None),
+                    embedded_text=(embedded_text_padded if search_method == "embedding" and query else None),
                     search_field=search_field if search_field != "null" else "summary",
                     search_method=search_method,
                     limit=limit,
@@ -2912,7 +3154,7 @@ async def search_memory(
                     agent_state=agent_state,
                     user=user,
                     query=query,
-                    embedded_text=(embedded_text if search_method == "embedding" and query else None),
+                    embedded_text=(embedded_text_padded if search_method == "embedding" and query else None),
                     search_field=search_field if search_field != "null" else "caption",
                     search_method=search_method,
                     limit=limit,
@@ -3040,7 +3282,7 @@ async def search_memory(
                 agent_state=agent_state,
                 user=user,
                 query=query,
-                embedded_text=(embedded_text if search_method == "embedding" and query else None),
+                embedded_text=(embedded_text_padded if search_method == "embedding" and query else None),
                 search_field=(
                     search_field
                     if search_field != "null"
@@ -3076,7 +3318,7 @@ async def search_memory(
                 agent_state=agent_state,
                 user=user,
                 query=query,
-                embedded_text=(embedded_text if search_method == "embedding" and query else None),
+                embedded_text=(embedded_text_padded if search_method == "embedding" and query else None),
                 search_field=search_field if search_field != "null" else "summary",
                 search_method=search_method,
                 limit=limit,
@@ -3107,7 +3349,7 @@ async def search_memory(
                 agent_state=agent_state,
                 user=user,
                 query=query,
-                embedded_text=(embedded_text if search_method == "embedding" and query else None),
+                embedded_text=(embedded_text_padded if search_method == "embedding" and query else None),
                 search_field=search_field if search_field != "null" else "caption",
                 search_method=search_method,
                 limit=limit,
@@ -3188,6 +3430,9 @@ async def search_memory(
         except Exception as e:
             logger.error("Error retrieving core memory blocks for single-user search: %s", e, exc_info=True)
 
+    if include_citations:
+        all_results = await _attach_citations_to_results(all_results)
+
     return {
         "success": True,
         "query": query,
@@ -3228,6 +3473,7 @@ async def search_memory_all_users(
     similarity_threshold: Optional[float] = Query(None),
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
+    include_citations: bool = Query(False, description="When True, attach citation provenance to each result."),
     x_client_id: Optional[str] = Header(None),
     x_org_id: Optional[str] = Header(None),
 ):
@@ -3413,7 +3659,7 @@ async def search_memory_all_users(
                     agent_state=agent_state,
                     organization_id=effective_org_id,
                     query=query,
-                    embedded_text=(embedded_text if search_method == "embedding" and query else None),
+                    embedded_text=(embedded_text_padded if search_method == "embedding" and query else None),
                     search_field=(
                         search_field
                         if search_field != "null"
@@ -3448,7 +3694,7 @@ async def search_memory_all_users(
                     agent_state=agent_state,
                     organization_id=effective_org_id,
                     query=query,
-                    embedded_text=(embedded_text if search_method == "embedding" and query else None),
+                    embedded_text=(embedded_text_padded if search_method == "embedding" and query else None),
                     search_field=search_field if search_field != "null" else "summary",
                     search_method=search_method,
                     limit=limit,
@@ -3478,7 +3724,7 @@ async def search_memory_all_users(
                     agent_state=agent_state,
                     organization_id=effective_org_id,
                     query=query,
-                    embedded_text=(embedded_text if search_method == "embedding" and query else None),
+                    embedded_text=(embedded_text_padded if search_method == "embedding" and query else None),
                     search_field=search_field if search_field != "null" else "caption",
                     search_method=search_method,
                     limit=limit,
@@ -3589,7 +3835,7 @@ async def search_memory_all_users(
                 agent_state=agent_state,
                 organization_id=effective_org_id,
                 query=query,
-                embedded_text=(embedded_text if search_method == "embedding" and query else None),
+                embedded_text=(embedded_text_padded if search_method == "embedding" and query else None),
                 search_field=(
                     search_field
                     if search_field != "null"
@@ -3626,7 +3872,7 @@ async def search_memory_all_users(
                 agent_state=agent_state,
                 organization_id=effective_org_id,
                 query=query,
-                embedded_text=(embedded_text if search_method == "embedding" and query else None),
+                embedded_text=(embedded_text_padded if search_method == "embedding" and query else None),
                 search_field=search_field if search_field != "null" else "summary",
                 search_method=search_method,
                 limit=limit,
@@ -3658,7 +3904,7 @@ async def search_memory_all_users(
                 agent_state=agent_state,
                 organization_id=effective_org_id,
                 query=query,
-                embedded_text=(embedded_text if search_method == "embedding" and query else None),
+                embedded_text=(embedded_text_padded if search_method == "embedding" and query else None),
                 search_field=search_field if search_field != "null" else "caption",
                 search_method=search_method,
                 limit=limit,
@@ -3757,6 +4003,9 @@ async def search_memory_all_users(
             raise
         except Exception as e:
             logger.error("Error retrieving core memory blocks for cross-user search: %s", e, exc_info=True)
+
+    if include_citations:
+        all_results = await _attach_citations_to_results(all_results)
 
     return {
         "success": True,
@@ -5331,6 +5580,91 @@ async def dashboard_check_setup():
             "No dashboard users exist. Please create the first account." if is_first else "Dashboard setup complete."
         ),
     }
+
+
+# ============================================================================
+# Memory Sources & Threads (Retrieval Endpoints)
+# ============================================================================
+
+
+@router.get("/memory-sources/{source_id}")
+async def get_memory_source(
+    source_id: str,
+    user_id: Optional[str] = None,
+    x_client_id: Optional[str] = Header(None),
+    x_org_id: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+):
+    """Get a memory source by ID (metadata + summary).
+
+    Access control uses scope-based filtering via filter_tags->>'scope',
+    matching the pattern used by memory tables. A client can read any
+    memory source whose scope is in the client's read_scopes list.
+    """
+    server = get_server()
+    client_id, org_id = await get_client_and_org(x_client_id, x_org_id, x_api_key)
+    client = await server.client_manager.get_client_by_id(client_id)
+
+    from mirix.services.memory_source_manager import MemorySourceManager
+
+    manager = MemorySourceManager()
+    source = await manager.get_by_id(source_id)
+    if not source:
+        raise HTTPException(status_code=404, detail=f"Memory source {source_id} not found")
+
+    # Scope-based access control (same pattern as memory tables)
+    source_scope = (source.filter_tags or {}).get("scope")
+    if source_scope not in client.read_scopes:
+        raise HTTPException(status_code=404, detail=f"Memory source {source_id} not found")
+
+    if user_id and source.user_id != user_id:
+        raise HTTPException(status_code=404, detail=f"Memory source {source_id} not found")
+
+    return source
+
+
+@router.get("/memory-sources/{source_id}/messages")
+async def get_memory_source_messages(
+    source_id: str,
+    user_id: Optional[str] = None,
+    limit: int = 100,
+    cursor: Optional[str] = None,
+    x_client_id: Optional[str] = Header(None),
+    x_org_id: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+):
+    """Get messages belonging to a specific memory source.
+
+    Source messages inherit the parent source's access control — if the
+    client can read the source (scope in read_scopes), it can read the messages.
+    """
+    server = get_server()
+    client_id, org_id = await get_client_and_org(x_client_id, x_org_id, x_api_key)
+    client = await server.client_manager.get_client_by_id(client_id)
+
+    from mirix.services.memory_source_manager import MemorySourceManager
+    from mirix.services.source_message_manager import SourceMessageManager
+
+    # Verify source exists and client has scope access
+    source_mgr = MemorySourceManager()
+    source = await source_mgr.get_by_id(source_id)
+    if not source:
+        raise HTTPException(status_code=404, detail=f"Memory source {source_id} not found")
+
+    source_scope = (source.filter_tags or {}).get("scope")
+    if source_scope not in client.read_scopes:
+        raise HTTPException(status_code=404, detail=f"Memory source {source_id} not found")
+
+    if user_id and source.user_id != user_id:
+        raise HTTPException(status_code=404, detail=f"Memory source {source_id} not found")
+
+    msg_mgr = SourceMessageManager()
+    messages = await msg_mgr.get_messages_by_source_id(
+        memory_source_id=source_id,
+        limit=limit,
+        cursor=cursor,
+    )
+    return messages
 
 
 # ============================================================================

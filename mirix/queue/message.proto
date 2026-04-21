@@ -56,6 +56,41 @@ message QueueMessage {
 
   // How to apply block_filter_tags to existing blocks: "merge" (default) or "replace".
   optional string block_filter_tags_update_mode = 15;
+
+  // ========== MEMORY SOURCE FIELDS (for citation tracking & idempotency) ==========
+  // Pre-generated source ID ("src-{uuid4}") for citation tracking
+  optional string memory_source_id = 16;
+
+  // Client-provided stable dedup key
+  optional string external_id = 17;
+
+  // Groups multiple saves into a thread
+  optional string external_thread_id = 18;
+
+  // Freeform string, defaults to "conversation"
+  optional string source_type = 19;
+
+  // Originating system label
+  optional string source_system = 20;
+
+  // Client-provided lineage context bag
+  google.protobuf.Struct source_metadata = 21;
+
+  // Client-provided summary (bypasses generation)
+  optional string summary = 22;
+
+  // Opt-in async summary generation
+  optional bool summarize = 23;
+
+  // Original per-turn messages with per-message metadata (external_message_id, occurred_at).
+  // These are used for source_message persistence only, not for agent processing.
+  // The input_messages field (field 3) carries the packed/flattened messages for the agent.
+  repeated MessageCreate source_messages = 24;
+
+  // Direct memory writes — bypasses LLM dispatch at the meta-agent.
+  // Each entry tells the meta-agent to call a registered handler for
+  // memory_type and pass payload_json-decoded fields as kwargs.
+  repeated DirectMemoryWrite direct_writes = 25;
 }
 
 // User representation
@@ -76,6 +111,7 @@ message MessageCreate {
     ROLE_UNSPECIFIED = 0;
     ROLE_USER = 1;
     ROLE_SYSTEM = 2;
+    ROLE_ASSISTANT = 3;
   }
 
   // The role of the participant
@@ -98,6 +134,16 @@ message MessageCreate {
 
   // Optional multi-agent group id
   optional string group_id = 7;
+
+  // Per-message source fields (for citation tracking)
+  // Client-provided stable message ID
+  optional string external_message_id = 8;
+
+  // Per-message timestamp (ISO 8601 string)
+  optional string message_occurred_at = 9;
+
+  // Client-provided per-message property bag
+  google.protobuf.Struct message_metadata = 10;
 }
 
 // List of message content parts (for structured content)
@@ -130,5 +176,11 @@ message FileContent {
 
 message CloudFileContent {
   string cloud_file_uri = 1;
+}
+
+// Direct-write request — one memory to be written without LLM dispatch.
+message DirectMemoryWrite {
+  string memory_type = 1;    // "episodic" | "semantic" | ... (handler dict is authoritative)
+  string payload_json = 2;   // JSON-encoded memory-type-specific fields
 }
 

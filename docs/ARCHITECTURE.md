@@ -35,16 +35,40 @@ Agent  Agent   Agent    Agent  Agent    Agent
 
 ## Data Flow
 
-### Write path (add memories)
+### Write path — derived (LLM-driven)
 ```
 Client → POST /memory/add
-       → AsyncServer.add()
+       → put_messages() → Kafka QueueMessage
+       → Worker consumer → AsyncServer._step()
        → MetaAgent.step()
+       → _persist_memory_source() writes memory_sources row
        → Agent chaining loop (see Agent Execution below)
        → Sub-agents extract typed memories via tools
+       → Memory tools write memory rows + memory_citations via _write_citation()
        → Managers (mirix/services/) persist via ORM
+       → mark_processing_complete()
        → PostgreSQL
 ```
+
+### Write path — direct (caller-authored, no LLM)
+```
+Client → POST /memory/add with direct_writes=[{memory_type, payload}]
+       → put_messages() → Kafka QueueMessage.direct_writes
+       → Worker consumer → AsyncServer._step()
+       → MetaAgent.step()
+       → _persist_memory_source() writes memory_sources row
+       → Direct-write branch (skips LLM dispatch)
+       → _apply_direct_write() calls the registered handler
+           (episodic_memory_insert, semantic_memory_insert, …)
+       → Handler writes memory row + memory_citations via _write_citation()
+       → mark_processing_complete()
+       → PostgreSQL
+```
+
+Direct writes are mutually exclusive with `messages` / `summary` / `summarize`
+(AddMemoryRequest validator rejects the combination at HTTP time). `summarize`
+is specifically no-op on direct writes because each item already carries
+`summary` + `details`.
 
 ### Read path (retrieve memories)
 ```
@@ -54,8 +78,30 @@ Client → POST /memory/retrieve/conversation
            - BM25 full-text search (pg_bm25)
            - Vector similarity search (pgvector)
            - Fuzzy match (rapidfuzz)
-       → Results ranked and returned
+       → Results ranked and returned (optionally with citations)
 ```
+
+### Read path — provenance (progressive disclosure)
+```
+Client → search(..., include_citations=true)
+       → results[].citations[].memory_source_id
+       → GET /memory-sources/{id}          (source metadata)
+       → GET /memory-sources/{id}/messages (optional raw turns)
+```
+
+## Idempotency
+
+Three layers, applied in order during the save/process pipeline:
+
+1. **L1 — Source-level dedup.** `(client_id, user_id, external_id)` (or the auto-derived `batch_hash` when `external_id` is absent) is unique on `memory_sources`. A replay of the same batch returns the existing `memory_source_id` without re-ingesting.
+2. **L2 — Processing short-circuit.** Once `memory_source.processing_complete = True`, the worker skips re-processing for that source entirely (`agent._step()` consults the flag before dispatching sub-agents).
+3. **L3 — Citation-level dedup.** Inside `_write_citation`, duplicate `(memory_id, memory_source_id)` pairs are dropped so the same memory is not cited twice by the same source.
+
+Every skip path emits a LangFuse span via `mirix/observability/skip_spans.py::emit_idempotency_skip_span` so dashboards see every ingestion decision (L1/L2/L3).
+
+## Temporal Guard
+
+For derived memory writes, MIRIX computes `MAX(occurred_at)` across existing citations for the `(user, memory_type, external_thread_id)` tuple inside `_should_update_memory`. If the incoming `occurred_at` is older than the current max, the write is dropped (not applied). This prevents an out-of-order or backfilled save from overwriting newer current-state memory. It applies to every sub-agent write; episodic is unaffected because episodic writes append, they do not overwrite.
 
 ## Layer Responsibilities
 
@@ -79,6 +125,21 @@ Client → POST /memory/retrieve/conversation
 | Resource | `mirix/orm/resource_memory.py` | `mirix/services/resource_memory_manager.py` | `resource_memory_agent` | Files, links, assets |
 | Knowledge Vault | `mirix/orm/knowledge_vault.py` | `mirix/services/knowledge_vault_manager.py` | `knowledge_vault_memory_agent` | Sensitive/private facts |
 
+### Provenance sidecar tables
+
+Every memory write (derived or direct) lands a row in `memory_sources`
+(client-authored metadata + `external_id` dedup key), and each memory row
+gets a row in `memory_citations` tying it to its source. `source_messages`
+captures the raw conversation turns for the derived path. These tables are
+append-only and survive the underlying memory rows, giving a durable audit
+trail for every memory claim.
+
+| Table | ORM | Manager | Purpose |
+|-------|-----|---------|---------|
+| memory_sources | `mirix/orm/memory_source.py` | `mirix/services/memory_source_manager.py` | One row per save / direct-write, with `external_id`, `source_type`, `source_system`, `source_metadata` |
+| memory_citations | `mirix/orm/memory_citation.py` | `mirix/services/memory_citation_manager.py` | Links (`memory_type`, `memory_id`) → `memory_source_id` |
+| source_messages | `mirix/orm/source_message.py` | `mirix/services/source_message_manager.py` | Raw conversation turns for the derived path |
+
 ## Agent Types
 
 | Agent | AgentType Enum | Purpose |
@@ -92,8 +153,10 @@ Client → POST /memory/retrieve/conversation
 | `meta_memory_agent` | `AgentType.meta_memory_agent` | Coordinates memory sub-agents |
 | `reflexion_agent` | `AgentType.reflexion_agent` | Self-reflection and learning |
 | `background_agent` | `AgentType.background_agent` | Background processing tasks |
-| `chat_agent` | `AgentType.chat_agent` | User-facing conversation |
+| `chat_agent` | `AgentType.chat_agent` | User-facing conversation (OSS MIRIX; **not initialized under ECMS**) |
 | `coder_agent` | `AgentType.coder_agent` | Specialized coding tasks |
+
+In addition to the registered agents, the meta-agent dispatches a **Summary Agent task** via `asyncio.create_task` in parallel with the sub-agents (traced as a LangFuse "Summary Agent" child span; see `_generate_source_summary_traced` in `mirix/agent/agent.py`). It populates `memory_source.summary` when `summarize=True` is passed on the save request and no client-provided `summary` is set. It is not a registered `AgentType` — it is a task, not an agent.
 
 ## Agent Execution
 
@@ -102,11 +165,13 @@ Client → POST /memory/retrieve/conversation
 async def step(
     self,
     input_messages,
-    chaining: bool = True,       # enabled by default
+    chaining: bool = True,       # enabled by default in OSS MIRIX
     max_chaining_steps: Optional[int] = None,
     ...
 ) -> MirixUsageStatistics
 ```
+
+> **ECMS deployment note:** ECMS configures MIRIX with `CHAINING_FOR_MEMORY_UPDATE=false` and `CHAINING_FOR_META_AGENT=false` so each agent runs exactly once per save. The chaining loop described below applies only to standalone MIRIX.
 
 ### Chaining loop
 Agents loop through `inner_step()` calls until a terminal tool is called:
@@ -180,6 +245,21 @@ When `max_chaining_steps` is reached, agents are directed to call their terminal
 | PATCH | `/memory/resource/{memory_id}` |
 | DELETE | `/memory/resource/{memory_id}` |
 | DELETE | `/memory/knowledge_vault/{memory_id}` |
+
+`POST /memory/add` accepts source fields (`external_id`, `external_thread_id`,
+`source_type`, `source_system`, `source_metadata`, `summarize`, `summary`) and
+the optional `direct_writes: List[{memory_type, payload}]` for caller-authored
+memory writes that bypass LLM dispatch. Response returns `memory_source_id`
+(async — the worker processes the write after the 202 response).
+
+### Memory Sources
+| Method | Path |
+|--------|------|
+| GET | `/memory-sources/{source_id}` |
+| GET | `/memory-sources/{source_id}/messages` |
+
+Retrieval endpoints for provenance. Filtered by `filter_tags->>'scope'` in
+the caller's `read_scopes`.
 
 ### Tools
 | Method | Path |

@@ -56,6 +56,10 @@ COPY --from=builder /opt/venv /opt/venv
 # Set working directory
 WORKDIR /app
 
+# Bust cache when source code changes (podman may not detect COPY changes in large dirs)
+ARG SOURCE_HASH=dev
+RUN echo "source: ${SOURCE_HASH}" > /dev/null
+
 # Copy application code
 COPY --chown=mirix:mirix mirix/ ./mirix/
 COPY --chown=mirix:mirix pyproject.toml ./

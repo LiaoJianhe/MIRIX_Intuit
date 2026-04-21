@@ -1333,6 +1333,7 @@ class MirixClient(AbstractClient):
         local_model_for_retrieval: Optional[str] = None,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
+        include_citations: bool = False,
         headers: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """
@@ -1425,6 +1426,9 @@ class MirixClient(AbstractClient):
         if end_date is not None:
             request_data["end_date"] = end_date
 
+        if include_citations:
+            request_data["include_citations"] = True
+
         return await self._request("POST", "/memory/retrieve/conversation", json=request_data, headers=headers)
 
     async def retrieve_with_topic(
@@ -1434,6 +1438,7 @@ class MirixClient(AbstractClient):
         limit: int = 10,
         filter_tags: Optional[Dict[str, Any]] = None,
         use_cache: bool = True,
+        include_citations: bool = False,
         headers: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """
@@ -1479,6 +1484,9 @@ class MirixClient(AbstractClient):
         if filter_tags is not None:
             params["filter_tags"] = json.dumps(filter_tags)
 
+        if include_citations:
+            params["include_citations"] = True
+
         return await self._request("GET", "/memory/retrieve/topic", params=params, headers=headers)
 
     async def search(
@@ -1495,6 +1503,7 @@ class MirixClient(AbstractClient):
         end_date: Optional[str] = None,
         org_id: Optional[str] = None,
         include_core_memory: bool = False,
+        include_citations: bool = False,
         headers: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """
@@ -1630,6 +1639,9 @@ class MirixClient(AbstractClient):
         if include_core_memory:
             params["include_core_memory"] = True
 
+        if include_citations:
+            params["include_citations"] = True
+
         return await self._request("GET", "/memory/search", params=params, headers=headers)
 
     async def search_all_users(
@@ -1647,6 +1659,7 @@ class MirixClient(AbstractClient):
         org_id: Optional[str] = None,
         include_core_memory: bool = False,
         block_filter_tags: Optional[Dict[str, Any]] = None,
+        include_citations: bool = False,
         headers: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """
@@ -1781,6 +1794,9 @@ class MirixClient(AbstractClient):
             import json as _json
 
             params["block_filter_tags"] = _json.dumps(block_filter_tags)
+
+        if include_citations:
+            params["include_citations"] = True
 
         return await self._request("GET", "/memory/search_all_users", params=params, headers=headers)
 
