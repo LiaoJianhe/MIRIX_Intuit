@@ -1939,10 +1939,23 @@ class Agent(BaseAgent):
             ),
         ]
 
+        from mirix.llm_api.llm_api_tools import retry_with_exponential_backoff
+        from mirix.settings import settings
+
         llm_client = LLMClient.create(
             llm_config=self.agent_state.llm_config.model_copy(deep=True),
         )
-        response = await llm_client.send_llm_request(messages=llm_messages)
+
+        async def _send_request():
+            return await llm_client.send_llm_request(messages=llm_messages)
+
+        send_with_retry = retry_with_exponential_backoff(
+            _send_request,
+            initial_delay=settings.llm_retry_backoff_factor,
+            max_retries=settings.llm_retry_limit,
+            error_codes=(429, 500, 502, 503, 504),
+        )
+        response = await send_with_retry()
         summary_text = response.choices[0].message.content
 
         if summary_text:
