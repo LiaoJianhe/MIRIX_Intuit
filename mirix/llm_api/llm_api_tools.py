@@ -4,6 +4,7 @@ from contextlib import nullcontext
 from typing import TYPE_CHECKING, List, Optional
 
 import httpx
+import openai
 
 from mirix.constants import CLI_WARNING_PREFIX
 from mirix.errors import MirixConfigurationError, RateLimitExceededError
@@ -67,10 +68,14 @@ def retry_with_exponential_backoff(
         while True:
             try:
                 return await func(*args, **kwargs)
-            except httpx.HTTPStatusError as http_err:
-                if not hasattr(http_err, "response") or http_err.response is None:
-                    raise http_err
-                if http_err.response.status_code in error_codes:
+            except (httpx.HTTPStatusError, openai.APIStatusError) as http_err:
+                status_code = getattr(http_err, "status_code", None)
+                if status_code is None:
+                    response = getattr(http_err, "response", None)
+                    status_code = getattr(response, "status_code", None)
+                if status_code is None:
+                    raise
+                if status_code in error_codes:
                     num_retries += 1
                     if num_retries > max_retries:
                         raise RateLimitExceededError(

@@ -137,6 +137,37 @@ def _filter_function_args(
     return filtered
 
 
+_EPISODIC_ITEM_KEYS = {
+    "episodic_memory_insert": "items",
+    "episodic_memory_replace": "new_items",
+}
+
+
+def _preprocess_episodic_tool_args(
+    function_name: str,
+    function_args: dict,
+    timezone_str: str,
+    occurred_at_override,
+) -> None:
+    """Normalize LLM-emitted ``occurred_at`` values before dispatch.
+
+    When the API supplies an ``occurred_at`` override, the LLM's value is
+    discarded downstream (see memory_tools.episodic_memory_insert), so we
+    skip parsing — otherwise a malformed LLM timestamp would crash a turn
+    whose real timestamp is already known-good.
+    """
+    if occurred_at_override is not None:
+        return
+
+    key = _EPISODIC_ITEM_KEYS.get(function_name)
+    if key is None or key not in function_args:
+        return
+
+    for item in function_args[key]:
+        if "occurred_at" in item:
+            item["occurred_at"] = convert_timezone_to_utc(item["occurred_at"], timezone_str)
+
+
 class BaseAgent(ABC):
     """
     Abstract class for all agents.
@@ -462,20 +493,12 @@ class Agent(BaseAgent):
             is_error = False
 
             try:
-                if function_name in [
-                    "episodic_memory_insert",
-                    "episodic_memory_replace",
-                    "list_memory_within_timerange",
-                ]:
-                    key = "items" if function_name == "episodic_memory_insert" else "new_items"
-                    if key in function_args:
-                        # Need to change the timezone into UTC timezone
-                        for item in function_args[key]:
-                            if "occurred_at" in item:
-                                item["occurred_at"] = convert_timezone_to_utc(
-                                    item["occurred_at"],
-                                    self.user.timezone,
-                                )
+                _preprocess_episodic_tool_args(
+                    function_name,
+                    function_args,
+                    timezone_str=self.user.timezone,
+                    occurred_at_override=getattr(self, "occurred_at", None),
+                )
 
                 if function_name in [
                     "search_in_memory",
@@ -1916,10 +1939,23 @@ class Agent(BaseAgent):
             ),
         ]
 
+        from mirix.llm_api.llm_api_tools import retry_with_exponential_backoff
+        from mirix.settings import settings
+
         llm_client = LLMClient.create(
             llm_config=self.agent_state.llm_config.model_copy(deep=True),
         )
-        response = await llm_client.send_llm_request(messages=llm_messages)
+
+        async def _send_request():
+            return await llm_client.send_llm_request(messages=llm_messages)
+
+        send_with_retry = retry_with_exponential_backoff(
+            _send_request,
+            initial_delay=settings.llm_retry_backoff_factor,
+            max_retries=settings.llm_retry_limit,
+            error_codes=(429, 500, 502, 503, 504),
+        )
+        response = await send_with_retry()
         summary_text = response.choices[0].message.content
 
         if summary_text:
