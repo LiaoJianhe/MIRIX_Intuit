@@ -12,7 +12,6 @@ import pytest
 
 from mirix.utils import convert_timezone_to_utc
 
-
 TZ = "America/Los_Angeles (UTC-08:00)"
 
 

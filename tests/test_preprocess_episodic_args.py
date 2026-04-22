@@ -10,10 +10,10 @@ Covers:
   Previously an ISO-8601 ``T`` from the LLM crashed the whole turn here.
 """
 
-from datetime import datetime, timezone as dt_timezone
+from datetime import datetime
+from datetime import timezone as dt_timezone
 
 from mirix.agent.agent import _preprocess_episodic_tool_args
-
 
 TZ = "America/Los_Angeles (UTC-08:00)"
 
@@ -134,7 +134,5 @@ class TestUnrelated:
 
     def test_unrelated_tool_is_noop(self):
         function_args = {"query": "hello"}
-        _preprocess_episodic_tool_args(
-            "search_in_memory", function_args, timezone_str=TZ, occurred_at_override=None
-        )
+        _preprocess_episodic_tool_args("search_in_memory", function_args, timezone_str=TZ, occurred_at_override=None)
         assert function_args == {"query": "hello"}
