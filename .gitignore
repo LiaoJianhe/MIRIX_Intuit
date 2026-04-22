@@ -50,3 +50,4 @@ test-results/
 test_*.db
 *.log
 .persist
+.worktrees/
