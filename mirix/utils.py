@@ -1430,25 +1430,27 @@ def num_tokens_from_messages(messages: List[dict], model: str = "gpt-4") -> int:
 
 
 def convert_timezone_to_utc(timestamp_str, timezone):
+    # Accept both the legacy space-separated formats and any ISO-8601 string
+    # (LLMs emit ISO-8601 with a 'T' separator by default, and many API clients
+    # pass values via datetime.isoformat()). fromisoformat handles all of those.
     try:
-        timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S.%f")
+        timestamp = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
     except ValueError:
-        timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+        try:
+            timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S.%f")
+        except ValueError:
+            timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
 
-    # timezone is something like "Asia/Shanghai (UTC+08:00)"
-    # Extract the timezone region name, e.g., "Asia/Shanghai" from "Asia/Shanghai (UTC+08:00)"
+    # If the parsed timestamp already carries timezone info (e.g. Z or +02:00),
+    # trust it and convert straight to UTC. Otherwise, localize using the
+    # caller-provided timezone string (e.g. "Asia/Shanghai (UTC+08:00)").
+    if timestamp.tzinfo is not None:
+        return timestamp.astimezone(pytz.utc)
+
     tz_region = timezone.split(" (")[0]
-
-    # Get the timezone object using pytz
     local_tz = pytz.timezone(tz_region)
-
-    # Localize the naive datetime object to the provided timezone
     localized_timestamp = local_tz.localize(timestamp)
-
-    # Convert the localized datetime to UTC
-    utc_timestamp = localized_timestamp.astimezone(pytz.utc)
-
-    return utc_timestamp
+    return localized_timestamp.astimezone(pytz.utc)
 
 
 def log_telemetry(logger: Logger, event: str, **kwargs):
