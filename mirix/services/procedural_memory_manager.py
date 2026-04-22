@@ -910,17 +910,28 @@ class ProceduralMemoryManager:
         user_id: Optional[str] = None,
     ) -> PydanticProceduralMemoryItem:
         try:
-            # Conditionally calculate embeddings based on BUILD_EMBEDDINGS_FOR_MEMORY flag
+            # Conditionally calculate embeddings based on BUILD_EMBEDDINGS_FOR_MEMORY flag.
+            # Embedding generation is best-effort: if the provider is unavailable
+            # (e.g. sustained 429s) we still persist the memory with NULL embeddings
+            # so the text is searchable by keyword and can be backfilled later.
+            summary_embedding = None
+            steps_embedding = None
+            embedding_config = None
             if BUILD_EMBEDDINGS_FOR_MEMORY:
-                # TODO: need to check if we need to chunk the text
-                embed_model = await embedding_model(agent_state.embedding_config)
-                summary_embedding = await embed_model.get_text_embedding(summary)
-                steps_embedding = await embed_model.get_text_embedding("\n".join(steps))
-                embedding_config = agent_state.embedding_config
-            else:
-                summary_embedding = None
-                steps_embedding = None
-                embedding_config = None
+                try:
+                    embed_model = await embedding_model(agent_state.embedding_config)
+                    summary_embedding = await embed_model.get_text_embedding(summary)
+                    steps_embedding = await embed_model.get_text_embedding("\n".join(steps))
+                    embedding_config = agent_state.embedding_config
+                except Exception as embed_err:
+                    logger.warning(
+                        "Failed to generate embeddings for procedural memory item; "
+                        "persisting with NULL embeddings. error=%s",
+                        embed_err,
+                    )
+                    summary_embedding = None
+                    steps_embedding = None
+                    embedding_config = None
 
             # Set client_id from actor, user_id with fallback to DEFAULT_USER_ID
             from mirix.services.user_manager import UserManager

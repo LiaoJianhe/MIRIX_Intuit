@@ -551,17 +551,27 @@ class EpisodicMemoryManager:
             if user_id is None:
                 user_id = UserManager.ADMIN_USER_ID
                 logger.debug("user_id not provided, using ADMIN_USER_ID: %s", user_id)
-            # Conditionally calculate embeddings based on BUILD_EMBEDDINGS_FOR_MEMORY flag
+            # Conditionally calculate embeddings based on BUILD_EMBEDDINGS_FOR_MEMORY flag.
+            # Embedding generation is best-effort: if the provider is unavailable
+            # (e.g. sustained 429s) we still persist the memory with NULL embeddings
+            # so the text is searchable by keyword and can be backfilled later.
+            details_embedding = None
+            summary_embedding = None
+            embedding_config = None
             if BUILD_EMBEDDINGS_FOR_MEMORY:
-                # TODO: need to check if we need to chunk the text
-                embed_model = await embedding_model(agent_state.embedding_config)
-                details_embedding = await embed_model.get_text_embedding(details)
-                summary_embedding = await embed_model.get_text_embedding(summary)
-                embedding_config = agent_state.embedding_config
-            else:
-                details_embedding = None
-                summary_embedding = None
-                embedding_config = None
+                try:
+                    embed_model = await embedding_model(agent_state.embedding_config)
+                    details_embedding = await embed_model.get_text_embedding(details)
+                    summary_embedding = await embed_model.get_text_embedding(summary)
+                    embedding_config = agent_state.embedding_config
+                except Exception as embed_err:
+                    logger.warning(
+                        "Failed to generate embeddings for episodic event; persisting with NULL embeddings. error=%s",
+                        embed_err,
+                    )
+                    details_embedding = None
+                    summary_embedding = None
+                    embedding_config = None
 
             event = await self.create_episodic_memory(
                 PydanticEpisodicEvent(

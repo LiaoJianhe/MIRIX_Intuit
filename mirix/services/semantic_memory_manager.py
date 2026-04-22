@@ -969,19 +969,31 @@ class SemanticMemoryManager:
                 user_id = UserManager.ADMIN_USER_ID
                 logger.debug("user_id not provided, using DEFAULT_USER_ID: %s", user_id)
 
-            # Conditionally calculate embeddings based on BUILD_EMBEDDINGS_FOR_MEMORY flag
+            # Conditionally calculate embeddings based on BUILD_EMBEDDINGS_FOR_MEMORY flag.
+            # Embedding generation is best-effort: if the provider is unavailable
+            # (e.g. sustained 429s) we still persist the memory with NULL embeddings
+            # so the text is searchable by keyword and can be backfilled later.
+            name_embedding = None
+            summary_embedding = None
+            details_embedding = None
+            embedding_config = None
             if BUILD_EMBEDDINGS_FOR_MEMORY:
-                # TODO: need to check if we need to chunk the text
-                embed_model = await embedding_model(agent_state.embedding_config)
-                name_embedding = await embed_model.get_text_embedding(name)
-                summary_embedding = await embed_model.get_text_embedding(summary)
-                details_embedding = await embed_model.get_text_embedding(details)
-                embedding_config = agent_state.embedding_config
-            else:
-                name_embedding = None
-                summary_embedding = None
-                details_embedding = None
-                embedding_config = None
+                try:
+                    embed_model = await embedding_model(agent_state.embedding_config)
+                    name_embedding = await embed_model.get_text_embedding(name)
+                    summary_embedding = await embed_model.get_text_embedding(summary)
+                    details_embedding = await embed_model.get_text_embedding(details)
+                    embedding_config = agent_state.embedding_config
+                except Exception as embed_err:
+                    logger.warning(
+                        "Failed to generate embeddings for semantic memory item; "
+                        "persisting with NULL embeddings. error=%s",
+                        embed_err,
+                    )
+                    name_embedding = None
+                    summary_embedding = None
+                    details_embedding = None
+                    embedding_config = None
 
             semantic_item = await self.create_item(
                 item_data=PydanticSemanticMemoryItem(
