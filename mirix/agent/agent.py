@@ -914,37 +914,17 @@ class Agent(BaseAgent):
                     assert tool_call.id is not None  # should be defined
 
             # Memory agents are instructed to emit only ONE tool call per step.
-            # In practice, the LLM can occasionally return multiple tool calls (often duplicates),
-            # which can cause non-idempotent operations to fail (e.g., double deletes).
-            # To match the prompt contract and keep behavior predictable, truncate to the first.
-            from mirix.schemas.agent import AgentType
+            # When the LLM returns more than one, combine them if it's safe
+            # (same additive insert tool) or truncate to the first otherwise.
+            from mirix.agent.tool_call_consolidation import (
+                consolidate_memory_agent_tool_calls,
+            )
 
-            memory_agent_types = {
-                AgentType.core_memory_agent,
-                AgentType.episodic_memory_agent,
-                AgentType.procedural_memory_agent,
-                AgentType.resource_memory_agent,
-                AgentType.knowledge_vault_memory_agent,
-                AgentType.semantic_memory_agent,
-            }
-
-            if (
-                self.agent_state.agent_type in memory_agent_types
-                and response_message.tool_calls is not None
-                and len(response_message.tool_calls) > 1
-            ):
-                kept = response_message.tool_calls[0]
-                dropped = response_message.tool_calls[1:]
-                dropped_desc = [f"{tc.function.name}:{tc.id}" for tc in dropped if tc and tc.function]
-                self.logger.warning(
-                    "Truncating %d extra tool call(s) for memory agent %s (keeping %s:%s, dropping %s)",
-                    len(dropped),
-                    self.agent_state.agent_type,
-                    kept.function.name if kept and kept.function else None,
-                    kept.id if kept else None,
-                    dropped_desc,
-                )
-                response_message.tool_calls = [kept]
+            response_message.tool_calls = consolidate_memory_agent_tool_calls(
+                tool_calls=response_message.tool_calls,
+                agent_type=self.agent_state.agent_type,
+                logger=self.logger,
+            )
 
             # role: assistant (requesting tool call, set tool call ID)
             messages.append(
