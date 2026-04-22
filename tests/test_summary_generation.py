@@ -266,6 +266,75 @@ class TestSummaryGeneration:
         user_msg = messages[-1]  # Last message is the transcript
         assert "user: Question?" in user_msg.content[0].text
 
+    @pytest.mark.asyncio
+    async def test_retries_on_rate_limit_and_succeeds(self):
+        """A 429 rate-limit error is retried with exponential backoff; later success is used."""
+        import httpx
+
+        agent, _, _ = _setup_agent("src-abc123", summarize=True)
+
+        source_msgs = [_make_source_message("user", "Hello", 1)]
+        agent.source_message_manager.get_messages_by_source_id = AsyncMock(
+            return_value=PaginatedResponse(items=source_msgs, next_cursor=None, has_more=False)
+        )
+
+        rate_limit_err = httpx.HTTPStatusError(
+            "429 Too Many Requests",
+            request=httpx.Request("POST", "https://example.com"),
+            response=httpx.Response(429),
+        )
+        good_response = _mock_llm_response("Retried summary.")
+
+        with (
+            patch("mirix.agent.agent.LLMClient") as mock_llm_cls,
+            patch("mirix.agent.agent.asyncio.sleep", new=AsyncMock()),
+        ):
+            mock_client = MagicMock()
+            mock_client.send_llm_request = AsyncMock(side_effect=[rate_limit_err, rate_limit_err, good_response])
+            mock_llm_cls.create.return_value = mock_client
+
+            await agent._generate_source_summary()
+
+        assert mock_client.send_llm_request.await_count == 3
+        agent.memory_source_manager.update_summary.assert_called_once_with(
+            memory_source_id="src-abc123",
+            summary="Retried summary.",
+            summary_source="generated",
+        )
+
+    @pytest.mark.asyncio
+    async def test_retries_exhausted_raises(self):
+        """Persistent 429s eventually give up after the configured max and raise."""
+        import httpx
+
+        from mirix.errors import RateLimitExceededError
+
+        agent, _, _ = _setup_agent("src-abc123", summarize=True)
+
+        source_msgs = [_make_source_message("user", "Hello", 1)]
+        agent.source_message_manager.get_messages_by_source_id = AsyncMock(
+            return_value=PaginatedResponse(items=source_msgs, next_cursor=None, has_more=False)
+        )
+
+        rate_limit_err = httpx.HTTPStatusError(
+            "429 Too Many Requests",
+            request=httpx.Request("POST", "https://example.com"),
+            response=httpx.Response(429),
+        )
+
+        with (
+            patch("mirix.agent.agent.LLMClient") as mock_llm_cls,
+            patch("mirix.agent.agent.asyncio.sleep", new=AsyncMock()),
+        ):
+            mock_client = MagicMock()
+            mock_client.send_llm_request = AsyncMock(side_effect=rate_limit_err)
+            mock_llm_cls.create.return_value = mock_client
+
+            with pytest.raises(RateLimitExceededError):
+                await agent._generate_source_summary()
+
+        agent.memory_source_manager.update_summary.assert_not_called()
+
 
 class TestSummaryTriggerInStep:
     """Test that step() dispatches summary in parallel with sub-agents."""
