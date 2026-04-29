@@ -29,8 +29,9 @@ auth/cache providers at startup.
   `processing_complete` flag on `memory_source` short-circuits re-processing; (L3)
   citation-level dedup inside `_write_citation`. Skip events emit a LangFuse span via
   `mirix/observability/skip_spans.py`.
-- **Temporal guard**: `MAX(occurred_at)` per `(user, memory_type, external_thread_id)` —
-  out-of-order writes are dropped, not applied.
+- **Temporal guard**: `MAX(occurred_at)` per `(memory_type, memory_id)` across all
+  citations — out-of-order writes are dropped, not applied. Scope is per-memory, not
+  per-thread.
 - **Retrieval endpoints**: `GET /memory-sources/{id}` (metadata + summary) and
   `GET /memory-sources/{id}/messages` (paginated raw turns). Search accepts
   `include_citations=True` and attaches `citations: [{memory_source_id, ...}]` to each
