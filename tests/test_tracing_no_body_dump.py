@@ -1,4 +1,4 @@
-"""VEPAGE-983: verify update_trace_attributes does not capture raw body content."""
+"""Verify update_trace_attributes does not capture raw body content."""
 
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock

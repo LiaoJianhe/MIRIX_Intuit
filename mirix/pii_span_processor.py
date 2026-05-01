@@ -1,12 +1,11 @@
 """OpenTelemetry SpanProcessor that masks allowlisted attribute values.
 
-VEPAGE-983: runs on the OTEL export thread (off the request critical path).
-Wraps an inner processor (typically BatchSpanProcessor) and only redacts
-attributes whose key matches one of the allowlisted prefixes. Anything
-outside the allowlist is assumed to be PII-free because the call sites have
-been changed to drop raw content (B.1, B.2). The processor is
-defense-in-depth for the small surface where LLM-call spans deliberately
-capture content for debugging.
+Runs on the OTEL export thread (off the request critical path). Wraps an
+inner processor (typically BatchSpanProcessor) and only redacts attributes
+whose key matches one of the allowlisted prefixes. Anything outside the
+allowlist is assumed to be PII-free because the call sites have been changed
+to drop raw content. The processor is defense-in-depth for the small surface
+where LLM-call spans deliberately capture content for debugging.
 
 When `MIRIX_ISPY_PII_ENABLED=false` (the default), `mirix.pii.mask` is a
 passthrough — this processor still runs but produces no redaction. The

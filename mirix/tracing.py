@@ -82,10 +82,9 @@ async def update_trace_attributes(request: Request):
     for key, value in request.path_params.items():
         span.set_attribute(f"http.{key}", value)
 
-    # VEPAGE-983: never copy raw HTTP request body values into span
-    # attributes — that route is what leaks conversation content to
-    # Langfuse via OTLP. Capture only structural metadata and an
-    # explicit allowlist of ID-shaped fields.
+    # Never copy raw HTTP request body values into span attributes — that
+    # route is what leaks conversation content to Langfuse via OTLP. Capture
+    # only structural metadata and an explicit allowlist of ID-shaped fields.
     try:
         body = await request.json()
         if isinstance(body, dict):
@@ -152,9 +151,9 @@ def setup_tracing(
         )
     )
     if endpoint:
-        # VEPAGE-983: wrap the exporting BatchSpanProcessor in
-        # PIIRedactingSpanProcessor so allowlisted LLM-call attribute values
-        # are masked on the export thread before they ship to OTLP/Langfuse.
+        # Wrap the exporting BatchSpanProcessor in PIIRedactingSpanProcessor
+        # so allowlisted LLM-call attribute values are masked on the export
+        # thread before they ship to OTLP/Langfuse.
         batch = BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint))
         provider.add_span_processor(PIIRedactingSpanProcessor(batch))
         _is_tracing_initialized = True
@@ -201,11 +200,10 @@ def setup_tracing(
 def trace_method(_func=None, *, trace_params: Optional[tuple] = None):
     """Decorator that traces function execution with OpenTelemetry.
 
-    VEPAGE-983: by default no function arguments are captured as span
-    attributes. Pass ``trace_params=("name1", "name2")`` to opt specific
-    arguments into capture. Allowlisted args are stringified; never use this
-    for fields that may carry conversation content, prompts, or PII-bearing
-    payloads.
+    By default no function arguments are captured as span attributes. Pass
+    ``trace_params=("name1", "name2")`` to opt specific arguments into
+    capture. Allowlisted args are stringified; never use this for fields that
+    may carry conversation content, prompts, or PII-bearing payloads.
 
     Both bare ``@trace_method`` and parameterized ``@trace_method(...)`` are
     supported for backward compatibility. Bare usage captures zero args.

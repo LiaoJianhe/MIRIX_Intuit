@@ -1,4 +1,4 @@
-"""VEPAGE-983: verify PIIRedactingSpanProcessor masks only allowlisted attrs."""
+"""Verify PIIRedactingSpanProcessor masks only allowlisted attrs."""
 
 from unittest.mock import MagicMock, patch
 
