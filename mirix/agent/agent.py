@@ -818,8 +818,13 @@ class Agent(BaseAgent):
                 self.interface.internal_monologue(
                     response_message.content, msg_obj=messages[-1]
                 )
-                # Log inner thoughts for debugging and analysis
-                self.logger.info(f"Inner thoughts: {response_message.content}")
+                # VEPAGE-983: do not log raw LLM completion content. Length
+                # is enough for debugging "did the model produce anything";
+                # the content itself lives in the masked LLM-call span.
+                self.logger.info(
+                    "Inner thoughts emitted: len=%d",
+                    len(response_message.content or ""),
+                )
                 # Flag to avoid printing a duplicate if inner thoughts get popped from the function call
                 nonnull_content = True
 
@@ -2170,7 +2175,12 @@ These keywords have been used to retrieve relevant memories from the database.
                             choice.message.tool_calls[0].function.arguments
                         )
                         topics = function_args.get("topic")
-                        self.logger.info(f"Extracted topics: {topics}")
+                        # VEPAGE-983: topics are derived from user content;
+                        # log shape only.
+                        self.logger.info(
+                            "Extracted topics: count=%d",
+                            len(topics) if isinstance(topics, list) else 0,
+                        )
                         return topics
                     except (json.JSONDecodeError, KeyError) as parse_error:
                         self.logger.warning(
@@ -2179,7 +2189,11 @@ These keywords have been used to retrieve relevant memories from the database.
                         continue
 
         except Exception as e:
-            self.logger.info(f"Error in extracting the topic from the messages: {e}")
+            # VEPAGE-983: bump to warning so the WARNING+ PII filter masks
+            # the exception string before emission.
+            self.logger.warning(
+                "Error in extracting the topic from the messages: %s", e
+            )
 
         return None
 
@@ -2267,7 +2281,11 @@ These keywords have been used to retrieve relevant memories from the database.
                 f"Starting agent step - step_count: {step_count}, chaining: {chaining}"
             )
             if topics:
-                self.logger.info(f"Step topics: {topics}")
+                # VEPAGE-983: topics derive from user content; log shape only.
+                self.logger.info(
+                    "Step topics: count=%d",
+                    len(topics) if isinstance(topics, list) else 0,
+                )
 
             # Step 0: get in-context messages and get the raw system prompt
             in_context_messages = self.agent_manager.get_in_context_messages(
@@ -2479,7 +2497,15 @@ These keywords have been used to retrieve relevant memories from the database.
             )
 
         except Exception as e:
-            self.logger.error(f"step() failed\nmessages = {messages}\nerror = {e}")
+            # VEPAGE-983: never dump the messages list — log shape only.
+            # The WARNING+ PII filter masks the exception string.
+            self.logger.error(
+                "step() failed: error=%s, num_messages=%d, message_roles=%s",
+                e,
+                len(messages),
+                [m.get("role") for m in messages] if messages else [],
+                exc_info=True,
+            )
 
             # If we got a context alert, try trimming the messages length, then try again
             if is_context_overflow_error(e):
@@ -2645,7 +2671,8 @@ These keywords have been used to retrieve relevant memories from the database.
             message_sequence_to_summarize=message_sequence_to_summarize,
             existing_file_uris=existing_file_uris,
         )
-        self.logger.info(f"Got summary: {summary}")
+        # VEPAGE-983: summary is generated from user content; log shape only.
+        self.logger.info("Got summary: len=%d", len(summary or ""))
 
         # Metadata that's useful for the agent to see
         all_time_message_count = self.message_manager.size(
@@ -2659,7 +2686,8 @@ These keywords have been used to retrieve relevant memories from the database.
         summary_message = package_summarize_message(
             summary, summary_message_count, hidden_message_count, all_time_message_count
         )
-        self.logger.info(f"Packaged into message: {summary_message}")
+        # VEPAGE-983: packaged summary message is derived content; log shape.
+        self.logger.info("Packaged into message: len=%d", len(summary_message or ""))
 
         prior_len = len(in_context_messages_openai)
         self.agent_state = self.agent_manager.trim_older_in_context_messages(
