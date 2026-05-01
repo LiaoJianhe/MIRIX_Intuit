@@ -179,7 +179,7 @@ def db_error_handler():
         yield
     except Exception as e:
         # Handle other SQLAlchemy errors
-        logger.error(e)
+        logger.error("Database error: %r", e, exc_info=True)
         print_sqlite_schema_error()
         # raise ValueError(f"SQLite DB error: {str(e)}")
         exit(1)
@@ -697,6 +697,16 @@ class AsyncServer(Server):
         block_filter_tags_update_mode: Optional[str] = "merge",
         use_cache: bool = True,
         occurred_at: Optional[str] = None,
+        memory_source_id: Optional[str] = None,
+        external_id: Optional[str] = None,
+        external_thread_id: Optional[str] = None,
+        source_type: Optional[str] = None,
+        source_system: Optional[str] = None,
+        source_metadata: Optional[dict] = None,
+        summary: Optional[str] = None,
+        summarize: bool = False,
+        source_messages: Optional[list] = None,
+        direct_writes: Optional[List[dict]] = None,
     ) -> MirixUsageStatistics:
         """Send the input message through the agent"""
         logger.debug("Got input messages: %s", input_messages)
@@ -721,6 +731,29 @@ class AsyncServer(Server):
             # Store occurred_at on agent instance for use during memory extraction
             if occurred_at is not None:
                 mirix_agent.occurred_at = occurred_at
+
+            # Store memory source fields on agent instance for source/citation tracking
+            if memory_source_id is not None:
+                mirix_agent.memory_source_id = memory_source_id
+            if external_id is not None:
+                mirix_agent.external_id = external_id
+            if external_thread_id is not None:
+                mirix_agent.external_thread_id = external_thread_id
+            if source_type is not None:
+                mirix_agent.source_type = source_type
+            if source_system is not None:
+                mirix_agent.source_system = source_system
+            if source_metadata is not None:
+                mirix_agent.source_metadata = source_metadata
+            if summary is not None:
+                mirix_agent.source_summary = summary
+                mirix_agent.source_summary_source = "client"
+            if summarize:
+                mirix_agent.summarize = summarize
+            if source_messages is not None:
+                mirix_agent.source_messages = source_messages
+            if direct_writes is not None:
+                mirix_agent.direct_writes = direct_writes
 
             # Determine whether or not to token stream based on the capability of the interface
             token_streaming = (
@@ -1023,6 +1056,16 @@ class AsyncServer(Server):
         block_filter_tags_update_mode: Optional[str] = "merge",
         use_cache: bool = True,
         occurred_at: Optional[str] = None,
+        memory_source_id: Optional[str] = None,
+        external_id: Optional[str] = None,
+        external_thread_id: Optional[str] = None,
+        source_type: Optional[str] = None,
+        source_system: Optional[str] = None,
+        source_metadata: Optional[dict] = None,
+        summary: Optional[str] = None,
+        summarize: bool = False,
+        source_messages: Optional[list] = None,
+        direct_writes: Optional[List[dict]] = None,
     ) -> MirixUsageStatistics:
         """Send a list of messages to the agent.
 
@@ -1038,6 +1081,7 @@ class AsyncServer(Server):
             block_filter_tags_update_mode: "merge" (default) or "replace" for existing block filter_tags
             use_cache: Control Redis cache behavior (default: True)
             occurred_at: Optional ISO 8601 timestamp for episodic memory (default: None)
+            memory_source_id: Optional pre-generated source ID for citation tracking (default: None)
 
         Returns:
             MirixUsageStatistics containing usage information
@@ -1065,6 +1109,16 @@ class AsyncServer(Server):
                 block_filter_tags_update_mode=block_filter_tags_update_mode,
                 use_cache=use_cache,
                 occurred_at=occurred_at,
+                memory_source_id=memory_source_id,
+                external_id=external_id,
+                external_thread_id=external_thread_id,
+                source_type=source_type,
+                source_system=source_system,
+                source_metadata=source_metadata,
+                summary=summary,
+                summarize=summarize,
+                source_messages=source_messages,
+                direct_writes=direct_writes,
             )
         finally:
             # No cleanup needed - context automatically isolated per request
@@ -1491,10 +1545,7 @@ class AsyncServer(Server):
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(e)
-            import traceback
-
-            traceback.print_exc()
+            logger.error("send_messages failed: %r", e, exc_info=True)
             raise HTTPException(status_code=500, detail=f"{e}")
 
 

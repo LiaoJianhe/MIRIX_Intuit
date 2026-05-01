@@ -80,3 +80,28 @@ class ToolRuleType(str, Enum):
     constrain_child_tools = "constrain_child_tools"
     max_count_per_step = "max_count_per_step"
     parent_last_tool = "parent_last_tool"
+
+
+class SummarySource(str, Enum):
+    """Source of a memory source summary."""
+
+    client = "client"
+    generated = "generated"
+
+
+class CitationType(str, Enum):
+    """How a citation links a source to a memory."""
+
+    created = "created"
+    updated = "updated"
+
+
+class MemoryType(str, Enum):
+    """The six MIRIX memory types, used for polymorphic citation references."""
+
+    episodic = "episodic"
+    semantic = "semantic"
+    procedural = "procedural"
+    resource = "resource"
+    knowledge_vault = "knowledge_vault"
+    core = "core"

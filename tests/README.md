@@ -14,10 +14,29 @@ export GEMINI_API_KEY=your_api_key_here
 
 ## Test Files Overview
 
-| File | Tests | Type | Speed | Description |
-|------|-------|------|-------|-------------|
-| `test_memory_server.py` | 18 | Unit | Fast (~20s) | Direct `AsyncServer()` calls, no network |
-| `test_memory_integration.py` | 4 | Integration | Slow (~45s) | REST API via real server + client |
+The `tests/` directory contains ~45 test modules. Only integration tests require a running server; everything else runs against an in-process `AsyncServer()` or directly exercises ORM/managers.
+
+**Foundational unit tests:**
+- `test_memory_server.py` — in-process server, all 5 memory types + search methods
+- `test_memory_integration.py` — REST API via real server + client
+- `test_user_manager.py`, `test_user.py`, `test_raw_memory.py`, `test_message_handling.py`, `test_queue.py`, `test_local_client.py`, `test_langfuse_integration.py`, `test_cache_provider.py`, `test_redis_cache_provider.py`, `test_redis_integration.py`
+
+**VEPAGE-760 (memory sources, citations, idempotency, temporal guard):**
+- `test_memory_source_managers.py`, `test_memory_source_schemas.py` — source sidecar tables
+- `test_citation_writes.py`, `test_citation_writes_db.py`, `test_search_citations.py`, `test_search_citations_integration.py` — citation emission + search integration
+- `test_source_idempotency.py`, `test_source_idempotency_db.py` — L1 source-level dedup
+- `test_processing_skip.py` — L2 processing-complete short-circuit
+- `test_idempotency_skip_spans.py` — LangFuse skip-span emission for L1/L2/L3
+- `test_temporal_guard.py` — MAX(occurred_at) guard for out-of-order writes
+- `test_summary_generation.py` — summary-agent task dispatch + span
+- `test_retrieval_endpoints.py` — `GET /memory-sources/{id}` + `/messages`
+- `test_add_memory_direct_writes.py`, `test_direct_write_episodic_handler.py`, `test_direct_write_meta_agent.py`, `test_direct_writes_queue.py`, `test_direct_writes_worker.py` — caller-authored memory writes bypassing the LLM pipeline
+
+**Access control / filtering:**
+- `test_multi_scope_access.py`, `test_scoped_blocks.py`, `test_search_all_users.py`, `test_search_single_user_core_memory.py`, `test_client_agent_isolation.py`
+- `test_block_filter_tag_updates.py`, `test_block_filter_tags_update_mode.py`, `test_filter_tags_db.py`, `test_filter_tags_query.py`, `test_filter_function_args.py`, `test_remote_client_block_filter_tags.py`
+
+**Misc:** `test_agent_prompt_update.py`, `test_auth_provider.py`, `test_deletion_apis.py`, `test_memory_agent_toolcall_truncation.py`, `test_memory_tool_inserts.py`, `test_orm_to_pydantic_safe.py`, `test_raw_memory_with_real_embeddings.py`, `test_temporal_queries.py`.
 
 ## Run Tests
 
@@ -52,6 +71,15 @@ Core API operations via client-server:
 - ✅ `client.retrieve_with_conversation()`: Retrieve with context
 - ✅ `client.retrieve_with_topic()`: Retrieve by topic
 - ✅ `client.search()`: Search memories (bm25, embedding)
+- ✅ `include_citations=True` (covered in `test_search_citations_integration.py`)
+- ✅ `GET /memory-sources/{id}` + `/messages` (covered in `test_retrieval_endpoints.py`)
+
+### VEPAGE-760 coverage highlights
+- Idempotency (L1/L2/L3) — `test_source_idempotency*`, `test_processing_skip`, `test_idempotency_skip_spans`
+- Temporal guard — `test_temporal_guard`
+- Direct writes — `test_add_memory_direct_writes`, `test_direct_writes_*`
+- Summary agent — `test_summary_generation`
+- Citation emission + search — `test_citation_writes*`, `test_search_citations*`
 
 ## Prerequisites
 

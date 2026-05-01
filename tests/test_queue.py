@@ -985,5 +985,180 @@ class TestQueuePerformance:
         await manager.cleanup()
 
 
+# --- Protobuf source field tests ---
+
+from mirix.queue.message_pb2 import MessageCreate as ProtoMessageCreate
+
+
+class TestProtobufSourceFields:
+    """Test protobuf serialization/deserialization of memory source fields."""
+
+    def test_queue_message_source_fields_roundtrip(self):
+        msg = QueueMessage()
+        msg.client_id = "client-1"
+        msg.agent_id = "agent-1"
+        msg.memory_source_id = "src-abc123"
+        msg.external_id = "ext-456"
+        msg.external_thread_id = "thread-789"
+        msg.source_type = "conversation"
+        msg.source_system = "slack"
+        msg.source_metadata.update({"channel_id": "C123", "team_id": "T456"})
+        msg.summary = "User asked about billing"
+        msg.summarize = True
+
+        serialized = msg.SerializeToString()
+        deserialized = QueueMessage()
+        deserialized.ParseFromString(serialized)
+
+        assert deserialized.memory_source_id == "src-abc123"
+        assert deserialized.external_id == "ext-456"
+        assert deserialized.external_thread_id == "thread-789"
+        assert deserialized.source_type == "conversation"
+        assert deserialized.source_system == "slack"
+        from google.protobuf.json_format import MessageToDict
+
+        metadata = MessageToDict(deserialized.source_metadata)
+        assert metadata["channel_id"] == "C123"
+        assert metadata["team_id"] == "T456"
+        assert deserialized.summary == "User asked about billing"
+        assert deserialized.summarize is True
+
+    def test_per_message_fields_roundtrip(self):
+        msg = QueueMessage()
+        msg.client_id = "client-1"
+        msg.agent_id = "agent-1"
+
+        proto_msg = ProtoMessageCreate()
+        proto_msg.role = ProtoMessageCreate.ROLE_USER
+        proto_msg.text_content = "hello"
+        proto_msg.external_message_id = "msg-ext-1"
+        proto_msg.message_occurred_at = "2026-01-15T10:00:00Z"
+        msg.source_messages.append(proto_msg)
+
+        serialized = msg.SerializeToString()
+        deserialized = QueueMessage()
+        deserialized.ParseFromString(serialized)
+
+        src_msg = deserialized.source_messages[0]
+        assert src_msg.external_message_id == "msg-ext-1"
+        assert src_msg.message_occurred_at == "2026-01-15T10:00:00Z"
+        assert src_msg.text_content == "hello"
+
+    def test_old_messages_no_new_fields(self):
+        """Old-format messages (without new fields) deserialize cleanly."""
+        msg = QueueMessage()
+        msg.client_id = "client-1"
+        msg.agent_id = "agent-1"
+        msg.chaining = True
+
+        serialized = msg.SerializeToString()
+        deserialized = QueueMessage()
+        deserialized.ParseFromString(serialized)
+
+        assert not deserialized.HasField("memory_source_id")
+        assert not deserialized.HasField("external_id")
+        assert not deserialized.HasField("external_thread_id")
+        assert not deserialized.HasField("source_type")
+        assert not deserialized.HasField("source_system")
+        assert not deserialized.HasField("summary")
+        assert not deserialized.HasField("summarize")
+        assert len(deserialized.source_messages) == 0
+
+    def test_json_serialization_roundtrip(self):
+        """New fields survive JSON serialization format too."""
+        from mirix.queue.queue_util import deserialize_queue_message, serialize_queue_message
+
+        msg = QueueMessage()
+        msg.client_id = "client-1"
+        msg.agent_id = "agent-1"
+        msg.memory_source_id = "src-test"
+        msg.external_id = "ext-test"
+        msg.source_type = "document"
+
+        serialized = serialize_queue_message(msg, format="json")
+        deserialized = deserialize_queue_message(serialized, format="json")
+
+        assert deserialized.memory_source_id == "src-test"
+        assert deserialized.external_id == "ext-test"
+        assert deserialized.source_type == "document"
+
+    def test_protobuf_serialization_roundtrip(self):
+        """New fields survive protobuf binary serialization."""
+        from mirix.queue.queue_util import deserialize_queue_message, serialize_queue_message
+
+        msg = QueueMessage()
+        msg.client_id = "client-1"
+        msg.agent_id = "agent-1"
+        msg.memory_source_id = "src-test"
+        msg.summarize = True
+
+        proto_src = ProtoMessageCreate()
+        proto_src.role = ProtoMessageCreate.ROLE_USER
+        proto_src.text_content = "test"
+        proto_src.external_message_id = "ext-msg-1"
+        msg.source_messages.append(proto_src)
+
+        serialized = serialize_queue_message(msg, format="protobuf")
+        deserialized = deserialize_queue_message(serialized, format="protobuf")
+
+        assert deserialized.memory_source_id == "src-test"
+        assert deserialized.summarize is True
+        assert deserialized.source_messages[0].external_message_id == "ext-msg-1"
+
+
+class TestWorkerSourceMessageConversion:
+    """Test worker conversion of source_messages from protobuf to dicts."""
+
+    def test_preserves_all_fields(self):
+        proto_msg = ProtoMessageCreate()
+        proto_msg.role = ProtoMessageCreate.ROLE_USER
+        proto_msg.text_content = "hello world"
+        proto_msg.external_message_id = "ext-msg-abc"
+        proto_msg.message_occurred_at = "2026-01-15T14:30:00Z"
+
+        result = QueueWorker._convert_proto_source_message_to_dict(proto_msg)
+
+        assert result["role"] == "user"
+        assert result["content"] == "hello world"
+        assert result["external_message_id"] == "ext-msg-abc"
+        assert result["message_occurred_at"] == "2026-01-15T14:30:00Z"
+
+    def test_preserves_assistant_role(self):
+        """Assistant role must survive the protobuf round-trip as 'assistant', not 'user'."""
+        proto_msg = ProtoMessageCreate()
+        proto_msg.role = ProtoMessageCreate.ROLE_ASSISTANT
+        proto_msg.text_content = "I can help with that"
+
+        result = QueueWorker._convert_proto_source_message_to_dict(proto_msg)
+
+        assert result["role"] == "assistant"
+
+    def test_without_optional_fields(self):
+        proto_msg = ProtoMessageCreate()
+        proto_msg.role = ProtoMessageCreate.ROLE_USER
+        proto_msg.text_content = "hello"
+
+        result = QueueWorker._convert_proto_source_message_to_dict(proto_msg)
+
+        assert result["role"] == "user"
+        assert result["content"] == "hello"
+        assert "external_message_id" not in result
+        assert "message_occurred_at" not in result
+
+    def test_pydantic_conversion_still_works_for_input_messages(self):
+        """_convert_proto_message_to_pydantic is still used for input_messages (agent processing)."""
+        worker = QueueWorker.__new__(QueueWorker)
+
+        proto_msg = ProtoMessageCreate()
+        proto_msg.role = ProtoMessageCreate.ROLE_USER
+        proto_msg.text_content = "hello"
+        proto_msg.external_message_id = "ext-1"
+
+        pydantic_msg = worker._convert_proto_message_to_pydantic(proto_msg)
+
+        assert pydantic_msg.content == "hello"
+        assert pydantic_msg.external_message_id == "ext-1"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

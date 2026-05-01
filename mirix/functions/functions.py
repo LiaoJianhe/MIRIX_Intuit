@@ -168,8 +168,8 @@ def load_function_set(module: ModuleType) -> dict:
         # Get the attribute
         attr = getattr(module, attr_name)
 
-        # Check if it's a callable function and not a built-in or special method
-        if inspect.isfunction(attr) and attr.__module__ == module.__name__:
+        # Check if it's a callable function and not a built-in, special, or private method
+        if inspect.isfunction(attr) and attr.__module__ == module.__name__ and not attr_name.startswith("_"):
             if attr_name in function_dict:
                 raise ValueError(f"Found a duplicate of function name '{attr_name}'")
 

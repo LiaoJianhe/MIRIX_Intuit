@@ -691,16 +691,16 @@ class TestSeedTemplateBlock:
         assert r1.filter_tags["scope"] == "test-scope-seed3a"
         assert r2.filter_tags["scope"] == "test-scope-seed3b"
 
-    async def test_asserts_write_scope_not_none(self, block_manager, client_reader, default_user):
-        """Calling with write_scope=None raises AssertionError."""
-        with pytest.raises(AssertionError):
-            await block_manager.seed_template_block_for_actor_scope_if_necessary(
-                label="block-label-1",
-                value="should fail",
-                limit=2000,
-                actor=client_reader,
-                default_user=default_user,
-            )
+    async def test_returns_none_when_write_scope_none(self, block_manager, client_reader, default_user):
+        """Read-only clients (write_scope=None) skip seeding and return None."""
+        result = await block_manager.seed_template_block_for_actor_scope_if_necessary(
+            label="block-label-1",
+            value="should no-op",
+            limit=2000,
+            actor=client_reader,
+            default_user=default_user,
+        )
+        assert result is None
 
 
 # =============================================================================

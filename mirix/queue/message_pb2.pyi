@@ -30,6 +30,16 @@ class QueueMessage(_message.Message):
         "langfuse_user_id",
         "block_filter_tags",
         "block_filter_tags_update_mode",
+        "memory_source_id",
+        "external_id",
+        "external_thread_id",
+        "source_type",
+        "source_system",
+        "source_metadata",
+        "summary",
+        "summarize",
+        "source_messages",
+        "direct_writes",
     )
     CLIENT_ID_FIELD_NUMBER: _ClassVar[int]
     AGENT_ID_FIELD_NUMBER: _ClassVar[int]
@@ -46,6 +56,16 @@ class QueueMessage(_message.Message):
     LANGFUSE_USER_ID_FIELD_NUMBER: _ClassVar[int]
     BLOCK_FILTER_TAGS_FIELD_NUMBER: _ClassVar[int]
     BLOCK_FILTER_TAGS_UPDATE_MODE_FIELD_NUMBER: _ClassVar[int]
+    MEMORY_SOURCE_ID_FIELD_NUMBER: _ClassVar[int]
+    EXTERNAL_ID_FIELD_NUMBER: _ClassVar[int]
+    EXTERNAL_THREAD_ID_FIELD_NUMBER: _ClassVar[int]
+    SOURCE_TYPE_FIELD_NUMBER: _ClassVar[int]
+    SOURCE_SYSTEM_FIELD_NUMBER: _ClassVar[int]
+    SOURCE_METADATA_FIELD_NUMBER: _ClassVar[int]
+    SUMMARY_FIELD_NUMBER: _ClassVar[int]
+    SUMMARIZE_FIELD_NUMBER: _ClassVar[int]
+    SOURCE_MESSAGES_FIELD_NUMBER: _ClassVar[int]
+    DIRECT_WRITES_FIELD_NUMBER: _ClassVar[int]
     client_id: str
     agent_id: str
     input_messages: _containers.RepeatedCompositeFieldContainer[MessageCreate]
@@ -61,6 +81,16 @@ class QueueMessage(_message.Message):
     langfuse_user_id: str
     block_filter_tags: _struct_pb2.Struct
     block_filter_tags_update_mode: str
+    memory_source_id: str
+    external_id: str
+    external_thread_id: str
+    source_type: str
+    source_system: str
+    source_metadata: _struct_pb2.Struct
+    summary: str
+    summarize: bool
+    source_messages: _containers.RepeatedCompositeFieldContainer[MessageCreate]
+    direct_writes: _containers.RepeatedCompositeFieldContainer[DirectMemoryWrite]
     def __init__(
         self,
         client_id: _Optional[str] = ...,
@@ -78,6 +108,16 @@ class QueueMessage(_message.Message):
         langfuse_user_id: _Optional[str] = ...,
         block_filter_tags: _Optional[_Union[_struct_pb2.Struct, _Mapping]] = ...,
         block_filter_tags_update_mode: _Optional[str] = ...,
+        memory_source_id: _Optional[str] = ...,
+        external_id: _Optional[str] = ...,
+        external_thread_id: _Optional[str] = ...,
+        source_type: _Optional[str] = ...,
+        source_system: _Optional[str] = ...,
+        source_metadata: _Optional[_Union[_struct_pb2.Struct, _Mapping]] = ...,
+        summary: _Optional[str] = ...,
+        summarize: bool = ...,
+        source_messages: _Optional[_Iterable[_Union[MessageCreate, _Mapping]]] = ...,
+        direct_writes: _Optional[_Iterable[_Union[DirectMemoryWrite, _Mapping]]] = ...,
     ) -> None: ...
 
 class User(_message.Message):
@@ -111,17 +151,30 @@ class User(_message.Message):
     ) -> None: ...
 
 class MessageCreate(_message.Message):
-    __slots__ = ("role", "text_content", "structured_content", "name", "otid", "sender_id", "group_id")
+    __slots__ = (
+        "role",
+        "text_content",
+        "structured_content",
+        "name",
+        "otid",
+        "sender_id",
+        "group_id",
+        "external_message_id",
+        "message_occurred_at",
+        "message_metadata",
+    )
 
     class Role(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
         __slots__ = ()
         ROLE_UNSPECIFIED: _ClassVar[MessageCreate.Role]
         ROLE_USER: _ClassVar[MessageCreate.Role]
         ROLE_SYSTEM: _ClassVar[MessageCreate.Role]
+        ROLE_ASSISTANT: _ClassVar[MessageCreate.Role]
 
     ROLE_UNSPECIFIED: MessageCreate.Role
     ROLE_USER: MessageCreate.Role
     ROLE_SYSTEM: MessageCreate.Role
+    ROLE_ASSISTANT: MessageCreate.Role
     ROLE_FIELD_NUMBER: _ClassVar[int]
     TEXT_CONTENT_FIELD_NUMBER: _ClassVar[int]
     STRUCTURED_CONTENT_FIELD_NUMBER: _ClassVar[int]
@@ -129,6 +182,9 @@ class MessageCreate(_message.Message):
     OTID_FIELD_NUMBER: _ClassVar[int]
     SENDER_ID_FIELD_NUMBER: _ClassVar[int]
     GROUP_ID_FIELD_NUMBER: _ClassVar[int]
+    EXTERNAL_MESSAGE_ID_FIELD_NUMBER: _ClassVar[int]
+    MESSAGE_OCCURRED_AT_FIELD_NUMBER: _ClassVar[int]
+    MESSAGE_METADATA_FIELD_NUMBER: _ClassVar[int]
     role: MessageCreate.Role
     text_content: str
     structured_content: MessageContentList
@@ -136,6 +192,9 @@ class MessageCreate(_message.Message):
     otid: str
     sender_id: str
     group_id: str
+    external_message_id: str
+    message_occurred_at: str
+    message_metadata: _struct_pb2.Struct
     def __init__(
         self,
         role: _Optional[_Union[MessageCreate.Role, str]] = ...,
@@ -145,6 +204,9 @@ class MessageCreate(_message.Message):
         otid: _Optional[str] = ...,
         sender_id: _Optional[str] = ...,
         group_id: _Optional[str] = ...,
+        external_message_id: _Optional[str] = ...,
+        message_occurred_at: _Optional[str] = ...,
+        message_metadata: _Optional[_Union[_struct_pb2.Struct, _Mapping]] = ...,
     ) -> None: ...
 
 class MessageContentList(_message.Message):
@@ -196,3 +258,11 @@ class CloudFileContent(_message.Message):
     CLOUD_FILE_URI_FIELD_NUMBER: _ClassVar[int]
     cloud_file_uri: str
     def __init__(self, cloud_file_uri: _Optional[str] = ...) -> None: ...
+
+class DirectMemoryWrite(_message.Message):
+    __slots__ = ("memory_type", "payload_json")
+    MEMORY_TYPE_FIELD_NUMBER: _ClassVar[int]
+    PAYLOAD_JSON_FIELD_NUMBER: _ClassVar[int]
+    memory_type: str
+    payload_json: str
+    def __init__(self, memory_type: _Optional[str] = ..., payload_json: _Optional[str] = ...) -> None: ...

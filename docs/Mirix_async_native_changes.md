@@ -67,7 +67,7 @@ All CRUD methods (`create`, `read`, `update`, `delete`, `list`) are
 use `asyncio.sleep()`.
 
 **Service managers** (`mirix/services/`)
-All 16 managers are async:
+All 19 managers are async:
 
 | # | Manager | File |
 |---|---------|------|
@@ -87,6 +87,9 @@ All 16 managers are async:
 | 14 | ProceduralMemoryManager | `procedural_memory_manager.py` |
 | 15 | ResourceMemoryManager | `resource_memory_manager.py` |
 | 16 | KnowledgeVaultManager | `knowledge_vault_manager.py` |
+| 17 | MemorySourceManager | `memory_source_manager.py` (VEPAGE-760) |
+| 18 | MemoryCitationManager | `memory_citation_manager.py` (VEPAGE-760) |
+| 19 | SourceMessageManager | `source_message_manager.py` (VEPAGE-760) |
 
 Every manager method uses `async with self.session_maker()` and `await`
 for all database operations.

@@ -90,6 +90,12 @@ class QueueWorker:
 
         content = proto_msg.text_content if proto_msg.HasField("text_content") else ""
 
+        kwargs = {}
+        if hasattr(proto_msg, "external_message_id") and proto_msg.HasField("external_message_id"):
+            kwargs["external_message_id"] = proto_msg.external_message_id
+        if hasattr(proto_msg, "message_occurred_at") and proto_msg.HasField("message_occurred_at"):
+            kwargs["message_occurred_at"] = proto_msg.message_occurred_at
+
         return MessageCreate(
             role=role,
             content=content,
@@ -98,7 +104,40 @@ class QueueWorker:
             sender_id=proto_msg.sender_id if proto_msg.HasField("sender_id") else None,
             group_id=proto_msg.group_id if proto_msg.HasField("group_id") else None,
             filter_tags=None,
+            **kwargs,
         )
+
+    @staticmethod
+    def _convert_proto_source_message_to_dict(proto_msg) -> dict:
+        """Convert a protobuf MessageCreate from source_messages to a plain dict.
+
+        Unlike _convert_proto_message_to_pydantic (which produces Pydantic
+        MessageCreate objects for agent processing), this returns a plain dict
+        because source_messages need to preserve the "assistant" role which
+        Pydantic MessageCreate doesn't allow (its role field is
+        Literal["user", "system"]).
+
+        The returned dict is consumed by _persist_memory_source() →
+        normalize_message() which accepts dicts with any string role.
+        """
+        _ROLE_MAP = {
+            proto_msg.ROLE_USER: "user",
+            proto_msg.ROLE_SYSTEM: "system",
+            proto_msg.ROLE_ASSISTANT: "assistant",
+        }
+        role = _ROLE_MAP.get(proto_msg.role, "user")
+        content = proto_msg.text_content if proto_msg.HasField("text_content") else ""
+
+        result = {"role": role, "content": content}
+
+        if hasattr(proto_msg, "external_message_id") and proto_msg.HasField("external_message_id"):
+            result["external_message_id"] = proto_msg.external_message_id
+        if hasattr(proto_msg, "message_occurred_at") and proto_msg.HasField("message_occurred_at"):
+            result["message_occurred_at"] = proto_msg.message_occurred_at
+        if hasattr(proto_msg, "message_metadata") and proto_msg.message_metadata:
+            result["metadata"] = MessageToDict(proto_msg.message_metadata)
+
+        return result
 
     def set_server(self, server: Any) -> None:
         """Set or update the server instance."""
@@ -217,6 +256,60 @@ class QueueWorker:
                 message.block_filter_tags_update_mode if message.HasField("block_filter_tags_update_mode") else "merge"
             )
 
+            # Extract memory source fields if present on the protobuf message
+            memory_source_id = (
+                message.memory_source_id
+                if hasattr(message, "memory_source_id") and message.HasField("memory_source_id")
+                else None
+            )
+            external_id = (
+                message.external_id if hasattr(message, "external_id") and message.HasField("external_id") else None
+            )
+            external_thread_id = (
+                message.external_thread_id
+                if hasattr(message, "external_thread_id") and message.HasField("external_thread_id")
+                else None
+            )
+            source_type = (
+                message.source_type if hasattr(message, "source_type") and message.HasField("source_type") else None
+            )
+            source_system = (
+                message.source_system
+                if hasattr(message, "source_system") and message.HasField("source_system")
+                else None
+            )
+            source_metadata = None
+            if hasattr(message, "source_metadata") and message.source_metadata:
+                try:
+                    source_metadata = MessageToDict(message.source_metadata)
+                except Exception:
+                    pass
+            summary = message.summary if hasattr(message, "summary") and message.HasField("summary") else None
+            summarize = message.summarize if hasattr(message, "summarize") and message.HasField("summarize") else False
+
+            # Extract original per-turn messages for source_message persistence.
+            #
+            # These are converted to plain dicts (not Pydantic MessageCreate) because
+            # MessageCreate.role is Literal["user", "system"] and can't hold "assistant".
+            # The dicts go straight to _persist_memory_source() → normalize_message()
+            # which accepts dicts with string roles.
+            source_messages = None
+            if hasattr(message, "source_messages") and message.source_messages:
+                source_messages = [self._convert_proto_source_message_to_dict(msg) for msg in message.source_messages]
+
+            # Extract direct_writes — each entry tells the meta-agent to call
+            # the registered handler for memory_type instead of dispatching
+            # sub-agents via the LLM. Payloads are opaque JSON blobs here;
+            # the handler's signature validates their shape at call time.
+            direct_writes = None
+            if hasattr(message, "direct_writes") and message.direct_writes:
+                import json as _json
+
+                direct_writes = [
+                    {"memory_type": w.memory_type, "payload": _json.loads(w.payload_json)}
+                    for w in message.direct_writes
+                ]
+
             # Log the processing
             logger.info(
                 "Processing message via server: agent_id=%s, client_id=%s (from actor), user_id=%s, input_messages_count=%s, use_cache=%s, filter_tags=%s, occurred_at=%s",
@@ -241,6 +334,16 @@ class QueueWorker:
                     block_filter_tags_update_mode=block_filter_tags_update_mode,
                     use_cache=use_cache,
                     occurred_at=occurred_at,
+                    memory_source_id=memory_source_id,
+                    external_id=external_id,
+                    external_thread_id=external_thread_id,
+                    source_type=source_type,
+                    source_system=source_system,
+                    source_metadata=source_metadata,
+                    summary=summary,
+                    summarize=summarize,
+                    source_messages=source_messages,
+                    direct_writes=direct_writes,
                 )
 
             if langfuse and trace_id:

@@ -3,13 +3,43 @@
 ## What This Project Does
 MIRIX is an async-native multi-agent personal assistant with a six-component memory system
 (Core, Episodic, Semantic, Procedural, Resource, Knowledge Vault). It captures memories
-from conversations and screen activity, storing them in PostgreSQL with vector search via pgvector.
+from conversations, storing them in PostgreSQL with vector search via pgvector. Screen
+activity capture exists in OSS MIRIX but is **not used by the ECMS integration** (this
+fork's primary consumer).
+
+## This fork's relationship to ECMS
+ECMS (`context-and-memory-service`) imports MIRIX as a Python library — it calls
+`mirix.server.rest_api` functions **directly** and does not start MIRIX's FastAPI app.
+ECMS configures MIRIX to run with `CHAINING_FOR_MEMORY_UPDATE=false` and
+`CHAINING_FOR_META_AGENT=false` (each agent runs exactly once) and registers Intuit
+auth/cache providers at startup.
 
 ## Key Architecture
-- **Entry point**: `mirix/server/rest_api.py` (FastAPI, port 8531)
-- **Orchestration**: `mirix/agent/meta_agent.py` → 6 sub-agents
+- **Entry point**: `mirix/server/rest_api.py` (FastAPI, port 8531 when run standalone)
+- **Orchestration**: `mirix/agent/meta_agent.py` → 6 sub-agents. A **Summary Agent** task
+  is dispatched in parallel (via `asyncio.create_task`) under a LangFuse "Summary Agent"
+  span — it is not a registered `AgentType`.
 - **Data flow**: ORM (`mirix/orm/`) → Schemas (`mirix/schemas/`) → Managers (`mirix/services/`) → API (`mirix/server/`)
 - **Queue**: Kafka-backed (`mirix/queue/`) for async memory extraction
+- **Provenance sidecar** (VEPAGE-760): three tables — `memory_source`, `memory_citation`,
+  `source_message` — written by the meta-agent pipeline via `_persist_memory_source` and
+  `_write_citation`. Never written by direct DB access; always go through these paths so
+  citations stay consistent.
+- **Idempotency** (3 layers): (L1) DB uniqueness on `source_messages`; (L2)
+  `processing_complete` flag on `memory_source` short-circuits re-processing; (L3)
+  citation-level dedup inside `_write_citation`. Skip events emit a LangFuse span via
+  `mirix/observability/skip_spans.py`.
+- **Temporal guard**: `MAX(occurred_at)` per `(memory_type, memory_id)` across all
+  citations — out-of-order writes are dropped, not applied. Scope is per-memory, not
+  per-thread.
+- **Retrieval endpoints**: `GET /memory-sources/{id}` (metadata + summary) and
+  `GET /memory-sources/{id}/messages` (paginated raw turns). Search accepts
+  `include_citations=True` and attaches `citations: [{memory_source_id, ...}]` to each
+  derived memory.
+- **`AddMemoryRequest` provenance fields**: `external_id`, `external_thread_id`,
+  `source_type`, `source_system`, `source_metadata`, `summary`, `summarize`,
+  `batch_hash`, `filter_tags`, `memory_source_id`, plus `direct_writes=[{memory_type,
+  payload}]` for caller-authored memories bypassing the LLM pipeline.
 - **All I/O is async** — never introduce sync blocking calls (see `docs/Mirix_async_native_changes.md`)
 
 ## Local Development Setup
@@ -80,6 +110,10 @@ pytest tests/test_memory_integration.py -v -m integration -s   # Terminal 2
 3. Create manager in `mirix/services/`
 4. Create sub-agent in `mirix/agent/`
 5. Register in `mirix/agent/meta_agent.py`
+6. Emit citations: any new write path for the memory type must call
+   `_write_citation(...)` so the `memory_citations` row is created with the
+   originating `memory_source_id` / `source_message_id` (and L3 dedup applies).
+   Direct DB inserts bypass provenance and break progressive disclosure.
 
 ### Format & lint
 ```bash
@@ -99,11 +133,15 @@ make check    # format + lint + test
 - Use `asyncio.to_thread()` to wrap any unavoidably sync third-party calls
 
 ## Commit Convention
-Prefix commits with the Jira ticket: `[VEPEAGE-NNN] Description`
+Prefix commits with the Jira ticket: `[VEPAGE-NNN] Description`
 
 ## Do Not
 - Confuse queue messages (transient) with database messages (persistent)
 - Call `step_manager.get_step()` — steps are write-only audit logs
 - Skip `create_or_get_user()` — always ensure users exist first
+- Write memories via direct DB access — use the memory-tool functions or
+  `_apply_direct_write` so citations get emitted
+- Re-enable agent chaining when running under ECMS — ECMS configures chaining off
+  and expects every agent to run exactly once
 - Commit secrets or API keys
 - Create README or doc files unless explicitly requested

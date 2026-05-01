@@ -164,6 +164,9 @@ class EpisodicMemoryManager:
                 cached_data = await cache_provider.get_json(cache_key)
                 if cached_data:
                     logger.debug("Cache HIT for episodic memory %s", episodic_memory_id)
+                    from mirix.database.redis_client import RedisMemoryClient
+
+                    cached_data = RedisMemoryClient.clean_redis_fields([cached_data])[0]
                     return PydanticEpisodicEvent(**cached_data)
         except Exception as e:
             logger.warning(
