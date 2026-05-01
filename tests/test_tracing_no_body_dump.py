@@ -52,3 +52,67 @@ async def test_update_trace_attributes_skipped_when_tracing_off(monkeypatch):
     fake_request = MagicMock()
     # No exceptions raised when tracing is disabled.
     await tracing.update_trace_attributes(fake_request)
+
+
+@pytest.mark.asyncio
+async def test_trace_method_does_not_capture_params_by_default(monkeypatch):
+    from mirix import tracing
+
+    monkeypatch.setattr(tracing, "_is_tracing_initialized", True)
+
+    captured: dict[str, Any] = {}
+    fake_span = MagicMock()
+    fake_span.set_attribute.side_effect = lambda k, v: captured.__setitem__(k, v)
+    fake_span.set_status = MagicMock()
+
+    class FakeContext:
+        def __enter__(self):
+            return fake_span
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(
+        tracing.tracer, "start_as_current_span", lambda name: FakeContext()
+    )
+
+    @tracing.trace_method
+    async def secret_op(messages, user_id):
+        return "ok"
+
+    await secret_op([{"content": "ssn 123-45-6789"}], "u1")
+
+    # No `parameter.*` attribute should be set when no allowlist is provided.
+    assert not any(k.startswith("parameter.") for k in captured.keys())
+
+
+@pytest.mark.asyncio
+async def test_trace_method_captures_only_allowlisted_params(monkeypatch):
+    from mirix import tracing
+
+    monkeypatch.setattr(tracing, "_is_tracing_initialized", True)
+
+    captured: dict[str, Any] = {}
+    fake_span = MagicMock()
+    fake_span.set_attribute.side_effect = lambda k, v: captured.__setitem__(k, v)
+    fake_span.set_status = MagicMock()
+
+    class FakeContext:
+        def __enter__(self):
+            return fake_span
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(
+        tracing.tracer, "start_as_current_span", lambda name: FakeContext()
+    )
+
+    @tracing.trace_method(trace_params=("user_id",))
+    async def op(messages, user_id):
+        return "ok"
+
+    await op([{"content": "ssn 123-45-6789"}], "u1")
+
+    assert captured.get("parameter.user_id") == "u1"
+    assert "parameter.messages" not in captured

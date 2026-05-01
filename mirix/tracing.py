@@ -194,8 +194,19 @@ def setup_tracing(
             app.exception_handler(Exception)(trace_error_handler)
 
 
-def trace_method(func):
-    """Decorator that traces function execution with OpenTelemetry"""
+def trace_method(_func=None, *, trace_params: Optional[tuple] = None):
+    """Decorator that traces function execution with OpenTelemetry.
+
+    VEPAGE-983: by default no function arguments are captured as span
+    attributes. Pass ``trace_params=("name1", "name2")`` to opt specific
+    arguments into capture. Allowlisted args are stringified; never use this
+    for fields that may carry conversation content, prompts, or PII-bearing
+    payloads.
+
+    Both bare ``@trace_method`` and parameterized ``@trace_method(...)`` are
+    supported for backward compatibility. Bare usage captures zero args.
+    """
+    allow = set(trace_params or ())
 
     def _get_span_name(func, args):
         if args and hasattr(args[0], "__class__"):
@@ -205,48 +216,47 @@ def trace_method(func):
         return f"{class_name}.{func.__name__}"
 
     def _add_parameters_to_span(span, func, args, kwargs):
+        if not allow:
+            return
         try:
-            # Add method parameters as span attributes
             sig = inspect.signature(func)
             bound_args = sig.bind(*args, **kwargs)
             bound_args.apply_defaults()
-
-            # Skip 'self' when adding parameters if it exists
             param_items = list(bound_args.arguments.items())
             if args and hasattr(args[0], "__class__"):
                 param_items = param_items[1:]
-
             for name, value in param_items:
-                # Convert value to string to avoid serialization issues
-                span.set_attribute(f"parameter.{name}", str(value))
-        except:
+                if name in allow:
+                    span.set_attribute(f"parameter.{name}", str(value))
+        except Exception:
             pass
 
-    @wraps(func)
-    async def async_wrapper(*args, **kwargs):
-        if not _is_tracing_initialized:
-            return await func(*args, **kwargs)
+    def _wrap(func):
+        @wraps(func)
+        async def async_wrapper(*args, **kwargs):
+            if not _is_tracing_initialized:
+                return await func(*args, **kwargs)
+            with tracer.start_as_current_span(_get_span_name(func, args)) as span:
+                _add_parameters_to_span(span, func, args, kwargs)
+                result = await func(*args, **kwargs)
+                span.set_status(Status(StatusCode.OK))
+                return result
 
-        with tracer.start_as_current_span(_get_span_name(func, args)) as span:
-            _add_parameters_to_span(span, func, args, kwargs)
+        @wraps(func)
+        def sync_wrapper(*args, **kwargs):
+            if not _is_tracing_initialized:
+                return func(*args, **kwargs)
+            with tracer.start_as_current_span(_get_span_name(func, args)) as span:
+                _add_parameters_to_span(span, func, args, kwargs)
+                result = func(*args, **kwargs)
+                span.set_status(Status(StatusCode.OK))
+                return result
 
-            result = await func(*args, **kwargs)
-            span.set_status(Status(StatusCode.OK))
-            return result
+        return async_wrapper if inspect.iscoroutinefunction(func) else sync_wrapper
 
-    @wraps(func)
-    def sync_wrapper(*args, **kwargs):
-        if not _is_tracing_initialized:
-            return func(*args, **kwargs)
-
-        with tracer.start_as_current_span(_get_span_name(func, args)) as span:
-            _add_parameters_to_span(span, func, args, kwargs)
-
-            result = func(*args, **kwargs)
-            span.set_status(Status(StatusCode.OK))
-            return result
-
-    return async_wrapper if inspect.iscoroutinefunction(func) else sync_wrapper
+    if _func is None:
+        return _wrap
+    return _wrap(_func)
 
 
 def log_attributes(attributes: Dict[str, Any]) -> None:
