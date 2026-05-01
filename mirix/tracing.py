@@ -80,11 +80,29 @@ async def update_trace_attributes(request: Request):
     for key, value in request.path_params.items():
         span.set_attribute(f"http.{key}", value)
 
-    # Add request body if available
+    # VEPAGE-983: never copy raw HTTP request body values into span
+    # attributes — that route is what leaks conversation content to
+    # Langfuse via OTLP. Capture only structural metadata and an
+    # explicit allowlist of ID-shaped fields.
     try:
         body = await request.json()
-        for key, value in body.items():
-            span.set_attribute(f"http.request.body.{key}", str(value))
+        if isinstance(body, dict):
+            messages = body.get("messages")
+            span.set_attribute("request.body.has_messages", isinstance(messages, list))
+            span.set_attribute(
+                "request.body.num_messages",
+                len(messages) if isinstance(messages, list) else 0,
+            )
+            span.set_attribute("request.body.has_query", "query" in body)
+            for allowed_key in (
+                "user_id",
+                "client_id",
+                "agent_id",
+                "meta_agent_id",
+            ):
+                value = body.get(allowed_key)
+                if isinstance(value, (str, int, bool, float)):
+                    span.set_attribute(f"request.body.{allowed_key}", value)
     except Exception:
         pass
 
