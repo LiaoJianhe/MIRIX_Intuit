@@ -29,7 +29,13 @@ _DEFAULT_TIMEOUT_MS: Final[int] = 200
 
 
 def _enabled() -> bool:
-    return os.getenv("MIRIX_ISPY_PII_ENABLED", "false").lower() == "true"
+    # Default enabled. Local-dev laptops and all deployed environments
+    # (QAL/E2E/PROD) are network-attached and can reach
+    # ispypiis.api.intuit.com, so masking should run everywhere logs/traces
+    # ship to Splunk or Langfuse. The pytest test harness sets
+    # MIRIX_ISPY_PII_ENABLED=false in tests/conftest.py because pytest has no
+    # Intuit network session and synthetic test data doesn't need redaction.
+    return os.getenv("MIRIX_ISPY_PII_ENABLED", "true").lower() == "true"
 
 
 def _endpoint() -> str:
