@@ -155,6 +155,13 @@ class Settings(BaseSettings):
     )
     disable_tracing: bool = False
 
+    # VEPAGE-983: ispy-pii masking for WARNING+ logs and LLM-call OTEL
+    # span attributes. Default disabled (passthrough); PROD/E2E sets
+    # MIRIX_ISPY_PII_ENABLED=true.
+    ispy_pii_enabled: bool = False
+    ispy_pii_endpoint: str = "https://ispypiis.api.intuit.com/v2/analyze"
+    ispy_pii_timeout_ms: int = 200
+
     # uvicorn settings
     uvicorn_workers: int = 1
     uvicorn_reload: bool = False
