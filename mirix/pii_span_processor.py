@@ -1,16 +1,17 @@
 """OpenTelemetry SpanProcessor that masks allowlisted attribute values.
 
 Runs on the OTEL export thread (off the request critical path). Wraps an
-inner processor (typically BatchSpanProcessor) and only redacts attributes
-whose key matches one of the allowlisted prefixes. Anything outside the
-allowlist is assumed to be PII-free because the call sites have been changed
-to drop raw content. The processor is defense-in-depth for the small surface
-where LLM-call spans deliberately capture content for debugging.
+inner processor (typically ``BatchSpanProcessor``) and only redacts
+attribute values whose key matches one of the allowlisted prefixes
+(``llm.prompt``, ``llm.completion``, ``llm.tool_args`` by default).
+Anything outside the allowlist is assumed to be PII-free because the call
+sites are written to drop raw content. The processor is defense-in-depth
+for the small surface where LLM-call spans deliberately capture content
+for debugging.
 
-When `MIRIX_ISPY_PII_ENABLED=false` (the default), `mirix.pii.mask` is a
-passthrough — this processor still runs but produces no redaction. The
-content already shouldn't reach Langfuse via the changes above; this is
-the belt-and-suspenders layer.
+Redaction goes through :func:`mirix.pii.mask`, which is a passthrough by
+default. Register a real redactor at startup with
+:func:`mirix.pii.set_redactor` to turn on masking.
 """
 
 from __future__ import annotations

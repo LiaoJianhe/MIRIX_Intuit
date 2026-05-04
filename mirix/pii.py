@@ -1,81 +1,78 @@
-"""ispy-pii REST client.
+"""Pluggable text-redaction hook used by Mirix's logging filter and span processor.
 
-Redacts PII from text via Intuit's ispy-pii service. Used by the WARNING+ log
-filter and by the OTEL span processor — never on the request hot path. On any
-failure (network, timeout, non-200), returns a fully-redacted placeholder
-rather than raw text. The kill switch MIRIX_ISPY_PII_ENABLED=false disables
-the network call entirely (passthrough). Paired with the hot-path "drop
-content, don't mask" pattern, that means the service still emits no PII even
-when masking is off.
+Mirix does not ship a redactor — by default :func:`mask` returns its input
+unchanged. Callers wire up redaction by registering a callable with
+:func:`set_redactor`. The callable must take a string and return a string;
+it can implement any policy the caller wants (regex, ML, an external
+service, etc.).
 
-Default disabled. PROD/E2E deployments must explicitly set
-MIRIX_ISPY_PII_ENABLED=true.
+Two consumers inside Mirix call :func:`mask`:
+
+- :class:`mirix.pii_filter.PIIRedactionFilter` — a stdlib ``logging.Filter``
+  that masks records at WARNING+ before they're emitted.
+- :class:`mirix.pii_span_processor.PIIRedactingSpanProcessor` — an OTEL
+  ``SpanProcessor`` that masks allowlisted span attributes on the export
+  thread before they ship to OTLP.
+
+Example — plug in a simple regex-based redactor::
+
+    import re
+    from mirix.pii import set_redactor
+
+    SSN = re.compile(r"\\b\\d{3}-\\d{2}-\\d{4}\\b")
+    EMAIL = re.compile(r"\\b[\\w.+-]+@[\\w.-]+\\b")
+
+    def my_redactor(text: str) -> str:
+        text = SSN.sub("[SSN]", text)
+        text = EMAIL.sub("[EMAIL]", text)
+        return text
+
+    set_redactor(my_redactor)
+
+The registry is process-global. Register once at startup, before the first
+log emission or span export. If no redactor is registered, :func:`mask` is a
+passthrough — useful for tests and for environments that don't need
+redaction.
 """
 
 from __future__ import annotations
 
-import logging
-import os
-from typing import Final
+from typing import Callable, Optional
 
-import httpx
-
-logger = logging.getLogger(__name__)
-
-REDACTED_PLACEHOLDER: Final[str] = "[REDACTED — PII masking unavailable]"
-
-_DEFAULT_ENDPOINT: Final[str] = "https://ispypiis.api.intuit.com/v2/analyze"
-_DEFAULT_TIMEOUT_MS: Final[int] = 200
+Redactor = Callable[[str], str]
 
 
-def _enabled() -> bool:
-    # Default enabled. Local-dev laptops and all deployed environments
-    # (QAL/E2E/PROD) are network-attached and can reach
-    # ispypiis.api.intuit.com, so masking should run everywhere logs/traces
-    # ship to Splunk or Langfuse. The pytest test harness sets
-    # MIRIX_ISPY_PII_ENABLED=false in tests/conftest.py because pytest has no
-    # Intuit network session and synthetic test data doesn't need redaction.
-    return os.getenv("MIRIX_ISPY_PII_ENABLED", "true").lower() == "true"
+def _passthrough(text: str) -> str:
+    return text
 
 
-def _endpoint() -> str:
-    return os.getenv("MIRIX_ISPY_PII_ENDPOINT", _DEFAULT_ENDPOINT)
+_redactor: Redactor = _passthrough
 
 
-def _timeout_seconds() -> float:
-    try:
-        return (
-            int(os.getenv("MIRIX_ISPY_PII_TIMEOUT_MS", str(_DEFAULT_TIMEOUT_MS)))
-            / 1000.0
-        )
-    except ValueError:
-        return _DEFAULT_TIMEOUT_MS / 1000.0
+def set_redactor(redactor: Optional[Redactor]) -> None:
+    """Register the process-global redactor.
+
+    Pass ``None`` to reset to the passthrough default.
+    """
+    global _redactor
+    _redactor = redactor if redactor is not None else _passthrough
 
 
-_client: httpx.Client = httpx.Client(timeout=_timeout_seconds())
+def get_redactor() -> Redactor:
+    """Return the currently registered redactor (or the passthrough default)."""
+    return _redactor
 
 
-def mask(text: str, *, fmt: str = "PLAIN_TEXT") -> str:
-    """Return ispy-pii-redacted text, or a placeholder on any failure."""
+def mask(text: str) -> str:
+    """Return ``text`` with PII redacted by the registered redactor.
+
+    Empty strings short-circuit. Any exception raised by the redactor is
+    caught and the original ``text`` is returned — a buggy redactor must
+    never break logging or trace export.
+    """
     if not text:
         return text
-    if not _enabled():
-        return text
     try:
-        resp = _client.post(
-            _endpoint(),
-            json={
-                "text": text,
-                "format": fmt,
-                "sensitivityLevel": "SENSITIVE",
-                "confidenceLevel": "LIKELY",
-            },
-            timeout=_timeout_seconds(),
-        )
-        if resp.status_code != 200:
-            return REDACTED_PLACEHOLDER
-        body = resp.json()
-        redacted = body.get("redactedText")
-        return redacted if isinstance(redacted, str) else REDACTED_PLACEHOLDER
-    except (httpx.HTTPError, ValueError):
-        return REDACTED_PLACEHOLDER
+        return _redactor(text)
+    except Exception:
+        return text

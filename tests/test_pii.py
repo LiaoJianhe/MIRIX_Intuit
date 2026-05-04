@@ -1,63 +1,58 @@
-from unittest.mock import patch
-
-import httpx
 import pytest
 
-from mirix.pii import REDACTED_PLACEHOLDER, mask
+from mirix.pii import get_redactor, mask, set_redactor
 
 
 @pytest.fixture(autouse=True)
-def _enable_pii(monkeypatch):
-    monkeypatch.setenv("MIRIX_ISPY_PII_ENABLED", "true")
-    monkeypatch.setenv("MIRIX_ISPY_PII_ENDPOINT", "https://ispy.test/v2/analyze")
-    monkeypatch.setenv("MIRIX_ISPY_PII_TIMEOUT_MS", "200")
+def _reset_redactor():
+    """Restore the passthrough default after every test."""
     yield
+    set_redactor(None)
 
 
-def test_mask_returns_redacted_text_on_success():
-    def handler(request):
-        return httpx.Response(200, json={"redactedText": "My SSN is [REDACTED]"})
-
-    with patch(
-        "mirix.pii._client", httpx.Client(transport=httpx.MockTransport(handler))
-    ):
-        assert mask("My SSN is 123-45-6789") == "My SSN is [REDACTED]"
+def test_default_is_passthrough():
+    assert mask("My SSN is 123-45-6789") == "My SSN is 123-45-6789"
 
 
-def test_mask_returns_passthrough_when_disabled(monkeypatch):
-    monkeypatch.setenv("MIRIX_ISPY_PII_ENABLED", "false")
+def test_set_redactor_replaces_default():
+    set_redactor(lambda s: s.replace("123-45-6789", "[SSN]"))
+    assert mask("My SSN is 123-45-6789") == "My SSN is [SSN]"
+
+
+def test_set_redactor_none_resets_to_passthrough():
+    set_redactor(lambda s: "REDACTED")
+    assert mask("anything") == "REDACTED"
+    set_redactor(None)
     assert mask("anything") == "anything"
 
 
-def test_mask_returns_placeholder_on_http_error():
-    def handler(request):
-        return httpx.Response(500, text="boom")
+def test_get_redactor_returns_current():
+    def fn(s):
+        return s.upper()
 
-    with patch(
-        "mirix.pii._client", httpx.Client(transport=httpx.MockTransport(handler))
-    ):
-        assert mask("My SSN is 123-45-6789") == REDACTED_PLACEHOLDER
+    set_redactor(fn)
+    assert get_redactor() is fn
 
 
-def test_mask_returns_placeholder_on_timeout():
-    def handler(request):
-        raise httpx.TimeoutException("slow")
+def test_empty_string_short_circuits_redactor():
+    """An empty string never invokes the redactor."""
+    called = []
 
-    with patch(
-        "mirix.pii._client", httpx.Client(transport=httpx.MockTransport(handler))
-    ):
-        assert mask("My SSN is 123-45-6789") == REDACTED_PLACEHOLDER
+    def boom(s):
+        called.append(s)
+        return s
 
-
-def test_mask_handles_empty_string():
+    set_redactor(boom)
     assert mask("") == ""
+    assert called == []
 
 
-def test_mask_returns_placeholder_when_response_missing_field():
-    def handler(request):
-        return httpx.Response(200, json={"unrelated": "field"})
+def test_redactor_exception_falls_back_to_original_text():
+    """A misbehaving redactor must not break logging."""
 
-    with patch(
-        "mirix.pii._client", httpx.Client(transport=httpx.MockTransport(handler))
-    ):
-        assert mask("hi") == REDACTED_PLACEHOLDER
+    def bad(s):
+        raise RuntimeError("boom")
+
+    set_redactor(bad)
+    # Original text is returned unchanged.
+    assert mask("My SSN is 123-45-6789") == "My SSN is 123-45-6789"

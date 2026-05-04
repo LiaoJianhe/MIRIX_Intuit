@@ -155,12 +155,6 @@ class Settings(BaseSettings):
     )
     disable_tracing: bool = False
 
-    # ispy-pii masking for WARNING+ logs and LLM-call OTEL span attributes.
-    # Default enabled; pytest forces it off via tests/conftest.py.
-    ispy_pii_enabled: bool = False
-    ispy_pii_endpoint: str = "https://ispypiis.api.intuit.com/v2/analyze"
-    ispy_pii_timeout_ms: int = 200
-
     # uvicorn settings
     uvicorn_workers: int = 1
     uvicorn_reload: bool = False

@@ -1,16 +1,14 @@
-"""WARNING+ logging.Filter that masks records via ispy-pii.
+"""WARNING+ ``logging.Filter`` that masks records via the registered redactor.
 
 Hot-path (info-level) records are NEVER touched — they are expected to be
-free of PII because the call sites have been changed to drop raw content.
-This filter is the safety net for tracebacks, validation errors, and any
-warning/error log lines that may carry user-visible content.
+free of PII because call sites are written to log structural metadata only
+(counts, IDs, mode flags), never raw user content. This filter is the
+safety net for tracebacks, validation errors, and any warning/error log
+lines that may carry user-visible content.
 
-When adding a new log line:
-- info-level: do NOT log raw conversation content, prompts, completions, or
-  full request payloads. Log structural metadata (counts, IDs, mode flags)
-  only.
-- warning+/error: content is allowed; this filter will mask it before it
-  leaves the process.
+By default the redactor is a passthrough (``mirix.pii.mask`` is identity).
+Register a real redactor at startup with :func:`mirix.pii.set_redactor` to
+turn on masking; see ``mirix/pii.py`` for the contract and an example.
 """
 
 from __future__ import annotations
