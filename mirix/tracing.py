@@ -16,8 +16,6 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.trace import Status, StatusCode
 
-from mirix.pii_span_processor import PIIRedactingSpanProcessor
-
 tracer = trace.get_tracer(__name__)
 _is_tracing_initialized = False
 _excluded_v1_endpoints_regex: List[str] = [
@@ -151,11 +149,9 @@ def setup_tracing(
         )
     )
     if endpoint:
-        # Wrap the exporting BatchSpanProcessor in PIIRedactingSpanProcessor
-        # so allowlisted LLM-call attribute values are masked on the export
-        # thread before they ship to OTLP/Langfuse.
-        batch = BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint))
-        provider.add_span_processor(PIIRedactingSpanProcessor(batch))
+        provider.add_span_processor(
+            BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint))
+        )
         _is_tracing_initialized = True
         trace.set_tracer_provider(provider)
 

@@ -635,7 +635,10 @@ class Agent(BaseAgent):
 
             except ValueError as ve:
                 if attempt >= empty_response_retry_limit:
-                    self.logger.error(f"Retry limit reached. Final error: {ve}")
+                    self.logger.error(
+                        "Retry limit reached. Final error_type=%s",
+                        type(ve).__name__,
+                    )
                     log_telemetry(self.logger, "_handle_ai_response finish ValueError")
                     raise Exception(
                         f"Retries exhausted and no valid response received. Final error: {ve}"
@@ -643,7 +646,10 @@ class Agent(BaseAgent):
                 else:
                     delay = min(backoff_factor * (2 ** (attempt - 1)), max_delay)
                     self.logger.warning(
-                        f"Attempt {attempt} failed: {ve}. Retrying in {delay} seconds..."
+                        "Attempt %d failed: error_type=%s. Retrying in %s seconds...",
+                        attempt,
+                        type(ve).__name__,
+                        delay,
                     )
                     time.sleep(delay)
                     continue
@@ -652,7 +658,10 @@ class Agent(BaseAgent):
                 # Gemini api sometimes can yield empty response
                 # This is a retryable error
                 if attempt >= empty_response_retry_limit:
-                    self.logger.error(f"Retry limit reached. Final error: {ke}")
+                    self.logger.error(
+                        "Retry limit reached. Final error_type=%s",
+                        type(ke).__name__,
+                    )
                     log_telemetry(self.logger, "_handle_ai_response finish KeyError")
                     raise Exception(
                         f"Retries exhausted and no valid response received. Final error: {ke}"
@@ -660,14 +669,20 @@ class Agent(BaseAgent):
                 else:
                     delay = min(backoff_factor * (2 ** (attempt - 1)), max_delay)
                     self.logger.warning(
-                        f"Attempt {attempt} failed: {ke}. Retrying in {delay} seconds..."
+                        "Attempt %d failed: error_type=%s. Retrying in %s seconds...",
+                        attempt,
+                        type(ke).__name__,
+                        delay,
                     )
                     time.sleep(delay)
                     continue
 
             except LLMError as llm_error:
                 if attempt >= empty_response_retry_limit:
-                    self.logger.error(f"Retry limit reached. Final error: {llm_error}")
+                    self.logger.error(
+                        "Retry limit reached. Final error_type=%s",
+                        type(llm_error).__name__,
+                    )
                     log_telemetry(self.logger, "_handle_ai_response finish LLMError")
                     log_telemetry(
                         self.logger, "_get_ai_reply_last_message_hacking start"
@@ -694,35 +709,50 @@ class Agent(BaseAgent):
                 else:
                     delay = min(backoff_factor * (2 ** (attempt - 1)), max_delay)
                     self.logger.warning(
-                        f"Attempt {attempt} failed: {llm_error}. Retrying in {delay} seconds..."
+                        "Attempt %d failed: error_type=%s. Retrying in %s seconds...",
+                        attempt,
+                        type(llm_error).__name__,
+                        delay,
                     )
                     time.sleep(delay)
                     continue
 
             except AssertionError as ae:
                 if attempt >= empty_response_retry_limit:
-                    self.logger.error(f"Retry limit reached. Final error: {ae}")
+                    self.logger.error(
+                        "Retry limit reached. Final error_type=%s",
+                        type(ae).__name__,
+                    )
                     raise Exception(
                         f"Retries exhausted and no valid response received. Final error: {ae}"
                     )
                 else:
                     delay = min(backoff_factor * (2 ** (attempt - 1)), max_delay)
                     self.logger.warning(
-                        f"Attempt {attempt} failed: {ae}. Retrying in {delay} seconds..."
+                        "Attempt %d failed: error_type=%s. Retrying in %s seconds...",
+                        attempt,
+                        type(ae).__name__,
+                        delay,
                     )
                     time.sleep(delay)
                     continue
 
             except requests.exceptions.HTTPError as he:
                 if attempt >= empty_response_retry_limit:
-                    self.logger.error(f"Retry limit reached. Final error: {he}")
+                    self.logger.error(
+                        "Retry limit reached. Final error_type=%s",
+                        type(he).__name__,
+                    )
                     raise Exception(
                         f"Retries exhausted and no valid response received. Final error: {he}"
                     )
                 else:
                     delay = min(backoff_factor * (2 ** (attempt - 1)), max_delay)
                     self.logger.warning(
-                        f"Attempt {attempt} failed: {he}. Retrying in {delay} seconds..."
+                        "Attempt %d failed: error_type=%s. Retrying in %s seconds...",
+                        attempt,
+                        type(he).__name__,
+                        delay,
                     )
                     time.sleep(delay)
 
@@ -2902,7 +2932,9 @@ def strip_name_field_from_user_message(
     except Exception as e:
         # Note: This is a static function, so we'll use a module-level logger
         logger = logging.getLogger("Mirix.Agent.Utils")
-        logger.error(f"Handling of 'name' field failed with: {e}")
+        logger.error(
+            "Handling of 'name' field failed: error_type=%s", type(e).__name__
+        )
         raise e
 
 

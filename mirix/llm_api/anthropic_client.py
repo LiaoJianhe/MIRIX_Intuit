@@ -128,8 +128,13 @@ class AnthropicClient(LLMClientBase):
             return batch_response
 
         except Exception as e:
-            # Enhance logging here if additional context is needed
-            logger.error("Error during send_llm_batch_request_async.", exc_info=True)
+            from mirix.log import safe_traceback
+
+            logger.error(
+                "Error during send_llm_batch_request_async: error_type=%s\n%s",
+                type(e).__name__,
+                safe_traceback(e),
+            )
             raise self.handle_llm_error(e)
 
     @trace_method
@@ -415,7 +420,11 @@ class AnthropicClient(LLMClientBase):
 
     def handle_llm_error(self, e: Exception) -> Exception:
         if isinstance(e, anthropic.APIConnectionError):
-            logger.warning(f"[Anthropic] API connection error: {e.__cause__}")
+            logger.warning(
+                "[Anthropic] API connection error: error_type=%s cause_type=%s",
+                type(e).__name__,
+                type(e.__cause__).__name__ if e.__cause__ else None,
+            )
             return LLMConnectionError(
                 message=f"Failed to connect to Anthropic: {str(e)}",
                 code=ErrorCode.INTERNAL_SERVER_ERROR,
@@ -430,7 +439,9 @@ class AnthropicClient(LLMClientBase):
             )
 
         if isinstance(e, anthropic.BadRequestError):
-            logger.warning(f"[Anthropic] Bad request: {str(e)}")
+            # 400 responses from Anthropic can echo the request payload in
+            # str(e) — log only the type so user content does not leak.
+            logger.warning("[Anthropic] Bad request: error_type=%s", type(e).__name__)
             if "prompt is too long" in str(e).lower():
                 # If the context window is too large, we expect to receive:
                 # 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'prompt is too long: 200758 tokens > 200000 maximum'}}
@@ -444,35 +455,45 @@ class AnthropicClient(LLMClientBase):
                 )
 
         if isinstance(e, anthropic.AuthenticationError):
-            logger.warning(f"[Anthropic] Authentication error: {str(e)}")
+            logger.warning(
+                "[Anthropic] Authentication error: error_type=%s", type(e).__name__
+            )
             return LLMAuthenticationError(
                 message=f"Authentication failed with Anthropic: {str(e)}",
                 code=ErrorCode.INTERNAL_SERVER_ERROR,
             )
 
         if isinstance(e, anthropic.PermissionDeniedError):
-            logger.warning(f"[Anthropic] Permission denied: {str(e)}")
+            logger.warning(
+                "[Anthropic] Permission denied: error_type=%s", type(e).__name__
+            )
             return LLMPermissionDeniedError(
                 message=f"Permission denied by Anthropic: {str(e)}",
                 code=ErrorCode.INTERNAL_SERVER_ERROR,
             )
 
         if isinstance(e, anthropic.NotFoundError):
-            logger.warning(f"[Anthropic] Resource not found: {str(e)}")
+            logger.warning(
+                "[Anthropic] Resource not found: error_type=%s", type(e).__name__
+            )
             return LLMNotFoundError(
                 message=f"Resource not found in Anthropic: {str(e)}",
                 code=ErrorCode.INTERNAL_SERVER_ERROR,
             )
 
         if isinstance(e, anthropic.UnprocessableEntityError):
-            logger.warning(f"[Anthropic] Unprocessable entity: {str(e)}")
+            logger.warning(
+                "[Anthropic] Unprocessable entity: error_type=%s", type(e).__name__
+            )
             return LLMUnprocessableEntityError(
                 message=f"Invalid request content for Anthropic: {str(e)}",
                 code=ErrorCode.INTERNAL_SERVER_ERROR,
             )
 
         if isinstance(e, anthropic.APIStatusError):
-            logger.warning(f"[Anthropic] API status error: {str(e)}")
+            logger.warning(
+                "[Anthropic] API status error: error_type=%s", type(e).__name__
+            )
             return LLMServerError(
                 message=f"Anthropic API error: {str(e)}",
                 code=ErrorCode.INTERNAL_SERVER_ERROR,

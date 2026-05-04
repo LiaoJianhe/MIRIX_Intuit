@@ -186,7 +186,10 @@ class OpenAIClient(LLMClientBase):
                     tool.function = FunctionSchema(**structured_output_version)
                 except ValueError as e:
                     logger.warning(
-                        f"Failed to convert tool function to structured output, tool={tool}, error={e}"
+                        "Failed to convert tool function to structured output: "
+                        "tool_name=%s error_type=%s",
+                        getattr(tool.function, "name", None),
+                        type(e).__name__,
                     )
 
         else:
@@ -381,7 +384,9 @@ class OpenAIClient(LLMClientBase):
         Maps OpenAI-specific errors to common LLMError types.
         """
         if isinstance(e, openai.APIConnectionError):
-            logger.warning(f"[OpenAI] API connection error: {e}")
+            logger.warning(
+                "[OpenAI] API connection error: error_type=%s", type(e).__name__
+            )
             return LLMConnectionError(
                 message=f"Failed to connect to OpenAI: {str(e)}",
                 code=ErrorCode.INTERNAL_SERVER_ERROR,
@@ -389,7 +394,10 @@ class OpenAIClient(LLMClientBase):
             )
 
         if isinstance(e, openai.RateLimitError):
-            logger.warning(f"[OpenAI] Rate limited (429). Consider backoff. Error: {e}")
+            logger.warning(
+                "[OpenAI] Rate limited (429). Consider backoff. error_type=%s",
+                type(e).__name__,
+            )
             return LLMRateLimitError(
                 message=f"Rate limited by OpenAI: {str(e)}",
                 code=ErrorCode.RATE_LIMIT_EXCEEDED,
@@ -397,7 +405,11 @@ class OpenAIClient(LLMClientBase):
             )
 
         if isinstance(e, openai.BadRequestError):
-            logger.warning(f"[OpenAI] Bad request (400): {str(e)}")
+            # 400 responses from OpenAI can echo the request body in str(e) —
+            # log only the type so user content does not reach Splunk.
+            logger.warning(
+                "[OpenAI] Bad request (400): error_type=%s", type(e).__name__
+            )
             # BadRequestError can signify different issues (e.g., invalid args, context length)
             # Check message content if finer-grained errors are needed
             # Example: if "context_length_exceeded" in str(e): return LLMContextLengthExceededError(...)
@@ -409,8 +421,8 @@ class OpenAIClient(LLMClientBase):
 
         if isinstance(e, openai.AuthenticationError):
             logger.error(
-                f"[OpenAI] Authentication error (401): {str(e)}"
-            )  # More severe log level
+                "[OpenAI] Authentication error (401): error_type=%s", type(e).__name__
+            )
             return LLMAuthenticationError(
                 message=f"Authentication failed with OpenAI: {str(e)}",
                 code=ErrorCode.UNAUTHENTICATED,
@@ -419,8 +431,8 @@ class OpenAIClient(LLMClientBase):
 
         if isinstance(e, openai.PermissionDeniedError):
             logger.error(
-                f"[OpenAI] Permission denied (403): {str(e)}"
-            )  # More severe log level
+                "[OpenAI] Permission denied (403): error_type=%s", type(e).__name__
+            )
             return LLMPermissionDeniedError(
                 message=f"Permission denied by OpenAI: {str(e)}",
                 code=ErrorCode.PERMISSION_DENIED,
@@ -428,7 +440,9 @@ class OpenAIClient(LLMClientBase):
             )
 
         if isinstance(e, openai.NotFoundError):
-            logger.warning(f"[OpenAI] Resource not found (404): {str(e)}")
+            logger.warning(
+                "[OpenAI] Resource not found (404): error_type=%s", type(e).__name__
+            )
             # Could be invalid model name, etc.
             return LLMNotFoundError(
                 message=f"Resource not found in OpenAI: {str(e)}",
@@ -437,7 +451,9 @@ class OpenAIClient(LLMClientBase):
             )
 
         if isinstance(e, openai.UnprocessableEntityError):
-            logger.warning(f"[OpenAI] Unprocessable entity (422): {str(e)}")
+            logger.warning(
+                "[OpenAI] Unprocessable entity (422): error_type=%s", type(e).__name__
+            )
             return LLMUnprocessableEntityError(
                 message=f"Invalid request content for OpenAI: {str(e)}",
                 code=ErrorCode.INVALID_ARGUMENT,  # Usually validation errors
@@ -446,7 +462,11 @@ class OpenAIClient(LLMClientBase):
 
         # General API error catch-all
         if isinstance(e, openai.APIStatusError):
-            logger.warning(f"[OpenAI] API status error ({e.status_code}): {str(e)}")
+            logger.warning(
+                "[OpenAI] API status error (%s): error_type=%s",
+                e.status_code,
+                type(e).__name__,
+            )
             # Map based on status code potentially
             if e.status_code >= 500:
                 error_cls = LLMServerError
