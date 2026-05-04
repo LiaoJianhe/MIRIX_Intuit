@@ -63,10 +63,20 @@ class PIIRedactingSpanProcessor(SpanProcessor):
         directly because ``set_attribute`` is closed for writing once the
         span has been ended.
         """
+        # Fail loud if the span shape changes — silently falling back to
+        # ``span.attributes`` would land on a read-only mappingproxy and the
+        # bare except below would swallow the TypeError, causing every PII
+        # value to ship to OTLP unredacted. Better to log once and let the
+        # outer broad except keep the export pipeline alive.
         attrs = getattr(span, "_attributes", None)
         if attrs is None:
-            attrs = getattr(span, "attributes", None)
-        if attrs is None:
+            import logging as _logging
+
+            _logging.getLogger(__name__).warning(
+                "PIIRedactingSpanProcessor: span has no mutable _attributes "
+                "(type=%s); skipping redaction for this span",
+                type(span).__name__,
+            )
             return
         for key, value in list(attrs.items()):
             if not isinstance(key, str):

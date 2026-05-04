@@ -2498,11 +2498,16 @@ These keywords have been used to retrieve relevant memories from the database.
         except Exception as e:
             # Never dump the messages list — log shape only. The WARNING+ PII
             # filter masks the exception string.
+            #
+            # `messages` is typed Union[Message, List[Message]]; normalize so
+            # the error logger itself doesn't raise (Message is a Pydantic
+            # BaseModel, so .get() is unavailable, and len() rejects scalars).
+            msgs_list = messages if isinstance(messages, list) else [messages]
             self.logger.error(
                 "step() failed: error=%s, num_messages=%d, message_roles=%s",
                 e,
-                len(messages),
-                [m.get("role") for m in messages] if messages else [],
+                len(msgs_list),
+                [getattr(m, "role", None) for m in msgs_list],
                 exc_info=True,
             )
 
