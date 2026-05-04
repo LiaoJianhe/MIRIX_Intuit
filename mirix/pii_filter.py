@@ -14,16 +14,10 @@ turn on masking; see ``mirix/pii.py`` for the contract and an example.
 from __future__ import annotations
 
 import logging
-from functools import lru_cache
 
 from mirix.pii import mask
 
 _MIN_LEVEL = logging.WARNING
-
-
-@lru_cache(maxsize=512)
-def _masked(msg: str) -> str:
-    return mask(msg)
 
 
 class PIIRedactionFilter(logging.Filter):
@@ -31,7 +25,7 @@ class PIIRedactionFilter(logging.Filter):
         if record.levelno < _MIN_LEVEL:
             return True
         rendered = record.getMessage()
-        redacted = _masked(rendered)
+        redacted = mask(rendered)
         if redacted != rendered:
             record.msg = redacted
             record.args = ()

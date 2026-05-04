@@ -1,16 +1,7 @@
 import logging
 from unittest.mock import patch
 
-import pytest
-
-from mirix.pii_filter import PIIRedactionFilter, _masked
-
-
-@pytest.fixture(autouse=True)
-def _reset_cache():
-    _masked.cache_clear()
-    yield
-    _masked.cache_clear()
+from mirix.pii_filter import PIIRedactionFilter
 
 
 def _record(level: int, msg: str, args=()) -> logging.LogRecord:
@@ -51,19 +42,28 @@ def test_error_records_are_masked():
         assert rec.getMessage() == "boom [X]"
 
 
-def test_cache_avoids_repeat_calls():
-    f = PIIRedactionFilter()
-    rec1 = _record(logging.WARNING, "boom %s", ("x",))
-    rec2 = _record(logging.WARNING, "boom %s", ("x",))
-    with patch("mirix.pii_filter.mask", return_value="masked") as m:
-        f.filter(rec1)
-        f.filter(rec2)
-        assert m.call_count == 1
-
-
 def test_filter_returns_true_when_no_change():
     f = PIIRedactionFilter()
     rec = _record(logging.WARNING, "no pii here")
     with patch("mirix.pii_filter.mask", return_value="no pii here"):
         assert f.filter(rec) is True
         assert rec.getMessage() == "no pii here"
+
+
+def test_filter_picks_up_redactor_swap():
+    """Regression: a previous lru_cache made the filter ignore set_redactor."""
+    from mirix.pii import set_redactor
+
+    f = PIIRedactionFilter()
+    set_redactor(lambda s: s.upper())
+    try:
+        rec = _record(logging.WARNING, "before %s", ("after",))
+        f.filter(rec)
+        assert rec.getMessage() == "BEFORE AFTER"
+
+        set_redactor(lambda s: s.replace("after", "[redacted]"))
+        rec2 = _record(logging.WARNING, "before %s", ("after",))
+        f.filter(rec2)
+        assert rec2.getMessage() == "before [redacted]"
+    finally:
+        set_redactor(None)

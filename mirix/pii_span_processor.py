@@ -9,6 +9,19 @@ sites are written to drop raw content. The processor is defense-in-depth
 for the small surface where LLM-call spans deliberately capture content
 for debugging.
 
+Mutation point: ``_on_ending``. The OTEL SDK calls ``_on_ending(span)`` on
+all registered processors immediately before snapshotting the span into a
+``ReadableSpan`` and calling ``on_end(readable_span)``. ``ReadableSpan`` is
+an immutable snapshot, so mutating attributes from ``on_end`` is a no-op
+that lets the ``ReadableSpan`` be exported with the original (unredacted)
+values.
+
+By the time ``_on_ending`` runs, ``span._end_time`` is already set, which
+makes ``span.set_attribute()`` reject the write with a "Setting attribute
+on ended span" warning. To mutate post-end we have to assign directly to
+the underlying ``BoundedAttributes`` mapping (``span._attributes``), which
+``set_attribute``'s ended-span guard does not gate.
+
 Redaction goes through :func:`mirix.pii.mask`, which is a passthrough by
 default. Register a real redactor at startup with
 :func:`mirix.pii.set_redactor` to turn on masking.
@@ -40,8 +53,21 @@ class PIIRedactingSpanProcessor(SpanProcessor):
     def on_start(self, span: Span, parent_context: Optional[Context] = None) -> None:
         self._inner.on_start(span, parent_context)
 
-    def on_end(self, span: ReadableSpan) -> None:
-        attrs = getattr(span, "attributes", None) or {}
+    def _on_ending(self, span: Span) -> None:
+        """Mutate the span's attributes in place before it is snapshotted.
+
+        Walk the underlying attributes mapping; for any key that matches one
+        of the allowlisted prefixes and whose value is a string, replace the
+        value with the redactor's output. Non-string values and
+        out-of-allowlist keys are left untouched. Mutates ``span._attributes``
+        directly because ``set_attribute`` is closed for writing once the
+        span has been ended.
+        """
+        attrs = getattr(span, "_attributes", None)
+        if attrs is None:
+            attrs = getattr(span, "attributes", None)
+        if attrs is None:
+            return
         for key, value in list(attrs.items()):
             if not isinstance(key, str):
                 continue
@@ -51,11 +77,22 @@ class PIIRedactingSpanProcessor(SpanProcessor):
                 continue
             redacted = mask(value)
             try:
-                # ReadableSpan does not expose set_attribute publicly, but the
-                # underlying Span subclass that flows through processors does.
-                span.set_attribute(key, redacted)  # type: ignore[attr-defined]
+                attrs[key] = redacted
             except Exception:
                 pass
+        # Forward to the inner processor so any wrapper that overrides
+        # _on_ending (rare) still gets the hook.
+        inner_on_ending = getattr(self._inner, "_on_ending", None)
+        if inner_on_ending is not None:
+            try:
+                inner_on_ending(span)
+            except Exception:
+                pass
+
+    def on_end(self, span: ReadableSpan) -> None:
+        # By the time on_end is called the span is a ReadableSpan snapshot;
+        # mutation here is a no-op. Just forward to the inner processor for
+        # export.
         self._inner.on_end(span)
 
     def shutdown(self) -> None:
