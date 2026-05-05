@@ -2212,16 +2212,21 @@ These keywords have been used to retrieve relevant memories from the database.
                         )
                         return topics
                     except (json.JSONDecodeError, KeyError) as parse_error:
+                        # JSONDecodeError __str__ includes a snippet of the
+                        # offending JSON document — that document was the
+                        # LLM's tool-call args, derived from user content.
                         self.logger.warning(
-                            f"Failed to parse topic extraction response: {parse_error}"
+                            "Failed to parse topic extraction response: error_type=%s",
+                            type(parse_error).__name__,
                         )
                         continue
 
         except Exception as e:
-            # Bump to warning so the WARNING+ PII filter masks the exception
-            # string before emission.
+            # Don't interpolate `e` — its __str__ may carry user content
+            # from the LLM error path. Type alone is enough at warn level.
             self.logger.warning(
-                "Error in extracting the topic from the messages: %s", e
+                "Error in extracting the topic from the messages: error_type=%s",
+                type(e).__name__,
             )
 
         return None
@@ -2526,19 +2531,24 @@ These keywords have been used to retrieve relevant memories from the database.
             )
 
         except Exception as e:
-            # Never dump the messages list — log shape only. The WARNING+ PII
-            # filter masks the exception string.
+            # Never dump the messages list, the exception message, or a
+            # full traceback — any of those can echo user content from
+            # the LLM error path. Log type + shape + a frames-only
+            # traceback (no exception messages embedded).
             #
-            # `messages` is typed Union[Message, List[Message]]; normalize so
-            # the error logger itself doesn't raise (Message is a Pydantic
-            # BaseModel, so .get() is unavailable, and len() rejects scalars).
+            # `messages` is typed Union[Message, List[Message]]; normalize
+            # so the error logger itself doesn't raise (Message is a
+            # Pydantic BaseModel, so .get() is unavailable, and len()
+            # rejects scalars).
+            from mirix.log import safe_traceback
+
             msgs_list = messages if isinstance(messages, list) else [messages]
             self.logger.error(
-                "step() failed: error=%s, num_messages=%d, message_roles=%s",
-                e,
+                "step() failed: error_type=%s num_messages=%d message_roles=%s\n%s",
+                type(e).__name__,
                 len(msgs_list),
                 [getattr(m, "role", None) for m in msgs_list],
-                exc_info=True,
+                safe_traceback(e),
             )
 
             # If we got a context alert, try trimming the messages length, then try again
@@ -2932,9 +2942,7 @@ def strip_name_field_from_user_message(
     except Exception as e:
         # Note: This is a static function, so we'll use a module-level logger
         logger = logging.getLogger("Mirix.Agent.Utils")
-        logger.error(
-            "Handling of 'name' field failed: error_type=%s", type(e).__name__
-        )
+        logger.error("Handling of 'name' field failed: error_type=%s", type(e).__name__)
         raise e
 
 
