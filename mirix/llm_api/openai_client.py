@@ -186,10 +186,7 @@ class OpenAIClient(LLMClientBase):
                     tool.function = FunctionSchema(**structured_output_version)
                 except ValueError as e:
                     logger.warning(
-                        "Failed to convert tool function to structured output: "
-                        "tool_name=%s error_type=%s",
-                        getattr(tool.function, "name", None),
-                        type(e).__name__,
+                        f"Failed to convert tool function to structured output, tool={tool}, error={e}"
                     )
 
         else:

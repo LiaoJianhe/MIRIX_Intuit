@@ -2188,12 +2188,8 @@ These keywords have been used to retrieve relevant memories from the database.
                         )
                         return topics
                     except (json.JSONDecodeError, KeyError) as parse_error:
-                        # JSONDecodeError __str__ includes a snippet of the
-                        # offending JSON document — that document was the
-                        # LLM's tool-call args, derived from user content.
                         self.logger.warning(
-                            "Failed to parse topic extraction response: error_type=%s",
-                            type(parse_error).__name__,
+                            f"Failed to parse topic extraction response: {parse_error}"
                         )
                         continue
 
