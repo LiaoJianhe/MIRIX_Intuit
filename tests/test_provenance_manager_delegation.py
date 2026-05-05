@@ -1,6 +1,6 @@
 """
 Tests that the 3 provenance managers (memory_source, source_message, memory_citation)
-delegate to the IPS relational provider when registered, and fall back to ORM/cache
+delegate to the relational provider when registered, and fall back to ORM/cache
 when it is absent.
 
 Run:

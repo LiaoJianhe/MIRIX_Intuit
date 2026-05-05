@@ -181,7 +181,7 @@ class SourceMessageManager:
             )
             rows.append(row)
 
-        # IPS provider delegation — no bulk_create endpoint, so loop create() per row.
+        # Relational provider delegation — no bulk_create endpoint, so loop create() per row.
         # uq_source_messages_hash and uq_source_messages_ext_id catch duplicates;
         # we treat any conflict exception as a no-op (matches ON CONFLICT DO NOTHING).
         from mirix.database.relational_provider import get_relational_provider
@@ -255,7 +255,7 @@ class SourceMessageManager:
 
         Returns a PaginatedResponse with next_cursor and has_more.
         """
-        # IPS provider delegation
+        # Relational provider delegation
         from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()

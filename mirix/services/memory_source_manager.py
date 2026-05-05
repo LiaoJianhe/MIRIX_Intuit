@@ -74,7 +74,7 @@ class MemorySourceManager:
 
         occurred_at = parse_occurred_at(occurred_at)
 
-        # IPS provider delegation (create — relies on uq_memory_sources_ext_id /
+        # Relational provider delegation (create — relies on uq_memory_sources_ext_id /
         # uq_memory_sources_batch unique constraints for dedup)
         from mirix.database.relational_provider import get_relational_provider
 
@@ -157,7 +157,7 @@ class MemorySourceManager:
     @enforce_types
     async def get_by_id(self, memory_source_id: str, use_cache: bool = True) -> Optional[PydanticMemorySource]:
         """Fetch a memory source by ID with cache-aside pattern."""
-        # IPS provider delegation (read by ID) — IPSR is source of truth, skip cache
+        # Relational provider delegation (read by ID) — provider is source of truth, skip cache
         from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
@@ -231,7 +231,7 @@ class MemorySourceManager:
 
         Returns a PaginatedResponse with next_cursor and has_more.
         """
-        # IPS provider delegation — fetch matching rows via provider.list, then
+        # Relational provider delegation — fetch matching rows via provider.list, then
         # sort/paginate client-side (provider.list doesn't expose ordering or cursors).
         from mirix.database.relational_provider import get_relational_provider
 
@@ -325,7 +325,7 @@ class MemorySourceManager:
         No scope-based access control — intended for admin use.
         Supports filtering by user_id, client_id, scope, and time range.
         """
-        # IPS provider delegation — fetch then sort/paginate client-side
+        # Relational provider delegation — fetch then sort/paginate client-side
         from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
@@ -429,7 +429,7 @@ class MemorySourceManager:
         - SQLAlchemy only UPDATEs dirty columns, so this won't overwrite
           concurrent changes to other fields (e.g. summary)
         """
-        # IPS provider delegation (partial update)
+        # Relational provider delegation (partial update)
         from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
@@ -453,7 +453,7 @@ class MemorySourceManager:
         Used after processing completes to store a generated summary.
         Safe from lost updates: only touches summary/summary_source columns.
         """
-        # IPS provider delegation (partial update)
+        # Relational provider delegation (partial update)
         from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()

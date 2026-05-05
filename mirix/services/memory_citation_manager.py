@@ -74,7 +74,7 @@ class MemoryCitationManager:
             is_deleted=False,
         )
 
-        # IPS provider delegation — relies on uq_memory_citations_src_type_id
+        # Relational provider delegation — relies on uq_memory_citations_src_type_id
         # unique constraint for L3 dedup. Conflict → None (matches "already existed").
         from mirix.database.relational_provider import get_relational_provider
 
@@ -144,7 +144,7 @@ class MemoryCitationManager:
 
         Uses cache-aside pattern since this is the hot-path check for citation-level dedup.
         """
-        # IPS provider delegation — IPSR is source of truth, skip cache
+        # Relational provider delegation — provider is source of truth, skip cache
         from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
@@ -205,7 +205,7 @@ class MemoryCitationManager:
         Used by the temporal guard to prevent backdated overwrites.
         Not cached — called infrequently and the max changes as new citations arrive.
         """
-        # IPS provider delegation — fetch matching rows and compute max in memory.
+        # Relational provider delegation — fetch matching rows and compute max in memory.
         # The set is small (citations for one memory record) so client-side aggregation is fine.
         from mirix.database.relational_provider import get_relational_provider
 
@@ -244,7 +244,7 @@ class MemoryCitationManager:
         memory_id: str,
     ) -> List[PydanticMemoryCitation]:
         """Fetch all citations for a single memory."""
-        # IPS provider delegation
+        # Relational provider delegation
         from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
@@ -308,7 +308,7 @@ class MemoryCitationManager:
         if not memory_keys:
             return {}
 
-        # IPS provider delegation — provider.list doesn't support tuple-IN filters,
+        # Relational provider delegation — provider.list doesn't support tuple-IN filters,
         # so loop per (memory_type, memory_id) and group. Search hits are typically
         # 10-50 per query, so per-memory call volume is acceptable.
         from mirix.database.relational_provider import get_relational_provider
