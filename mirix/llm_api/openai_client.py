@@ -384,9 +384,7 @@ class OpenAIClient(LLMClientBase):
         Maps OpenAI-specific errors to common LLMError types.
         """
         if isinstance(e, openai.APIConnectionError):
-            logger.warning(
-                "[OpenAI] API connection error: error_type=%s", type(e).__name__
-            )
+            logger.warning(f"[OpenAI] API connection error: {e}")
             return LLMConnectionError(
                 message=f"Failed to connect to OpenAI: {str(e)}",
                 code=ErrorCode.INTERNAL_SERVER_ERROR,
@@ -394,10 +392,7 @@ class OpenAIClient(LLMClientBase):
             )
 
         if isinstance(e, openai.RateLimitError):
-            logger.warning(
-                "[OpenAI] Rate limited (429). Consider backoff. error_type=%s",
-                type(e).__name__,
-            )
+            logger.warning(f"[OpenAI] Rate limited (429). Consider backoff. Error: {e}")
             return LLMRateLimitError(
                 message=f"Rate limited by OpenAI: {str(e)}",
                 code=ErrorCode.RATE_LIMIT_EXCEEDED,
@@ -421,8 +416,8 @@ class OpenAIClient(LLMClientBase):
 
         if isinstance(e, openai.AuthenticationError):
             logger.error(
-                "[OpenAI] Authentication error (401): error_type=%s", type(e).__name__
-            )
+                f"[OpenAI] Authentication error (401): {str(e)}"
+            )  # More severe log level
             return LLMAuthenticationError(
                 message=f"Authentication failed with OpenAI: {str(e)}",
                 code=ErrorCode.UNAUTHENTICATED,
@@ -431,8 +426,8 @@ class OpenAIClient(LLMClientBase):
 
         if isinstance(e, openai.PermissionDeniedError):
             logger.error(
-                "[OpenAI] Permission denied (403): error_type=%s", type(e).__name__
-            )
+                f"[OpenAI] Permission denied (403): {str(e)}"
+            )  # More severe log level
             return LLMPermissionDeniedError(
                 message=f"Permission denied by OpenAI: {str(e)}",
                 code=ErrorCode.PERMISSION_DENIED,
@@ -440,9 +435,7 @@ class OpenAIClient(LLMClientBase):
             )
 
         if isinstance(e, openai.NotFoundError):
-            logger.warning(
-                "[OpenAI] Resource not found (404): error_type=%s", type(e).__name__
-            )
+            logger.warning(f"[OpenAI] Resource not found (404): {str(e)}")
             # Could be invalid model name, etc.
             return LLMNotFoundError(
                 message=f"Resource not found in OpenAI: {str(e)}",

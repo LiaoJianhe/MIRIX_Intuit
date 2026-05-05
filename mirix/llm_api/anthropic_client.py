@@ -420,11 +420,7 @@ class AnthropicClient(LLMClientBase):
 
     def handle_llm_error(self, e: Exception) -> Exception:
         if isinstance(e, anthropic.APIConnectionError):
-            logger.warning(
-                "[Anthropic] API connection error: error_type=%s cause_type=%s",
-                type(e).__name__,
-                type(e.__cause__).__name__ if e.__cause__ else None,
-            )
+            logger.warning(f"[Anthropic] API connection error: {e.__cause__}")
             return LLMConnectionError(
                 message=f"Failed to connect to Anthropic: {str(e)}",
                 code=ErrorCode.INTERNAL_SERVER_ERROR,
@@ -455,27 +451,21 @@ class AnthropicClient(LLMClientBase):
                 )
 
         if isinstance(e, anthropic.AuthenticationError):
-            logger.warning(
-                "[Anthropic] Authentication error: error_type=%s", type(e).__name__
-            )
+            logger.warning(f"[Anthropic] Authentication error: {str(e)}")
             return LLMAuthenticationError(
                 message=f"Authentication failed with Anthropic: {str(e)}",
                 code=ErrorCode.INTERNAL_SERVER_ERROR,
             )
 
         if isinstance(e, anthropic.PermissionDeniedError):
-            logger.warning(
-                "[Anthropic] Permission denied: error_type=%s", type(e).__name__
-            )
+            logger.warning(f"[Anthropic] Permission denied: {str(e)}")
             return LLMPermissionDeniedError(
                 message=f"Permission denied by Anthropic: {str(e)}",
                 code=ErrorCode.INTERNAL_SERVER_ERROR,
             )
 
         if isinstance(e, anthropic.NotFoundError):
-            logger.warning(
-                "[Anthropic] Resource not found: error_type=%s", type(e).__name__
-            )
+            logger.warning(f"[Anthropic] Resource not found: {str(e)}")
             return LLMNotFoundError(
                 message=f"Resource not found in Anthropic: {str(e)}",
                 code=ErrorCode.INTERNAL_SERVER_ERROR,
