@@ -72,9 +72,59 @@ class MemorySourceManager:
             filter_tags = {}
         filter_tags["scope"] = actor.write_scope
 
+        occurred_at = parse_occurred_at(occurred_at)
+
+        # IPS provider delegation (create — relies on uq_memory_sources_ext_id /
+        # uq_memory_sources_batch unique constraints for dedup)
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            now = datetime.now(timezone.utc)
+            data_dict = {
+                "id": memory_source_id,
+                "client_id": actor.id,
+                "user_id": user_id,
+                "organization_id": organization_id,
+                "source_type": source_type,
+                "external_id": external_id,
+                "external_thread_id": external_thread_id,
+                "source_system": source_system,
+                "source_metadata": source_metadata,
+                "occurred_at": occurred_at.isoformat() if occurred_at else None,
+                "summary": summary,
+                "summary_source": summary_source,
+                "batch_hash": batch_hash,
+                "filter_tags": filter_tags,
+                "processing_complete": False,
+                "_created_by_id": actor.id,
+                "_last_updated_by_id": actor.id,
+                "created_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+                "is_deleted": False,
+            }
+            try:
+                result = await provider.create("memory_sources", data_dict)
+                return PydanticMemorySource(**result)
+            except Exception as e:
+                # Treat as ON CONFLICT DO NOTHING — look up existing row by dedup key.
+                logger.debug("memory_sources create raised %s; looking up existing row", e)
+                lookup_kwargs = {"client_id": actor.id, "user_id": user_id}
+                if external_id is not None:
+                    lookup_kwargs["external_id"] = external_id
+                elif batch_hash is not None:
+                    lookup_kwargs["batch_hash"] = batch_hash
+                else:
+                    raise
+                records = await provider.list(
+                    "memory_sources", filter_tags=None, limit=1, **lookup_kwargs
+                )
+                if records:
+                    return PydanticMemorySource(**records[0])
+                raise
+
         async with self.session_maker() as session:
             now = datetime.now(timezone.utc)
-            occurred_at = parse_occurred_at(occurred_at)
 
             await MemorySourceModel.create_or_ignore_with_redis(
                 db_session=session,
@@ -107,6 +157,16 @@ class MemorySourceManager:
     @enforce_types
     async def get_by_id(self, memory_source_id: str, use_cache: bool = True) -> Optional[PydanticMemorySource]:
         """Fetch a memory source by ID with cache-aside pattern."""
+        # IPS provider delegation (read by ID) — IPSR is source of truth, skip cache
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            result = await provider.read("memory_sources", memory_source_id)
+            if result is None:
+                return None
+            return PydanticMemorySource(**result)
+
         # Try cache first
         if use_cache:
             try:
@@ -171,6 +231,38 @@ class MemorySourceManager:
 
         Returns a PaginatedResponse with next_cursor and has_more.
         """
+        # IPS provider delegation — fetch matching rows via provider.list, then
+        # sort/paginate client-side (provider.list doesn't expose ordering or cursors).
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            list_kwargs = {"external_thread_id": external_thread_id}
+            if user_id:
+                list_kwargs["user_id"] = user_id
+            records = await provider.list(
+                "memory_sources",
+                filter_tags={"scope": scopes} if scopes else None,
+                limit=5000,
+                **list_kwargs,
+            )
+            # Filter out soft-deleted, sort ascending by (occurred_at, created_at)
+            records = [r for r in records if not r.get("is_deleted")]
+            records.sort(key=lambda r: (r.get("occurred_at") or "", r.get("created_at") or ""))
+            # Apply cursor (skip until we pass cursor row by id)
+            if cursor:
+                idx = next((i for i, r in enumerate(records) if r.get("id") == cursor), None)
+                if idx is not None:
+                    records = records[idx + 1 :]
+            has_more = len(records) > limit
+            records = records[:limit]
+            items = [PydanticMemorySource(**r) for r in records]
+            return PaginatedResponse(
+                items=items,
+                next_cursor=items[-1].id if has_more and items else None,
+                has_more=has_more,
+            )
+
         from mirix.database.filter_tags_query import apply_filter_tags_sqlalchemy
 
         async with self.session_maker() as session:
@@ -233,6 +325,51 @@ class MemorySourceManager:
         No scope-based access control — intended for admin use.
         Supports filtering by user_id, client_id, scope, and time range.
         """
+        # IPS provider delegation — fetch then sort/paginate client-side
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            list_kwargs: Dict[str, Any] = {}
+            if user_id:
+                list_kwargs["user_id"] = user_id
+            if client_id:
+                list_kwargs["client_id"] = client_id
+            time_range: Dict[str, Any] = {}
+            if since:
+                time_range["occurred_at__gte"] = since.isoformat()
+            if until:
+                time_range["occurred_at__lte"] = until.isoformat()
+            if time_range:
+                list_kwargs["time_range"] = time_range
+            records = await provider.list(
+                "memory_sources",
+                filter_tags={"scope": [scope]} if scope else None,
+                limit=5000,
+                **list_kwargs,
+            )
+            records = [r for r in records if not r.get("is_deleted")]
+            # Descending order: nulls last on occurred_at, then created_at desc
+            records.sort(
+                key=lambda r: (
+                    r.get("occurred_at") or "",
+                    r.get("created_at") or "",
+                ),
+                reverse=True,
+            )
+            if cursor:
+                idx = next((i for i, r in enumerate(records) if r.get("id") == cursor), None)
+                if idx is not None:
+                    records = records[idx + 1 :]
+            has_more = len(records) > limit
+            records = records[:limit]
+            items = [PydanticMemorySource(**r) for r in records]
+            return PaginatedResponse(
+                items=items,
+                next_cursor=items[-1].id if has_more and items else None,
+                has_more=has_more,
+            )
+
         async with self.session_maker() as session:
             query = (
                 select(MemorySourceModel)
@@ -292,6 +429,17 @@ class MemorySourceManager:
         - SQLAlchemy only UPDATEs dirty columns, so this won't overwrite
           concurrent changes to other fields (e.g. summary)
         """
+        # IPS provider delegation (partial update)
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            await provider.update(
+                "memory_sources", memory_source_id, {"processing_complete": True}
+            )
+            logger.info("Marked memory source %s as processing complete", memory_source_id)
+            return
+
         async with self.session_maker() as session:
             record = await MemorySourceModel.read(db_session=session, identifier=memory_source_id)
             record.processing_complete = True
@@ -305,6 +453,21 @@ class MemorySourceManager:
         Used after processing completes to store a generated summary.
         Safe from lost updates: only touches summary/summary_source columns.
         """
+        # IPS provider delegation (partial update)
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            await provider.update(
+                "memory_sources",
+                memory_source_id,
+                {"summary": summary, "summary_source": summary_source},
+            )
+            logger.info(
+                "Updated summary for memory source %s (source=%s)", memory_source_id, summary_source
+            )
+            return
+
         async with self.session_maker() as session:
             record = await MemorySourceModel.read(db_session=session, identifier=memory_source_id)
             record.summary = summary

@@ -181,6 +181,39 @@ class SourceMessageManager:
             )
             rows.append(row)
 
+        # IPS provider delegation — no bulk_create endpoint, so loop create() per row.
+        # uq_source_messages_hash and uq_source_messages_ext_id catch duplicates;
+        # we treat any conflict exception as a no-op (matches ON CONFLICT DO NOTHING).
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            inserted = 0
+            for row in rows:
+                # Provider expects ISO strings, not datetime objects
+                row_payload = {
+                    **row,
+                    "occurred_at": row["occurred_at"].isoformat() if row["occurred_at"] else None,
+                    "created_at": row["created_at"].isoformat(),
+                    "updated_at": row["updated_at"].isoformat(),
+                }
+                try:
+                    await provider.create("source_messages", row_payload)
+                    inserted += 1
+                except Exception as e:
+                    logger.debug(
+                        "source_messages create raised %s for content_hash=%s; treating as conflict",
+                        e,
+                        row["content_hash"],
+                    )
+            logger.info(
+                "Bulk inserted %d/%d source messages for source %s (via provider)",
+                inserted,
+                len(rows),
+                memory_source_id,
+            )
+            return inserted
+
         async with self.session_maker() as session:
             inserted = await SourceMessageModel.bulk_create_or_ignore(
                 db_session=session,
@@ -222,6 +255,34 @@ class SourceMessageManager:
 
         Returns a PaginatedResponse with next_cursor and has_more.
         """
+        # IPS provider delegation
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            records = await provider.list(
+                "source_messages",
+                filter_tags=None,
+                limit=5000,
+                memory_source_id=memory_source_id,
+            )
+            records = [r for r in records if not r.get("is_deleted")]
+            records.sort(key=lambda r: r.get("sequence_num") or 0)
+            if cursor:
+                # cursor is a row id; skip until we pass that row's sequence_num
+                cur = next((r for r in records if r.get("id") == cursor), None)
+                if cur is not None:
+                    cur_seq = cur.get("sequence_num") or 0
+                    records = [r for r in records if (r.get("sequence_num") or 0) > cur_seq]
+            has_more = len(records) > limit
+            records = records[:limit]
+            items = [PydanticSourceMessage(**r) for r in records]
+            return PaginatedResponse(
+                items=items,
+                next_cursor=items[-1].id if has_more and items else None,
+                has_more=has_more,
+            )
+
         async with self.session_maker() as session:
             query = (
                 select(SourceMessageModel)

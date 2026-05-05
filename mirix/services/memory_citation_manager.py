@@ -74,6 +74,41 @@ class MemoryCitationManager:
             is_deleted=False,
         )
 
+        # IPS provider delegation — relies on uq_memory_citations_src_type_id
+        # unique constraint for L3 dedup. Conflict → None (matches "already existed").
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            payload = {
+                **values,
+                "occurred_at": occurred_at.isoformat() if occurred_at else None,
+                "created_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+            }
+            try:
+                await provider.create("memory_citations", payload)
+                logger.info(
+                    "Created citation %s: %s/%s -> source %s",
+                    citation_id,
+                    memory_type,
+                    memory_id,
+                    memory_source_id,
+                )
+                pydantic_values = {
+                    k: v for k, v in values.items() if k != "is_deleted" and not k.startswith("_")
+                }
+                return PydanticMemoryCitation(**pydantic_values)
+            except Exception as e:
+                logger.debug(
+                    "memory_citations create raised %s for %s/%s/%s; treating as conflict",
+                    e,
+                    memory_source_id,
+                    memory_type,
+                    memory_id,
+                )
+                return None
+
         async with self.session_maker() as session:
             inserted = await MemoryCitationModel.create_or_ignore_with_redis(
                 db_session=session,
@@ -109,6 +144,21 @@ class MemoryCitationManager:
 
         Uses cache-aside pattern since this is the hot-path check for citation-level dedup.
         """
+        # IPS provider delegation — IPSR is source of truth, skip cache
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            records = await provider.list(
+                "memory_citations",
+                filter_tags=None,
+                limit=1,
+                memory_source_id=memory_source_id,
+                memory_type=memory_type,
+                memory_id=memory_id,
+            )
+            return any(not r.get("is_deleted") for r in records)
+
         # Try cache first
         if use_cache:
             try:
@@ -155,6 +205,29 @@ class MemoryCitationManager:
         Used by the temporal guard to prevent backdated overwrites.
         Not cached — called infrequently and the max changes as new citations arrive.
         """
+        # IPS provider delegation — fetch matching rows and compute max in memory.
+        # The set is small (citations for one memory record) so client-side aggregation is fine.
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            records = await provider.list(
+                "memory_citations",
+                filter_tags=None,
+                limit=5000,
+                memory_type=memory_type,
+                memory_id=memory_id,
+            )
+            occurreds = [
+                r.get("occurred_at")
+                for r in records
+                if not r.get("is_deleted") and r.get("occurred_at")
+            ]
+            if not occurreds:
+                return None
+            max_iso = max(occurreds)
+            return datetime.fromisoformat(max_iso.replace("Z", "+00:00")) if isinstance(max_iso, str) else max_iso
+
         async with self.session_maker() as session:
             result = await session.execute(
                 select(func.max(MemoryCitationModel.occurred_at)).where(
@@ -171,6 +244,30 @@ class MemoryCitationManager:
         memory_id: str,
     ) -> List[PydanticMemoryCitation]:
         """Fetch all citations for a single memory."""
+        # IPS provider delegation
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            records = await provider.list(
+                "memory_citations",
+                filter_tags=None,
+                limit=5000,
+                memory_type=memory_type,
+                memory_id=memory_id,
+            )
+            records = [r for r in records if not r.get("is_deleted")]
+            # Order by occurred_at desc, nulls last
+            records.sort(
+                key=lambda r: (r.get("occurred_at") is None, r.get("occurred_at") or ""),
+                reverse=False,
+            )
+            records.sort(
+                key=lambda r: r.get("occurred_at") or "",
+                reverse=True,
+            )
+            return [PydanticMemoryCitation(**r) for r in records]
+
         async with self.session_maker() as session:
             stmt = (
                 select(MemoryCitationModel)
@@ -210,6 +307,28 @@ class MemoryCitationManager:
         """
         if not memory_keys:
             return {}
+
+        # IPS provider delegation — provider.list doesn't support tuple-IN filters,
+        # so loop per (memory_type, memory_id) and group. Search hits are typically
+        # 10-50 per query, so per-memory call volume is acceptable.
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            grouped: Dict[Tuple[str, str], List[PydanticMemoryCitation]] = defaultdict(list)
+            for memory_type, memory_id in memory_keys:
+                records = await provider.list(
+                    "memory_citations",
+                    filter_tags=None,
+                    limit=1000,
+                    memory_type=memory_type,
+                    memory_id=memory_id,
+                )
+                for r in records:
+                    if r.get("is_deleted"):
+                        continue
+                    grouped[(memory_type, memory_id)].append(PydanticMemoryCitation(**r))
+            return dict(grouped)
 
         async with self.session_maker() as session:
             stmt = select(MemoryCitationModel).where(
