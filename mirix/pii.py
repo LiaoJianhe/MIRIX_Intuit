@@ -45,6 +45,8 @@ from typing import Any, Final, Optional
 
 import httpx
 
+from mirix.log import safe_traceback
+
 REDACTED_PLACEHOLDER: Final[str] = "[REDACTED — PII masking unavailable]"
 
 _DEFAULT_ENDPOINT: Final[str] = "http://ispypiis-e2e.api.intuit.com/v2/analyze"
@@ -145,8 +147,6 @@ def log_error_strip_pii_sync(
     # body and degrade silently on any failure — the alternative is
     # swallowing the original exception entirely.
     try:
-        from mirix.log import safe_traceback
-
         masked = _mask_sync(str(exc))
         tb = safe_traceback(exc)
         log.log(
