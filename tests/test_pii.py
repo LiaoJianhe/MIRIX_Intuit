@@ -269,3 +269,109 @@ def test_log_error_strip_pii_sync_survives_cyclic_exception_chain():
     # cycle detected on third). Should NOT contain the messages.
     assert "first" not in msg
     assert "second" not in msg
+
+
+def test_log_error_strip_pii_sync_propagates_extra_to_log_record():
+    """The extra kwarg should attach structured fields to the LogRecord
+    so Splunk indexes them directly without relying on key=value
+    auto-extraction from the message body."""
+
+    def handler(request):
+        return httpx.Response(200, json={"redactedText": "ok"})
+
+    test_logger = logging.getLogger("test_pii_sync_extra")
+    records = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    test_logger.addHandler(_Capture())
+    test_logger.setLevel(logging.ERROR)
+
+    try:
+        _raise_with_user_msg("anything")
+    except ValueError as e:
+        with _patch_sync_client(handler):
+            log_error_strip_pii_sync(
+                test_logger,
+                "X failed",
+                exc=e,
+                extra={"client_id": "tinypsa", "user_id": "u_456"},
+            )
+
+    rec = records[-1]
+    assert rec.client_id == "tinypsa"
+    assert rec.user_id == "u_456"
+
+
+def test_log_error_strip_pii_sync_injects_error_type_and_masked_error():
+    """error_type and error (masked) are auto-injected as structured
+    fields so Splunk dashboards that key on `error=...` can rely on
+    that field — symmetric with the async ECMS helper."""
+
+    def handler(request):
+        return httpx.Response(200, json={"redactedText": "ssn ***-**-6789"})
+
+    test_logger = logging.getLogger("test_pii_sync_error_field")
+    records = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    test_logger.addHandler(_Capture())
+    test_logger.setLevel(logging.ERROR)
+
+    runtime_pii = "user " + "ssn=" + "1" + "23-45-6789"
+    try:
+        _raise_with_user_msg(runtime_pii)
+    except ValueError as e:
+        with _patch_sync_client(handler):
+            log_error_strip_pii_sync(
+                test_logger,
+                "X failed",
+                exc=e,
+                extra={"client_id": "tinypsa"},
+            )
+
+    rec = records[-1]
+    # Auto-injected.
+    assert rec.error_type == "ValueError"
+    assert rec.error == "ssn ***-**-6789"
+    # Caller-supplied still present.
+    assert rec.client_id == "tinypsa"
+    # Unredacted runtime value never reaches the LogRecord.
+    assert "123-45-6789" not in rec.error
+
+
+def test_log_error_strip_pii_sync_caller_extra_overrides_auto_injected():
+    """Caller-supplied error/error_type take precedence over auto-injection."""
+
+    def handler(request):
+        return httpx.Response(200, json={"redactedText": "ok"})
+
+    test_logger = logging.getLogger("test_pii_sync_override")
+    records = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    test_logger.addHandler(_Capture())
+    test_logger.setLevel(logging.ERROR)
+
+    try:
+        _raise_with_user_msg("anything")
+    except ValueError as e:
+        with _patch_sync_client(handler):
+            log_error_strip_pii_sync(
+                test_logger,
+                "X failed",
+                exc=e,
+                extra={"error": "caller-supplied", "error_type": "CallerType"},
+            )
+
+    rec = records[-1]
+    assert rec.error == "caller-supplied"
+    assert rec.error_type == "CallerType"

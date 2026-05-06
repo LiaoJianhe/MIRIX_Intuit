@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Final, Optional
+from typing import Any, Dict, Final, Optional
 
 import httpx
 
@@ -123,6 +123,7 @@ def log_error_strip_pii_sync(
     *args: Any,
     exc: BaseException,
     level: int = logging.ERROR,
+    extra: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Log a sync catch-site exception with PII stripped from the message.
 
@@ -137,6 +138,20 @@ def log_error_strip_pii_sync(
         <fmt % args> error_type=<type> msg=<masked str(exc)>
         <frames-only traceback ending in ExceptionType>
 
+    ``extra``: optional dict of structured fields to attach to the log
+    record (Splunk indexes these as searchable fields directly, without
+    relying on key=value auto-extraction from the message body). Use
+    for IDs, structural shape, counts, etc. Do NOT include raw
+    ``str(exc)``-derived values here — that's the leak this helper
+    exists to prevent.
+
+    The helper injects two structured fields automatically alongside
+    the caller's ``extra``: ``error_type`` (the exception class name)
+    and ``error`` (the masked exception message). This gives Splunk
+    dashboards a structured field to key on — symmetric with the
+    async helper in ECMS (``common.pii.log_error_strip_pii``).
+    Caller-supplied fields take precedence on name collision.
+
     Blocks the calling thread for up to ``MIRIX_ISPY_PII_TIMEOUT_MS``
     waiting on ispy-pii. Do not call from a hot path.
     """
@@ -149,6 +164,14 @@ def log_error_strip_pii_sync(
     try:
         masked = _mask_sync(str(exc))
         tb = safe_traceback(exc)
+        # Inject error_type / error (masked) as structured fields so
+        # Splunk dashboards can key on them. Caller-supplied keys win.
+        combined_extra: Dict[str, Any] = {
+            "error_type": type(exc).__name__,
+            "error": masked,
+        }
+        if extra:
+            combined_extra.update(extra)
         log.log(
             level,
             fmt + " error_type=%s msg=%s\n%s",
@@ -156,6 +179,7 @@ def log_error_strip_pii_sync(
             type(exc).__name__,
             masked,
             tb,
+            extra=combined_extra,
         )
     except Exception:
         # Last-ditch fallback. Use the stdlib logger directly with the
