@@ -36,7 +36,7 @@ from mirix.interface import AgentInterface
 from mirix.llm_api.helpers import get_token_counts_for_messages, is_context_overflow_error
 from mirix.llm_api.llm_api_tools import create
 from mirix.llm_api.llm_client import LLMClient
-from mirix.log import get_logger, safe_traceback
+from mirix.log import get_logger
 from mirix.memory import summarize_messages
 from mirix.observability.context import get_trace_context, mark_observation_as_child
 from mirix.observability.langfuse_client import get_langfuse_client
@@ -2734,21 +2734,26 @@ These keywords have been used to retrieve relevant memories from the database.
             )
 
         except Exception as e:
-            # Never dump the messages list, the exception message, or a
-            # full traceback — any of those can echo user content from
-            # the LLM error path. Log type + shape + a frames-only
-            # traceback (no exception messages embedded).
+            # str(e) for an LLMError wraps the upstream provider's 4xx
+            # response which can include the user's prompt. Redact via
+            # ispy-pii so the error REASON ("prompt is too long: …",
+            # "content_policy_violation: …") stays debuggable in Splunk
+            # with PII tokens scrubbed.
             #
             # `messages` is typed Union[Message, List[Message]]; normalize
             # so the error logger itself doesn't raise (Message is a
             # Pydantic BaseModel, so .get() is unavailable, and len()
             # rejects scalars).
+            from mirix.pii import log_error_strip_pii_sync
+
             msgs_list = messages if isinstance(messages, list) else [messages]
-            printv(
-                f"[Mirix.Agent.{self.agent_state.name}] ERROR: inner_step() failed: "
-                f"error_type={type(e).__name__} num_messages={len(msgs_list)} "
-                f"message_roles={[getattr(m, 'role', None) for m in msgs_list]}\n"
-                f"{safe_traceback(e)}"
+            log_error_strip_pii_sync(
+                logger,
+                f"[Mirix.Agent.{self.agent_state.name}] inner_step() failed: "
+                "num_messages=%d message_roles=%s",
+                len(msgs_list),
+                [getattr(m, "role", None) for m in msgs_list],
+                exc=e,
             )
             if is_context_overflow_error(e):
                 num_accumulated = len(accumulated) + len(messages)
@@ -2805,9 +2810,15 @@ These keywords have been used to retrieve relevant memories from the database.
                     details={"num_in_context_messages": num_accumulated},
                 )
             else:
-                printv(
-                    f"[Mirix.Agent.{self.agent_state.name}] ERROR: inner_step() failed with an "
-                    f"unrecognized exception: error_type={type(e).__name__}"
+                # Redact str(e) via ispy-pii so the unrecognized error
+                # message is preserved (with PII scrubbed) for debugging.
+                from mirix.pii import log_error_strip_pii_sync
+
+                log_error_strip_pii_sync(
+                    logger,
+                    f"[Mirix.Agent.{self.agent_state.name}] inner_step() failed with "
+                    "an unrecognized exception:",
+                    exc=e,
                 )
                 raise e
 

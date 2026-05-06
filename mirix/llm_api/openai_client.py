@@ -1,4 +1,5 @@
 import base64
+import logging
 import os
 from typing import List, Optional
 
@@ -357,10 +358,16 @@ class OpenAIClient(LLMClientBase):
 
         if isinstance(e, openai.BadRequestError):
             # 400 responses from OpenAI can echo the request body in
-            # str(e) — log only the type so user content does not reach
-            # Splunk.
-            logger.warning(
-                "[OpenAI] Bad request (400): error_type=%s", type(e).__name__
+            # str(e). Redact via ispy-pii so the error reason
+            # (context-length-exceeded, invalid args, etc.) stays
+            # debuggable in Splunk with PII tokens scrubbed.
+            from mirix.pii import log_error_strip_pii_sync
+
+            log_error_strip_pii_sync(
+                logger,
+                "[OpenAI] Bad request (400):",
+                exc=e,
+                level=logging.WARNING,
             )
             # BadRequestError can signify different issues (e.g., invalid args, context length)
             # Check message content if finer-grained errors are needed
@@ -397,9 +404,15 @@ class OpenAIClient(LLMClientBase):
             )
 
         if isinstance(e, openai.UnprocessableEntityError):
-            # 422 responses can quote offending content. Log type only.
-            logger.warning(
-                "[OpenAI] Unprocessable entity (422): error_type=%s", type(e).__name__
+            # 422 responses can quote offending content. Redact via
+            # ispy-pii so the validation error reason is preserved.
+            from mirix.pii import log_error_strip_pii_sync
+
+            log_error_strip_pii_sync(
+                logger,
+                "[OpenAI] Unprocessable entity (422):",
+                exc=e,
+                level=logging.WARNING,
             )
             return LLMUnprocessableEntityError(
                 message=f"Invalid request content for OpenAI: {str(e)}",
@@ -426,11 +439,15 @@ class OpenAIClient(LLMClientBase):
         # General API error catch-all for other status codes
         if isinstance(e, openai.APIStatusError):
             # Catch-all for unrecognized 4xx/5xx — could echo request
-            # body. Log status + type only.
-            logger.warning(
-                "[OpenAI] API status error (%s): error_type=%s",
+            # body. Redact via ispy-pii.
+            from mirix.pii import log_error_strip_pii_sync
+
+            log_error_strip_pii_sync(
+                logger,
+                "[OpenAI] API status error (%s):",
                 e.status_code,
-                type(e).__name__,
+                exc=e,
+                level=logging.WARNING,
             )
             if e.status_code >= 500:
                 error_cls = LLMServerError

@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 from typing import Dict, List, Optional, Union
 
@@ -105,17 +106,14 @@ class AnthropicClient(LLMClientBase):
             return batch_response
 
         except Exception as e:
-            # Avoid exc_info=True: it renders the final
-            # `ExceptionType: <msg>` line, and `<msg>` for an
-            # anthropic.BadRequestError includes the request body which
-            # may carry user content. Log type + frames-only traceback
-            # via mirix.log.safe_traceback.
-            from mirix.log import safe_traceback
+            # str(e) for an anthropic.BadRequestError includes the
+            # request body which may carry user content. Redact via
+            # ispy-pii so the error reason stays debuggable in Splunk
+            # with PII tokens scrubbed.
+            from mirix.pii import log_error_strip_pii_sync
 
-            logger.error(
-                "Error during send_llm_batch_request_async: error_type=%s\n%s",
-                type(e).__name__,
-                safe_traceback(e),
+            log_error_strip_pii_sync(
+                logger, "Error during send_llm_batch_request_async:", exc=e
             )
             raise self.handle_llm_error(e)
 
@@ -365,9 +363,15 @@ class AnthropicClient(LLMClientBase):
 
         if isinstance(e, anthropic.BadRequestError):
             # 400 responses from Anthropic can echo the request payload
-            # in str(e) — log only the type so user content does not
-            # leak.
-            logger.warning("[Anthropic] Bad request: error_type=%s", type(e).__name__)
+            # in str(e). Redact via ispy-pii so the error reason
+            # ("prompt is too long: 200758 tokens > 200000 maximum",
+            # content-policy details, etc.) stays debuggable in Splunk
+            # with PII tokens scrubbed.
+            from mirix.pii import log_error_strip_pii_sync
+
+            log_error_strip_pii_sync(
+                logger, "[Anthropic] Bad request:", exc=e, level=logging.WARNING
+            )
             if "prompt is too long" in str(e).lower():
                 # If the context window is too large, we expect to receive:
                 # 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'prompt is too long: 200758 tokens > 200000 maximum'}}
@@ -402,10 +406,15 @@ class AnthropicClient(LLMClientBase):
             )
 
         if isinstance(e, anthropic.UnprocessableEntityError):
-            # 422 responses can quote offending content (content-policy
-            # violations). Log type only.
-            logger.warning(
-                "[Anthropic] Unprocessable entity: error_type=%s", type(e).__name__
+            # 422 responses can quote offending content. Redact via
+            # ispy-pii so the validation error reason is preserved.
+            from mirix.pii import log_error_strip_pii_sync
+
+            log_error_strip_pii_sync(
+                logger,
+                "[Anthropic] Unprocessable entity:",
+                exc=e,
+                level=logging.WARNING,
             )
             return LLMUnprocessableEntityError(
                 message=f"Invalid request content for Anthropic: {str(e)}",
@@ -414,9 +423,14 @@ class AnthropicClient(LLMClientBase):
 
         if isinstance(e, anthropic.APIStatusError):
             # Catch-all for unrecognized 4xx/5xx — could echo request
-            # body. Log type only.
-            logger.warning(
-                "[Anthropic] API status error: error_type=%s", type(e).__name__
+            # body. Redact via ispy-pii.
+            from mirix.pii import log_error_strip_pii_sync
+
+            log_error_strip_pii_sync(
+                logger,
+                "[Anthropic] API status error:",
+                exc=e,
+                level=logging.WARNING,
             )
             return LLMServerError(
                 message=f"Anthropic API error: {str(e)}",

@@ -1,0 +1,204 @@
+"""Tests for mirix.pii.
+
+Covers the sync :func:`log_error_strip_pii_sync` helper end-to-end:
+template formatting, ispy-pii masking of the exception message, and
+the frames-only traceback shape.
+"""
+
+import logging
+from unittest.mock import patch
+
+import httpx
+import pytest
+
+from mirix.pii import REDACTED_PLACEHOLDER, log_error_strip_pii_sync
+
+
+@pytest.fixture(autouse=True)
+def _enable_pii(monkeypatch):
+    monkeypatch.setenv("MIRIX_ISPY_PII_ENABLED", "true")
+    monkeypatch.setenv("MIRIX_ISPY_PII_ENDPOINT", "http://ispy.test/v2/analyze")
+    monkeypatch.setenv("MIRIX_ISPY_PII_TIMEOUT_MS", "200")
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _reset_module_client():
+    """The module caches an httpx.Client at module scope; reset between
+    tests so MockTransport patches in one test don't bleed into the next."""
+    import mirix.pii as _pii
+
+    _pii._sync_client = None
+    yield
+    _pii._sync_client = None
+
+
+def _patch_sync_client(handler):
+    return patch(
+        "mirix.pii._sync_client",
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+
+def _raise_with_user_msg(user_input):
+    """Source line of this function does NOT contain the runtime value,
+    so format_tb's source rendering of this frame is PII-free."""
+    raise ValueError(user_input)
+
+
+def test_log_error_strip_pii_sync_includes_template_masked_msg_and_traceback(caplog):
+    """The helper renders <fmt % args> error_type=<type> msg=<masked> + tb,
+    and the traceback ends in the bare exception type (no message)."""
+
+    def handler(request):
+        return httpx.Response(200, json={"redactedText": "ssn ***-**-6789"})
+
+    test_logger = logging.getLogger("test_pii_sync_happy")
+    caplog.set_level(logging.ERROR, logger=test_logger.name)
+
+    runtime_pii = "user " + "ssn=" + "1" + "23-45-6789"
+    try:
+        _raise_with_user_msg(runtime_pii)
+    except ValueError as e:
+        with _patch_sync_client(handler):
+            log_error_strip_pii_sync(
+                test_logger, "Failed to X: user_id=%s", "u_456", exc=e
+            )
+
+    rec = caplog.records[-1]
+    msg = rec.getMessage()
+    assert "Failed to X: user_id=u_456" in msg
+    assert "error_type=ValueError" in msg
+    assert "msg=ssn ***-**-6789" in msg
+    assert "Traceback (most recent call last):" in msg
+    assert "_raise_with_user_msg" in msg
+    assert msg.rstrip().endswith("ValueError")
+    assert "123-45-6789" not in msg
+
+
+def test_log_error_strip_pii_sync_uses_placeholder_when_mask_fails():
+    def handler(request):
+        return httpx.Response(500, text="boom")
+
+    test_logger = logging.getLogger("test_pii_sync_placeholder")
+    records = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    test_logger.addHandler(_Capture())
+    test_logger.setLevel(logging.ERROR)
+
+    runtime_pii = "user " + "ssn=" + "1" + "23-45-6789"
+    try:
+        _raise_with_user_msg(runtime_pii)
+    except ValueError as e:
+        with _patch_sync_client(handler):
+            log_error_strip_pii_sync(test_logger, "X failed", exc=e)
+
+    msg = records[-1].getMessage()
+    assert REDACTED_PLACEHOLDER in msg
+    assert "23-45-6789" not in msg
+
+
+def test_log_error_strip_pii_sync_passthrough_when_disabled(monkeypatch, caplog):
+    """Kill switch off → mask is a passthrough → str(e) reaches log
+    verbatim. The traceback portion still strips the exception-message
+    line via _safe_traceback."""
+    monkeypatch.setenv("MIRIX_ISPY_PII_ENABLED", "false")
+
+    test_logger = logging.getLogger("test_pii_sync_disabled")
+    caplog.set_level(logging.ERROR, logger=test_logger.name)
+
+    runtime_pii = "ssn " + "1" + "23-45-6789"
+    try:
+        _raise_with_user_msg(runtime_pii)
+    except ValueError as e:
+        log_error_strip_pii_sync(test_logger, "X failed", exc=e)
+
+    msg = caplog.records[-1].getMessage()
+    assert "msg=ssn 123-45-6789" in msg
+    assert msg.rstrip().endswith("ValueError")
+
+
+def test_log_error_strip_pii_sync_supports_warning_level():
+    test_logger = logging.getLogger("test_pii_sync_warning")
+    records = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    test_logger.addHandler(_Capture())
+    test_logger.setLevel(logging.WARNING)
+
+    def handler(request):
+        return httpx.Response(200, json={"redactedText": "ok"})
+
+    try:
+        _raise_with_user_msg("oops")
+    except ValueError as e:
+        with _patch_sync_client(handler):
+            log_error_strip_pii_sync(
+                test_logger, "X failed", exc=e, level=logging.WARNING
+            )
+
+    assert records[-1].levelno == logging.WARNING
+
+
+def test_log_error_strip_pii_sync_renders_chained_exceptions(caplog):
+    def handler(request):
+        return httpx.Response(200, json={"redactedText": "outer-msg"})
+
+    test_logger = logging.getLogger("test_pii_sync_chained")
+    caplog.set_level(logging.ERROR, logger=test_logger.name)
+
+    inner_pii = "inner-" + "111-22-3333"
+    outer_pii = "outer-" + "999-88-7777"
+    try:
+        try:
+            raise ValueError(inner_pii)
+        except ValueError as inner:
+            raise RuntimeError(outer_pii) from inner
+    except RuntimeError as e:
+        with _patch_sync_client(handler):
+            log_error_strip_pii_sync(test_logger, "X failed", exc=e)
+
+    msg = caplog.records[-1].getMessage()
+    assert "RuntimeError" in msg
+    assert "ValueError" in msg
+    assert "111-22-3333" not in msg
+    assert "999-88-7777" not in msg
+
+
+def test_log_error_strip_pii_sync_swallows_arbitrary_network_errors():
+    """If the httpx call raises (timeout, connection reset, etc.), we
+    fall back to the placeholder rather than re-entering the caller's
+    exception handler."""
+
+    def handler(request):
+        raise OSError("connection reset by peer")
+
+    test_logger = logging.getLogger("test_pii_sync_oserror")
+    records = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    test_logger.addHandler(_Capture())
+    test_logger.setLevel(logging.ERROR)
+
+    runtime_pii = "ssn " + "1" + "23-45-6789"
+    try:
+        _raise_with_user_msg(runtime_pii)
+    except ValueError as e:
+        with _patch_sync_client(handler):
+            log_error_strip_pii_sync(test_logger, "X failed", exc=e)
+
+    msg = records[-1].getMessage()
+    assert REDACTED_PLACEHOLDER in msg
+    # Runtime PII (built at call time, not on the source line) does
+    # not appear anywhere in the formatted log.
+    assert "123-45-6789" not in msg
