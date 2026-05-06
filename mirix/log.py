@@ -157,3 +157,31 @@ def get_logger(name: Optional[str] = None) -> "logging.Logger":
         logger.propagate = False
 
     return logger
+
+
+def safe_traceback(exc: BaseException) -> str:
+    """Render exc's frame stack with exception-message text stripped.
+
+    The frame stack itself (file:line:function) carries no PII; the leak
+    surface in a normal traceback is the final line ``ExceptionType:
+    <msg>``, which echoes whatever ``__str__`` returns. We render only
+    the frames plus the chain of exception class names.
+
+    Output is shaped to match stdlib ``traceback.format_exception`` as
+    closely as possible — same ``Traceback (most recent call last):``
+    header, same frame format. Splunk alerts and dashboards that key on
+    the literal "Traceback (most recent call last)" string continue to
+    match. The final line is ``ExceptionType`` (no ``: <message>``)
+    instead of ``ExceptionType: <message>``; alerts grepping for the
+    type name still match, alerts grepping for specific exception-
+    message text don't.
+    """
+    import traceback
+
+    frames = "".join(traceback.format_tb(exc.__traceback__))
+    chain = []
+    cur: Optional[BaseException] = exc
+    while cur is not None:
+        chain.append(type(cur).__name__)
+        cur = cur.__cause__ or cur.__context__
+    return f"Traceback (most recent call last):\n{frames}{' -> '.join(chain)}"
