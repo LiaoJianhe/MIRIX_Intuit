@@ -111,9 +111,21 @@ def build_langfuse_mask(
     return mask
 
 
-@lru_cache(maxsize=1)
+_default_mask_singleton: Optional[Callable[..., Any]] = None
+
+
 def _default_mask() -> Callable[..., Any]:
-    """Build the default env-configured masker on first use."""
+    """Build the default env-configured masker on first use, then cache.
+
+    Intentionally caches per-process: the masker holds a long-lived
+    httpx.Client and we don't want runtime env-var changes to silently
+    rebuild it. Tests that need a different endpoint should call
+    ``build_langfuse_mask`` directly rather than relying on the
+    default.
+    """
+    global _default_mask_singleton
+    if _default_mask_singleton is not None:
+        return _default_mask_singleton
     endpoint = os.getenv(
         "MIRIX_ISPY_PII_ENDPOINT",
         "http://ispypiis-e2e.api.intuit.com/v2/analyze",
@@ -122,10 +134,11 @@ def _default_mask() -> Callable[..., Any]:
         timeout_ms = int(os.getenv("MIRIX_ISPY_PII_TIMEOUT_MS", "200"))
     except ValueError:
         timeout_ms = 200
-    return build_langfuse_mask(
+    _default_mask_singleton = build_langfuse_mask(
         endpoint=endpoint,
         timeout_seconds=timeout_ms / 1000.0,
     )
+    return _default_mask_singleton
 
 
 def ispy_pii_mask(data: Any = None, **kwargs: Any) -> Any:
