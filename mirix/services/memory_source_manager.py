@@ -246,8 +246,7 @@ class MemorySourceManager:
                 limit=5000,
                 **list_kwargs,
             )
-            # Filter out soft-deleted, sort ascending by (occurred_at, created_at)
-            records = [r for r in records if not r.get("is_deleted")]
+            # Sort ascending by (occurred_at, created_at)
             records.sort(key=lambda r: (r.get("occurred_at") or "", r.get("created_at") or ""))
             # Apply cursor (skip until we pass cursor row by id)
             if cursor:
@@ -348,7 +347,6 @@ class MemorySourceManager:
                 limit=5000,
                 **list_kwargs,
             )
-            records = [r for r in records if not r.get("is_deleted")]
             # Descending order: nulls last on occurred_at, then created_at desc
             records.sort(
                 key=lambda r: (

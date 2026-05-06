@@ -266,7 +266,6 @@ class SourceMessageManager:
                 limit=5000,
                 memory_source_id=memory_source_id,
             )
-            records = [r for r in records if not r.get("is_deleted")]
             records.sort(key=lambda r: r.get("sequence_num") or 0)
             if cursor:
                 # cursor is a row id; skip until we pass that row's sequence_num

@@ -157,7 +157,8 @@ class MemoryCitationManager:
                 memory_type=memory_type,
                 memory_id=memory_id,
             )
-            return any(not r.get("is_deleted") for r in records)
+            # provider.list already excludes soft-deleted rows server-side
+            return bool(records)
 
         # Try cache first
         if use_cache:
@@ -218,11 +219,7 @@ class MemoryCitationManager:
                 memory_type=memory_type,
                 memory_id=memory_id,
             )
-            occurreds = [
-                r.get("occurred_at")
-                for r in records
-                if not r.get("is_deleted") and r.get("occurred_at")
-            ]
+            occurreds = [r.get("occurred_at") for r in records if r.get("occurred_at")]
             if not occurreds:
                 return None
             max_iso = max(occurreds)
@@ -256,7 +253,6 @@ class MemoryCitationManager:
                 memory_type=memory_type,
                 memory_id=memory_id,
             )
-            records = [r for r in records if not r.get("is_deleted")]
             # Order by occurred_at desc, nulls last
             records.sort(
                 key=lambda r: (r.get("occurred_at") is None, r.get("occurred_at") or ""),
@@ -324,10 +320,9 @@ class MemoryCitationManager:
                     memory_type=memory_type,
                     memory_id=memory_id,
                 )
-                for r in records:
-                    if r.get("is_deleted"):
-                        continue
-                    grouped[(memory_type, memory_id)].append(PydanticMemoryCitation(**r))
+                grouped[(memory_type, memory_id)].extend(
+                    PydanticMemoryCitation(**r) for r in records
+                )
             return dict(grouped)
 
         async with self.session_maker() as session:
