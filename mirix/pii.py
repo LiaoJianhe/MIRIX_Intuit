@@ -41,7 +41,6 @@ from __future__ import annotations
 
 import logging
 import os
-import traceback
 from typing import Any, Final, Optional
 
 import httpx
@@ -96,22 +95,6 @@ def _get_sync_client() -> httpx.Client:
     return _sync_client
 
 
-def _safe_traceback(exc: BaseException) -> str:
-    """Render exc's frame stack with exception-message text stripped.
-
-    Mirrors :func:`mirix.log.safe_traceback`; duplicated here so this
-    module is self-contained and doesn't add an import cycle risk into
-    ``mirix.log``.
-    """
-    frames = "".join(traceback.format_tb(exc.__traceback__))
-    chain = []
-    cur: Optional[BaseException] = exc
-    while cur is not None:
-        chain.append(type(cur).__name__)
-        cur = cur.__cause__ or cur.__context__
-    return f"Traceback (most recent call last):\n{frames}{' -> '.join(chain)}"
-
-
 def _mask_sync(text: str) -> str:
     """Synchronous ispy-pii redaction. Returns the placeholder on any failure.
 
@@ -155,13 +138,30 @@ def log_error_strip_pii_sync(
     Blocks the calling thread for up to ``MIRIX_ISPY_PII_TIMEOUT_MS``
     waiting on ispy-pii. Do not call from a hot path.
     """
-    masked = _mask_sync(str(exc))
-    tb = _safe_traceback(exc)
-    log.log(
-        level,
-        fmt + " error_type=%s msg=%s\n%s",
-        *args,
-        type(exc).__name__,
-        masked,
-        tb,
-    )
+    # Belt-and-suspenders: every operation here is theoretically capable
+    # of raising (custom __str__, malformed exception chain, broken log
+    # handler), and a logging path that re-enters its own caller's
+    # exception handler is a deadlock waiting to happen. Wrap the whole
+    # body and degrade silently on any failure — the alternative is
+    # swallowing the original exception entirely.
+    try:
+        from mirix.log import safe_traceback
+
+        masked = _mask_sync(str(exc))
+        tb = safe_traceback(exc)
+        log.log(
+            level,
+            fmt + " error_type=%s msg=%s\n%s",
+            *args,
+            type(exc).__name__,
+            masked,
+            tb,
+        )
+    except Exception:
+        # Last-ditch fallback. Use the stdlib logger directly with the
+        # safest possible format string. If even THIS raises, there's
+        # nothing more we can do without re-entering.
+        try:
+            log.log(level, fmt + " (mask helper failed)", *args)
+        except Exception:
+            pass

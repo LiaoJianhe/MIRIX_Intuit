@@ -180,8 +180,14 @@ def safe_traceback(exc: BaseException) -> str:
 
     frames = "".join(traceback.format_tb(exc.__traceback__))
     chain = []
+    seen: set = set()
     cur: Optional[BaseException] = exc
-    while cur is not None:
+    # Walk __cause__ / __context__ chain with cycle detection. Pathological
+    # exception chains (manually constructed ``raise … from prior`` loops)
+    # would otherwise spin forever; stdlib's traceback.format_exception
+    # uses the same id-tracking pattern.
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
         chain.append(type(cur).__name__)
         cur = cur.__cause__ or cur.__context__
     return f"Traceback (most recent call last):\n{frames}{' -> '.join(chain)}"

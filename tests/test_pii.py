@@ -202,3 +202,70 @@ def test_log_error_strip_pii_sync_swallows_arbitrary_network_errors():
     # Runtime PII (built at call time, not on the source line) does
     # not appear anywhere in the formatted log.
     assert "123-45-6789" not in msg
+
+
+def test_log_error_strip_pii_sync_survives_pathological_exception_str():
+    """If exc.__str__() itself raises, the helper must not re-enter the
+    caller's exception handler. It falls back to the
+    `(mask helper failed)` shape and logs only the safe template."""
+
+    class _BadException(Exception):
+        def __str__(self):
+            raise RuntimeError("__str__ bombed")
+
+    test_logger = logging.getLogger("test_pii_sync_bad_str")
+    records = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    test_logger.addHandler(_Capture())
+    test_logger.setLevel(logging.ERROR)
+
+    try:
+        raise _BadException()
+    except _BadException as e:
+        # Must NOT raise. If we get here, the helper held its contract.
+        log_error_strip_pii_sync(test_logger, "X failed: id=%s", "abc", exc=e)
+
+    # Last-ditch fallback should have logged the safe template.
+    msg = records[-1].getMessage()
+    assert "X failed: id=abc" in msg
+    assert "mask helper failed" in msg
+
+
+def test_log_error_strip_pii_sync_survives_cyclic_exception_chain():
+    """An exception whose __cause__/__context__ chain contains a cycle
+    must not loop forever inside safe_traceback."""
+
+    test_logger = logging.getLogger("test_pii_sync_cycle")
+    records = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    test_logger.addHandler(_Capture())
+    test_logger.setLevel(logging.ERROR)
+
+    e1 = RuntimeError("first")
+    e2 = RuntimeError("second")
+    e1.__context__ = e2
+    e2.__context__ = e1  # cycle: e1 -> e2 -> e1
+
+    def handler(request):
+        return httpx.Response(200, json={"redactedText": "ok"})
+
+    with _patch_sync_client(handler):
+        log_error_strip_pii_sync(test_logger, "X failed", exc=e1)
+
+    msg = records[-1].getMessage()
+    # Both types appear (chain is walked) but the function returned —
+    # didn't loop forever. The cycle detection in safe_traceback breaks
+    # on the revisit.
+    assert "RuntimeError" in msg
+    # Chain rendered as `RuntimeError -> RuntimeError` (two visits, then
+    # cycle detected on third). Should NOT contain the messages.
+    assert "first" not in msg
+    assert "second" not in msg
