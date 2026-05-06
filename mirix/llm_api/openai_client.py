@@ -356,7 +356,12 @@ class OpenAIClient(LLMClientBase):
             )
 
         if isinstance(e, openai.BadRequestError):
-            logger.warning("[OpenAI] Bad request (400): %s", str(e))
+            # 400 responses from OpenAI can echo the request body in
+            # str(e) — log only the type so user content does not reach
+            # Splunk.
+            logger.warning(
+                "[OpenAI] Bad request (400): error_type=%s", type(e).__name__
+            )
             # BadRequestError can signify different issues (e.g., invalid args, context length)
             # Check message content if finer-grained errors are needed
             # Example: if "context_length_exceeded" in str(e): return LLMContextLengthExceededError(...)
@@ -392,7 +397,10 @@ class OpenAIClient(LLMClientBase):
             )
 
         if isinstance(e, openai.UnprocessableEntityError):
-            logger.warning("[OpenAI] Unprocessable entity (422): %s", str(e))
+            # 422 responses can quote offending content. Log type only.
+            logger.warning(
+                "[OpenAI] Unprocessable entity (422): error_type=%s", type(e).__name__
+            )
             return LLMUnprocessableEntityError(
                 message=f"Invalid request content for OpenAI: {str(e)}",
                 code=ErrorCode.INVALID_ARGUMENT,  # Usually validation errors
@@ -417,7 +425,13 @@ class OpenAIClient(LLMClientBase):
 
         # General API error catch-all for other status codes
         if isinstance(e, openai.APIStatusError):
-            logger.warning("[OpenAI] API status error (%s): %s", e.status_code, str(e))
+            # Catch-all for unrecognized 4xx/5xx — could echo request
+            # body. Log status + type only.
+            logger.warning(
+                "[OpenAI] API status error (%s): error_type=%s",
+                e.status_code,
+                type(e).__name__,
+            )
             if e.status_code >= 500:
                 error_cls = LLMServerError
                 error_code = ErrorCode.INTERNAL_SERVER_ERROR

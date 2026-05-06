@@ -105,8 +105,18 @@ class AnthropicClient(LLMClientBase):
             return batch_response
 
         except Exception as e:
-            # Enhance logging here if additional context is needed
-            logger.error("Error during send_llm_batch_request_async.", exc_info=True)
+            # Avoid exc_info=True: it renders the final
+            # `ExceptionType: <msg>` line, and `<msg>` for an
+            # anthropic.BadRequestError includes the request body which
+            # may carry user content. Log type + frames-only traceback
+            # via mirix.log.safe_traceback.
+            from mirix.log import safe_traceback
+
+            logger.error(
+                "Error during send_llm_batch_request_async: error_type=%s\n%s",
+                type(e).__name__,
+                safe_traceback(e),
+            )
             raise self.handle_llm_error(e)
 
     @trace_method
@@ -354,7 +364,10 @@ class AnthropicClient(LLMClientBase):
             )
 
         if isinstance(e, anthropic.BadRequestError):
-            logger.warning("[Anthropic] Bad request: %s", str(e))
+            # 400 responses from Anthropic can echo the request payload
+            # in str(e) — log only the type so user content does not
+            # leak.
+            logger.warning("[Anthropic] Bad request: error_type=%s", type(e).__name__)
             if "prompt is too long" in str(e).lower():
                 # If the context window is too large, we expect to receive:
                 # 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'prompt is too long: 200758 tokens > 200000 maximum'}}
@@ -389,14 +402,22 @@ class AnthropicClient(LLMClientBase):
             )
 
         if isinstance(e, anthropic.UnprocessableEntityError):
-            logger.warning("[Anthropic] Unprocessable entity: %s", str(e))
+            # 422 responses can quote offending content (content-policy
+            # violations). Log type only.
+            logger.warning(
+                "[Anthropic] Unprocessable entity: error_type=%s", type(e).__name__
+            )
             return LLMUnprocessableEntityError(
                 message=f"Invalid request content for Anthropic: {str(e)}",
                 code=ErrorCode.INTERNAL_SERVER_ERROR,
             )
 
         if isinstance(e, anthropic.APIStatusError):
-            logger.warning("[Anthropic] API status error: %s", str(e))
+            # Catch-all for unrecognized 4xx/5xx — could echo request
+            # body. Log type only.
+            logger.warning(
+                "[Anthropic] API status error: error_type=%s", type(e).__name__
+            )
             return LLMServerError(
                 message=f"Anthropic API error: {str(e)}",
                 code=ErrorCode.INTERNAL_SERVER_ERROR,
