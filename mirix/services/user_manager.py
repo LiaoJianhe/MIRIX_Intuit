@@ -196,9 +196,7 @@ class UserManager:
             ]
             soft_deleted = 0
             for table in memory_tables:
-                records = await provider.list(
-                    table, user_id=user_id, filter_tags=None, limit=5000
-                )
+                records = await provider.list(table, user_id=user_id, filter_tags=None, limit=5000)
                 ids = [r.get("id") for r in records if r.get("id")]
                 if not ids:
                     continue
@@ -348,9 +346,7 @@ class UserManager:
             ]
             total_deleted = 0
             for table in memory_tables:
-                records = await provider.list(
-                    table, user_id=user_id, filter_tags=None, limit=5000
-                )
+                records = await provider.list(table, user_id=user_id, filter_tags=None, limit=5000)
                 ids = [r.get("id") for r in records if r.get("id")]
                 if not ids:
                     continue

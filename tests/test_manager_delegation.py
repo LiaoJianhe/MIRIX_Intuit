@@ -32,15 +32,15 @@ from mirix.orm.errors import NoResultFound
 from mirix.schemas.agent import AgentState, AgentType
 from mirix.schemas.block import Block, BlockUpdate
 from mirix.schemas.client import Client as PydanticClient
-from mirix.schemas.episodic_memory import EpisodicEvent as PydanticEpisodicEvent
+from mirix.schemas.embedding_config import EmbeddingConfig
 from mirix.schemas.enums import ToolType
+from mirix.schemas.episodic_memory import EpisodicEvent as PydanticEpisodicEvent
+from mirix.schemas.llm_config import LLMConfig
 from mirix.schemas.organization import Organization as PydanticOrganization
 from mirix.schemas.semantic_memory import SemanticMemoryItem as PydanticSemanticMemoryItem
 from mirix.schemas.semantic_memory import SemanticMemoryItemUpdate
 from mirix.schemas.tool import Tool as PydanticTool
 from mirix.schemas.user import User as PydanticUser
-from mirix.schemas.embedding_config import EmbeddingConfig
-from mirix.schemas.llm_config import LLMConfig
 from mirix.services.agent_manager import AgentManager
 from mirix.services.block_manager import BlockManager
 from mirix.services.episodic_memory_manager import EpisodicMemoryManager

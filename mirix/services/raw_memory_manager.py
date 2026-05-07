@@ -141,9 +141,7 @@ class RawMemoryManager:
         # When IPS providers are active, skip compute and persist only config metadata.
         if provider:
             raw_memory.context_embedding = None
-            raw_memory.embedding_config = (
-                agent_state.embedding_config if agent_state is not None else None
-            )
+            raw_memory.embedding_config = agent_state.embedding_config if agent_state is not None else None
         elif BUILD_EMBEDDINGS_FOR_MEMORY and agent_state is not None:
             try:
                 from mirix.embeddings import embedding_model

@@ -663,9 +663,7 @@ class AgentManager:
                 "organization_id": actor.organization_id,
                 "tools": tool_ids,
                 "tool_rules": (
-                    [tr.model_dump() if hasattr(tr, "model_dump") else tr for tr in tool_rules]
-                    if tool_rules
-                    else None
+                    [tr.model_dump() if hasattr(tr, "model_dump") else tr for tr in tool_rules] if tool_rules else None
                 ),
                 "parent_id": parent_id,
                 # Pass the client UUID so the IPS Relational provider can store it
@@ -1421,9 +1419,7 @@ class AgentManager:
 
         rel_provider = get_relational_provider()
         if rel_provider:
-            result = await rel_provider.read(
-                "agents", agent_id, include_relationships=["tools"]
-            )
+            result = await rel_provider.read("agents", agent_id, include_relationships=["tools"])
             if result is None:
                 raise NoResultFound(f"Agent {agent_id} not found")
             agent_state = PydanticAgentState(**result)
@@ -1595,9 +1591,7 @@ class AgentManager:
 
                 cache_provider = get_cache_provider()
                 if cache_provider:
-                    await cache_provider.delete(
-                        f"{cache_provider.AGENT_PREFIX}{agent_id}"
-                    )
+                    await cache_provider.delete(f"{cache_provider.AGENT_PREFIX}{agent_id}")
             except Exception:
                 pass
             if parent_id:

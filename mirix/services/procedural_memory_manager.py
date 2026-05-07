@@ -1119,8 +1119,8 @@ class ProceduralMemoryManager:
         Returns:
             Number of records deleted
         """
-        from mirix.database.relational_provider import get_relational_provider
         from mirix.database.redis_client import get_redis_client
+        from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
         if provider:
@@ -1175,8 +1175,8 @@ class ProceduralMemoryManager:
         Returns:
             Number of records soft deleted
         """
-        from mirix.database.relational_provider import get_relational_provider
         from mirix.database.redis_client import get_redis_client
+        from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
         if provider:
@@ -1238,8 +1238,8 @@ class ProceduralMemoryManager:
         Returns:
             Number of records soft deleted
         """
-        from mirix.database.relational_provider import get_relational_provider
         from mirix.database.redis_client import get_redis_client
+        from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
         if provider:
@@ -1302,8 +1302,8 @@ class ProceduralMemoryManager:
         Returns:
             Number of records deleted
         """
-        from mirix.database.relational_provider import get_relational_provider
         from mirix.database.redis_client import get_redis_client
+        from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
         if provider:

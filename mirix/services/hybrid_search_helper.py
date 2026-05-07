@@ -144,9 +144,7 @@ async def hybrid_count(
     for record in recent_records:
         record_id = record.get("id")
         if record_id:
-            in_search = await search_provider.get_by_id(
-                table, record_id, user_id=user_id
-            )
+            in_search = await search_provider.get_by_id(table, record_id, user_id=user_id)
             if not in_search:
                 extra_count += 1
 

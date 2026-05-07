@@ -220,7 +220,9 @@ class ClientManager:
         provider = get_relational_provider()
         if provider:
             records = await provider.list(
-                "client_api_keys", filter_tags=None, limit=100,
+                "client_api_keys",
+                filter_tags=None,
+                limit=100,
                 client_id=client_id,
             )
             return [PydanticClientApiKey(**r) for r in records]
@@ -241,9 +243,7 @@ class ClientManager:
 
         provider = get_relational_provider()
         if provider:
-            result = await provider.update(
-                "client_api_keys", api_key_id, {"status": "revoked"}
-            )
+            result = await provider.update("client_api_keys", api_key_id, {"status": "revoked"})
             return PydanticClientApiKey(**result)
 
         async with self.session_maker() as session:
@@ -417,9 +417,7 @@ class ClientManager:
 
                 cache_provider = get_cache_provider()
                 if cache_provider:
-                    await cache_provider.delete(
-                        f"{cache_provider.CLIENT_PREFIX}{client_id}"
-                    )
+                    await cache_provider.delete(f"{cache_provider.CLIENT_PREFIX}{client_id}")
             except Exception as e:
                 logger.warning(
                     "Failed to invalidate cache for soft-deleted client %s: %s",
@@ -573,25 +571,28 @@ class ClientManager:
 
         provider = get_relational_provider()
         if provider:
-            logger.info(
-                "Bulk deleting memories via IPS Relational for client %s", client_id
-            )
+            logger.info("Bulk deleting memories via IPS Relational for client %s", client_id)
             memory_tables = [
-                "episodic_memory", "semantic_memory", "procedural_memory",
-                "resource_memory", "knowledge_vault", "block", "messages",
+                "episodic_memory",
+                "semantic_memory",
+                "procedural_memory",
+                "resource_memory",
+                "knowledge_vault",
+                "block",
+                "messages",
             ]
             total = 0
             for table in memory_tables:
                 records = await provider.list(
-                    table, filter_tags=None, limit=5000,
+                    table,
+                    filter_tags=None,
+                    limit=5000,
                     _created_by_id=client_id,
                 )
                 if records:
                     ids = [r.get("id", "") for r in records if r.get("id")]
                     if ids:
-                        result = await provider.bulk_delete(
-                            table, ids, soft=False
-                        )
+                        result = await provider.bulk_delete(table, ids, soft=False)
                         deleted = int(result.get("success", 0) or 0)
                         total += deleted
                         logger.debug("Bulk deleted %d %s records", deleted, table)

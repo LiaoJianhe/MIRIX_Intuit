@@ -414,12 +414,7 @@ class BlockManager:
                     **search_kwargs,
                 )
             pydantic_blocks = [PydanticBlock(**r) for r in results]
-            if (
-                not pydantic_blocks
-                and auto_create_from_default
-                and any_scopes
-                and len(any_scopes) == 1
-            ):
+            if not pydantic_blocks and auto_create_from_default and any_scopes and len(any_scopes) == 1:
                 async with self.session_maker() as session:
                     scope = any_scopes[0]
                     assert org_id is not None
@@ -703,8 +698,8 @@ class BlockManager:
         Returns:
             Number of records soft deleted
         """
-        from mirix.database.relational_provider import get_relational_provider
         from mirix.database.redis_client import get_redis_client
+        from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
         if provider:
@@ -766,8 +761,8 @@ class BlockManager:
         """
         from sqlalchemy import delete
 
-        from mirix.database.relational_provider import get_relational_provider
         from mirix.database.redis_client import get_redis_client
+        from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
         if provider:

@@ -380,8 +380,8 @@ class EpisodicMemoryManager:
         Returns:
             Number of records deleted
         """
-        from mirix.database.relational_provider import get_relational_provider
         from mirix.database.redis_client import get_redis_client
+        from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
         if provider:
@@ -433,8 +433,8 @@ class EpisodicMemoryManager:
         Returns:
             Number of records soft deleted
         """
-        from mirix.database.relational_provider import get_relational_provider
         from mirix.database.redis_client import get_redis_client
+        from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
         if provider:
@@ -496,8 +496,8 @@ class EpisodicMemoryManager:
         import datetime as dt
         from datetime import datetime
 
-        from mirix.database.relational_provider import get_relational_provider
         from mirix.database.redis_client import get_redis_client
+        from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
         if provider:
@@ -571,8 +571,8 @@ class EpisodicMemoryManager:
         Returns:
             Number of records deleted
         """
-        from mirix.database.relational_provider import get_relational_provider
         from mirix.database.redis_client import get_redis_client
+        from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
         if provider:
@@ -774,7 +774,9 @@ class EpisodicMemoryManager:
             call_origin = get_call_origin()
             if call_origin == CALL_ORIGIN_CLIENT_API:
                 return await search_provider.count(
-                    "episodic_memory", user_id=user.id, organization_id=user.organization_id,
+                    "episodic_memory",
+                    user_id=user.id,
+                    organization_id=user.organization_id,
                 )
             else:
                 from mirix.services.hybrid_search_helper import hybrid_count

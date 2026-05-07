@@ -35,9 +35,7 @@ class TestHybridSearch:
             )
         )
         relational = AsyncMock()
-        relational.list = AsyncMock(
-            return_value=[{"id": "r1", "updated_at": "2025-06-01T00:00:00+00:00"}]
-        )
+        relational.list = AsyncMock(return_value=[{"id": "r1", "updated_at": "2025-06-01T00:00:00+00:00"}])
 
         merged = await hybrid_search(
             "episodic_memory",
@@ -68,9 +66,7 @@ class TestHybridSearch:
         )
         relational = AsyncMock()
         relational.list = AsyncMock(
-            return_value=[
-                {"id": "1", "updated_at": "2025-01-02T00:00:00+00:00", "src": "relational"}
-            ]
+            return_value=[{"id": "1", "updated_at": "2025-01-02T00:00:00+00:00", "src": "relational"}]
         )
 
         merged = await hybrid_search("raw_memory", search, relational, limit=10)
@@ -88,9 +84,7 @@ class TestHybridSearch:
         )
         relational = AsyncMock()
         relational.list = AsyncMock(
-            return_value=[
-                {"id": "1", "updated_at": "2025-01-02T00:00:00+00:00", "src": "relational"}
-            ]
+            return_value=[{"id": "1", "updated_at": "2025-01-02T00:00:00+00:00", "src": "relational"}]
         )
 
         merged = await hybrid_search("raw_memory", search, relational, limit=10)
@@ -143,9 +137,7 @@ class TestHybridCount:
         search = AsyncMock()
         search.count = AsyncMock(return_value=10)
         search.get_by_id = AsyncMock(
-            side_effect=lambda table, rid, user_id=None: (
-                {"id": rid} if rid == "in_both" else None
-            )
+            side_effect=lambda table, rid, user_id=None: ({"id": rid} if rid == "in_both" else None)
         )
         relational = AsyncMock()
         relational.list = AsyncMock(

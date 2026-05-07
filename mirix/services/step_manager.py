@@ -64,6 +64,7 @@ class StepManager:
             result = await provider.read("steps", step_id)
             if result is None:
                 from mirix.orm.errors import NoResultFound
+
                 raise NoResultFound(f"Step {step_id} not found")
             return PydanticStep(**result)
         async with self.session_maker() as session:
