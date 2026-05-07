@@ -76,7 +76,15 @@ class MemoryCitationManager:
 
         # Relational provider delegation — relies on uq_memory_citations_src_type_id
         # unique constraint for L3 dedup. Conflict → None (matches "already existed").
+        # Transient errors are retried; final failure logs WARNING + skip-span and
+        # returns None so the caller's memory write stands. Permanent errors propagate.
+        from mirix.database.provider_write_retry import (
+            is_conflict,
+            is_transient,
+            retry_transient,
+        )
         from mirix.database.relational_provider import get_relational_provider
+        from mirix.observability.skip_spans import emit_idempotency_skip_span
 
         provider = get_relational_provider()
         if provider:
@@ -87,7 +95,10 @@ class MemoryCitationManager:
                 "updated_at": now.isoformat(),
             }
             try:
-                await provider.create("memory_citations", payload)
+                await retry_transient(
+                    lambda: provider.create("memory_citations", payload),
+                    op=f"memory_citations.create({memory_type}/{memory_id})",
+                )
                 logger.info(
                     "Created citation %s: %s/%s -> source %s",
                     citation_id,
@@ -95,19 +106,47 @@ class MemoryCitationManager:
                     memory_id,
                     memory_source_id,
                 )
-                pydantic_values = {
-                    k: v for k, v in values.items() if k != "is_deleted" and not k.startswith("_")
-                }
+                pydantic_values = {k: v for k, v in values.items() if k != "is_deleted" and not k.startswith("_")}
                 return PydanticMemoryCitation(**pydantic_values)
             except Exception as e:
-                logger.debug(
-                    "memory_citations create raised %s for %s/%s/%s; treating as conflict",
-                    e,
+                if is_conflict(e):
+                    logger.debug(
+                        "memory_citations conflict for %s/%s/%s — treating as no-op",
+                        memory_source_id,
+                        memory_type,
+                        memory_id,
+                    )
+                    return None
+                if is_transient(e):
+                    # Exhausted retries on a transient error — log + skip-span,
+                    # don't raise (memory write must stand).
+                    logger.warning(
+                        "memory_citations write failed after retries for %s/%s/%s: %s",
+                        memory_source_id,
+                        memory_type,
+                        memory_id,
+                        e,
+                    )
+                    emit_idempotency_skip_span(
+                        name="Citation write failed",
+                        reason="citation-write-failed",
+                        metadata={
+                            "memory_source_id": memory_source_id,
+                            "memory_type": memory_type,
+                            "memory_id": memory_id,
+                            "error": str(e),
+                        },
+                    )
+                    return None
+                # Permanent error (auth, malformed request, unknown entity) — fail loudly.
+                logger.error(
+                    "memory_citations write failed permanently for %s/%s/%s: %s",
                     memory_source_id,
                     memory_type,
                     memory_id,
+                    e,
                 )
-                return None
+                raise
 
         async with self.session_maker() as session:
             inserted = await MemoryCitationModel.create_or_ignore_with_redis(
@@ -320,9 +359,7 @@ class MemoryCitationManager:
                     memory_type=memory_type,
                     memory_id=memory_id,
                 )
-                grouped[(memory_type, memory_id)].extend(
-                    PydanticMemoryCitation(**r) for r in records
-                )
+                grouped[(memory_type, memory_id)].extend(PydanticMemoryCitation(**r) for r in records)
             return dict(grouped)
 
         async with self.session_maker() as session:

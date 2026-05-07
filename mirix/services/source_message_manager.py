@@ -182,9 +182,16 @@ class SourceMessageManager:
             rows.append(row)
 
         # Relational provider delegation — no bulk_create endpoint, so loop create() per row.
-        # uq_source_messages_hash and uq_source_messages_ext_id catch duplicates;
-        # we treat any conflict exception as a no-op (matches ON CONFLICT DO NOTHING).
+        # uq_source_messages_hash and uq_source_messages_ext_id catch duplicates.
+        # Per-row classification: conflict (silent no-op), transient (retry then warn),
+        # permanent (re-raise — these are real bugs, not data we want to drop).
+        from mirix.database.provider_write_retry import (
+            is_conflict,
+            is_transient,
+            retry_transient,
+        )
         from mirix.database.relational_provider import get_relational_provider
+        from mirix.observability.skip_spans import emit_idempotency_skip_span
 
         provider = get_relational_provider()
         if provider:
@@ -198,14 +205,42 @@ class SourceMessageManager:
                     "updated_at": row["updated_at"].isoformat(),
                 }
                 try:
-                    await provider.create("source_messages", row_payload)
+                    await retry_transient(
+                        lambda payload=row_payload: provider.create("source_messages", payload),
+                        op=f"source_messages.create({row['content_hash'][:8]}...)",
+                    )
                     inserted += 1
                 except Exception as e:
-                    logger.debug(
-                        "source_messages create raised %s for content_hash=%s; treating as conflict",
-                        e,
+                    if is_conflict(e):
+                        logger.debug(
+                            "source_messages conflict for content_hash=%s — no-op",
+                            row["content_hash"],
+                        )
+                        continue
+                    if is_transient(e):
+                        logger.warning(
+                            "source_messages write failed after retries (source=%s, hash=%s): %s",
+                            memory_source_id,
+                            row["content_hash"],
+                            e,
+                        )
+                        emit_idempotency_skip_span(
+                            name="Source message write failed",
+                            reason="source-message-write-failed",
+                            metadata={
+                                "memory_source_id": memory_source_id,
+                                "content_hash": row["content_hash"],
+                                "error": str(e),
+                            },
+                        )
+                        continue
+                    logger.error(
+                        "source_messages write failed permanently (source=%s, hash=%s): %s",
+                        memory_source_id,
                         row["content_hash"],
+                        e,
                     )
+                    raise
             logger.info(
                 "Bulk inserted %d/%d source messages for source %s (via provider)",
                 inserted,

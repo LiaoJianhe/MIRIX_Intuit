@@ -190,9 +190,7 @@ class TestMemorySourceManagerDelegation:
             return_value=mock_provider,
         ):
             mgr = _memory_source_mgr()
-            page = await mgr.get_sources_by_thread_id(
-                "thr-1", scopes=["scope-a"], user_id="user-1", limit=10
-            )
+            page = await mgr.get_sources_by_thread_id("thr-1", scopes=["scope-a"], user_id="user-1", limit=10)
             assert [item.id for item in page.items] == ["src-aaaaaaa1", "src-aaaaaaa2"]
             assert page.has_more is False
 
@@ -243,9 +241,7 @@ class TestSourceMessageManagerDelegation:
     async def test_bulk_insert_treats_conflicts_as_no_op(self):
         # First create succeeds, second raises a "conflict" — total inserted = 1.
         mock_provider = MagicMock()
-        mock_provider.create = AsyncMock(
-            side_effect=[{}, Exception("unique constraint violation")]
-        )
+        mock_provider.create = AsyncMock(side_effect=[{}, Exception("unique constraint violation")])
 
         with patch(
             "mirix.database.relational_provider.get_relational_provider",
@@ -434,10 +430,208 @@ class TestMemoryCitationManagerDelegation:
             return_value=mock_provider,
         ):
             mgr = _memory_citation_mgr()
-            out = await mgr.get_citations_for_memories(
-                [("episodic", "ep-1"), ("semantic", "sem-1")]
-            )
+            out = await mgr.get_citations_for_memories([("episodic", "ep-1"), ("semantic", "sem-1")])
             assert ("episodic", "ep-1") in out
             assert ("semantic", "sem-1") in out
             assert len(out[("episodic", "ep-1")]) == 1
             assert len(out[("semantic", "sem-1")]) == 1
+
+
+# ---------------------------------------------------------------------------
+# T6 — best-effort citation/source-message write semantics
+# ---------------------------------------------------------------------------
+
+
+class _FakeServerError(Exception):
+    """Stand-in for an IPSR ServerError (5xx). Has status_code attribute."""
+
+    def __init__(self, status_code: int = 503):
+        super().__init__(f"HTTP {status_code}")
+        self.status_code = status_code
+
+
+class _FakeUnauthorizedError(Exception):
+    """Stand-in for an IPSR UnauthorizedError (401/403). Permanent — must propagate."""
+
+    def __init__(self):
+        super().__init__("HTTP 401")
+        self.status_code = 401
+
+
+class TestBestEffortCitationWrite:
+    """T6 (VEPAGE-1026): MemoryCitationManager.create classifies provider errors."""
+
+    @pytest.mark.asyncio
+    async def test_returns_none_silently_on_conflict(self):
+        # A conflict (unique constraint hint in message) → return None, no retry.
+        mock_provider = MagicMock()
+        mock_provider.create = AsyncMock(side_effect=Exception("unique constraint violation"))
+        with (
+            patch(
+                "mirix.database.relational_provider.get_relational_provider",
+                return_value=mock_provider,
+            ),
+            patch("mirix.observability.skip_spans.emit_idempotency_skip_span") as skip_span,
+        ):
+            mgr = _memory_citation_mgr()
+            out = await mgr.create(
+                memory_source_id="src-1",
+                memory_type="episodic",
+                memory_id="ep-1",
+                citation_type="created",
+            )
+            assert out is None
+            assert mock_provider.create.await_count == 1  # no retry on conflict
+            skip_span.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_retries_then_returns_none_with_skip_span_on_transient(self):
+        # 3 ServerErrors → exhaust retries → log + skip-span + return None.
+        mock_provider = MagicMock()
+        mock_provider.create = AsyncMock(side_effect=_FakeServerError(503))
+        with (
+            patch(
+                "mirix.database.relational_provider.get_relational_provider",
+                return_value=mock_provider,
+            ),
+            patch("mirix.observability.skip_spans.emit_idempotency_skip_span") as skip_span,
+            patch("asyncio.sleep", new=AsyncMock()),
+        ):
+            mgr = _memory_citation_mgr()
+            out = await mgr.create(
+                memory_source_id="src-1",
+                memory_type="episodic",
+                memory_id="ep-1",
+                citation_type="created",
+            )
+            assert out is None
+            assert mock_provider.create.await_count == 3  # retried
+            skip_span.assert_called_once()
+            kwargs = skip_span.call_args.kwargs
+            assert kwargs["reason"] == "citation-write-failed"
+
+    @pytest.mark.asyncio
+    async def test_propagates_permanent_error(self):
+        # UnauthorizedError → no retry, exception propagates.
+        mock_provider = MagicMock()
+        mock_provider.create = AsyncMock(side_effect=_FakeUnauthorizedError())
+        with patch(
+            "mirix.database.relational_provider.get_relational_provider",
+            return_value=mock_provider,
+        ):
+            mgr = _memory_citation_mgr()
+            with pytest.raises(_FakeUnauthorizedError):
+                await mgr.create(
+                    memory_source_id="src-1",
+                    memory_type="episodic",
+                    memory_id="ep-1",
+                    citation_type="created",
+                )
+            assert mock_provider.create.await_count == 1  # no retry
+
+
+class TestBestEffortSourceMessageWrite:
+    """T6 (VEPAGE-1026): SourceMessageManager.bulk_insert classifies per-row errors."""
+
+    @pytest.mark.asyncio
+    async def test_per_row_conflict_skipped_transient_retried_permanent_raises(self):
+        # Row 0: success.  Row 1: conflict (silent skip).  Row 2: permanent (raise).
+        mock_provider = MagicMock()
+        mock_provider.create = AsyncMock(
+            side_effect=[
+                {},  # row 0 success
+                Exception("unique constraint violation"),  # row 1 conflict
+                _FakeUnauthorizedError(),  # row 2 permanent
+            ]
+        )
+        with patch(
+            "mirix.database.relational_provider.get_relational_provider",
+            return_value=mock_provider,
+        ):
+            mgr = _source_message_mgr()
+            with pytest.raises(_FakeUnauthorizedError):
+                await mgr.bulk_insert(
+                    messages=[
+                        {"role": "user", "content": "a"},
+                        {"role": "user", "content": "b"},
+                        {"role": "user", "content": "c"},
+                    ],
+                    memory_source_id="src-1",
+                )
+
+    @pytest.mark.asyncio
+    async def test_transient_row_retries_then_emits_skip_span(self):
+        # Row 0: 3x ServerError → exhaust retries → skip-span + continue.  Row 1: success.
+        mock_provider = MagicMock()
+        mock_provider.create = AsyncMock(
+            side_effect=[
+                _FakeServerError(503),
+                _FakeServerError(503),
+                _FakeServerError(503),
+                {},  # row 1 success after row 0 retries exhausted
+            ]
+        )
+        with (
+            patch(
+                "mirix.database.relational_provider.get_relational_provider",
+                return_value=mock_provider,
+            ),
+            patch("mirix.observability.skip_spans.emit_idempotency_skip_span") as skip_span,
+            patch("asyncio.sleep", new=AsyncMock()),
+        ):
+            mgr = _source_message_mgr()
+            inserted = await mgr.bulk_insert(
+                messages=[
+                    {"role": "user", "content": "a"},
+                    {"role": "user", "content": "b"},
+                ],
+                memory_source_id="src-1",
+            )
+            assert inserted == 1  # only row 1 succeeded
+            assert skip_span.call_count == 1
+            assert skip_span.call_args.kwargs["reason"] == "source-message-write-failed"
+
+
+class TestBestEffortMemorySourceWrite:
+    """T6 (VEPAGE-1026): MemorySourceManager.create retries transient + propagates permanent."""
+
+    @pytest.mark.asyncio
+    async def test_retries_then_raises_on_transient(self):
+        mock_provider = MagicMock()
+        mock_provider.create = AsyncMock(side_effect=_FakeServerError(503))
+        with (
+            patch(
+                "mirix.database.relational_provider.get_relational_provider",
+                return_value=mock_provider,
+            ),
+            patch("asyncio.sleep", new=AsyncMock()),
+        ):
+            mgr = _memory_source_mgr()
+            with pytest.raises(_FakeServerError):
+                await mgr.create(
+                    memory_source_id="src-new",
+                    actor=_mock_actor(),
+                    user_id="user-1",
+                    organization_id="org-1",
+                    external_id="ext-1",
+                )
+            assert mock_provider.create.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_propagates_permanent_error_immediately(self):
+        mock_provider = MagicMock()
+        mock_provider.create = AsyncMock(side_effect=_FakeUnauthorizedError())
+        with patch(
+            "mirix.database.relational_provider.get_relational_provider",
+            return_value=mock_provider,
+        ):
+            mgr = _memory_source_mgr()
+            with pytest.raises(_FakeUnauthorizedError):
+                await mgr.create(
+                    memory_source_id="src-new",
+                    actor=_mock_actor(),
+                    user_id="user-1",
+                    organization_id="org-1",
+                    external_id="ext-1",
+                )
+            assert mock_provider.create.await_count == 1

@@ -75,7 +75,14 @@ class MemorySourceManager:
         occurred_at = parse_occurred_at(occurred_at)
 
         # Relational provider delegation (create — relies on uq_memory_sources_ext_id /
-        # uq_memory_sources_batch unique constraints for dedup)
+        # uq_memory_sources_batch unique constraints for dedup).
+        # Conflict → look up the pre-existing row (caller wants the existing record back).
+        # Transient errors are retried; permanent errors propagate.
+        from mirix.database.provider_write_retry import (
+            is_conflict,
+            is_transient,
+            retry_transient,
+        )
         from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
@@ -104,11 +111,26 @@ class MemorySourceManager:
                 "is_deleted": False,
             }
             try:
-                result = await provider.create("memory_sources", data_dict)
+                result = await retry_transient(
+                    lambda: provider.create("memory_sources", data_dict),
+                    op=f"memory_sources.create({memory_source_id})",
+                )
                 return PydanticMemorySource(**result)
             except Exception as e:
-                # Treat as ON CONFLICT DO NOTHING — look up existing row by dedup key.
-                logger.debug("memory_sources create raised %s; looking up existing row", e)
+                if not is_conflict(e):
+                    if is_transient(e):
+                        logger.error(
+                            "memory_sources create failed after retries for %s: %s",
+                            memory_source_id,
+                            e,
+                        )
+                    raise
+                # Conflict — look up the pre-existing row by the dedup key the caller
+                # provided. Without a dedup key we can't recover, so re-raise.
+                logger.debug(
+                    "memory_sources conflict for %s — looking up existing row",
+                    memory_source_id,
+                )
                 lookup_kwargs = {"client_id": actor.id, "user_id": user_id}
                 if external_id is not None:
                     lookup_kwargs["external_id"] = external_id
@@ -116,9 +138,7 @@ class MemorySourceManager:
                     lookup_kwargs["batch_hash"] = batch_hash
                 else:
                     raise
-                records = await provider.list(
-                    "memory_sources", filter_tags=None, limit=1, **lookup_kwargs
-                )
+                records = await provider.list("memory_sources", filter_tags=None, limit=1, **lookup_kwargs)
                 if records:
                     return PydanticMemorySource(**records[0])
                 raise
@@ -432,9 +452,7 @@ class MemorySourceManager:
 
         provider = get_relational_provider()
         if provider:
-            await provider.update(
-                "memory_sources", memory_source_id, {"processing_complete": True}
-            )
+            await provider.update("memory_sources", memory_source_id, {"processing_complete": True})
             logger.info("Marked memory source %s as processing complete", memory_source_id)
             return
 
@@ -461,9 +479,7 @@ class MemorySourceManager:
                 memory_source_id,
                 {"summary": summary, "summary_source": summary_source},
             )
-            logger.info(
-                "Updated summary for memory source %s (source=%s)", memory_source_id, summary_source
-            )
+            logger.info("Updated summary for memory source %s (source=%s)", memory_source_id, summary_source)
             return
 
         async with self.session_maker() as session:
