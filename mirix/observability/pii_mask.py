@@ -43,6 +43,8 @@ from mirix.pii import (
     REDACTED_PLACEHOLDER,
     build_ispy_payload,
     extract_redacted,
+    get_ispy_pii_endpoint,
+    get_ispy_pii_timeout_seconds,
 )
 
 _DEFAULT_TIMEOUT_S: Final[float] = 0.2
@@ -118,17 +120,9 @@ def _default_mask() -> Callable[..., Any]:
     global _default_mask_singleton
     if _default_mask_singleton is not None:
         return _default_mask_singleton
-    endpoint = os.getenv(
-        "MIRIX_ISPY_PII_ENDPOINT",
-        "http://ispypiis-e2e.api.intuit.com/v2/analyze",
-    )
-    try:
-        timeout_ms = int(os.getenv("MIRIX_ISPY_PII_TIMEOUT_MS", "200"))
-    except ValueError:
-        timeout_ms = 200
     _default_mask_singleton = build_langfuse_mask(
-        endpoint=endpoint,
-        timeout_seconds=timeout_ms / 1000.0,
+        endpoint=get_ispy_pii_endpoint(),
+        timeout_seconds=get_ispy_pii_timeout_seconds(),
     )
     return _default_mask_singleton
 

@@ -57,11 +57,22 @@ def _enabled() -> bool:
     return os.getenv("MIRIX_ISPY_PII_ENABLED", "true").lower() == "true"
 
 
-def _endpoint() -> str:
+def get_ispy_pii_endpoint() -> str:
+    """Resolve the ispy-pii v2/analyze endpoint from env.
+
+    Shared between the sync log helper here and the Langfuse mask
+    callback in ``mirix.observability.pii_mask`` so deployment-time
+    URL switches (preprod vs prod) land in one place.
+    """
     return os.getenv("MIRIX_ISPY_PII_ENDPOINT", _DEFAULT_ENDPOINT)
 
 
-def _timeout_seconds() -> float:
+def get_ispy_pii_timeout_seconds() -> float:
+    """Resolve the ispy-pii request timeout (seconds) from env.
+
+    Shared with ``mirix.observability.pii_mask``. Defaults to 200ms;
+    the env var is the millisecond value (``MIRIX_ISPY_PII_TIMEOUT_MS``).
+    """
     try:
         return (
             int(os.getenv("MIRIX_ISPY_PII_TIMEOUT_MS", str(_DEFAULT_TIMEOUT_MS)))
@@ -110,7 +121,7 @@ _sync_client: Optional[httpx.Client] = None
 def _get_sync_client() -> httpx.Client:
     global _sync_client
     if _sync_client is None:
-        _sync_client = httpx.Client(timeout=_timeout_seconds())
+        _sync_client = httpx.Client(timeout=get_ispy_pii_timeout_seconds())
     return _sync_client
 
 
@@ -125,7 +136,9 @@ def _mask_sync(text: str) -> str:
         return text
     try:
         resp = _get_sync_client().post(
-            _endpoint(), json=build_ispy_payload(text), timeout=_timeout_seconds()
+            get_ispy_pii_endpoint(),
+            json=build_ispy_payload(text),
+            timeout=get_ispy_pii_timeout_seconds(),
         )
         if resp.status_code != 200:
             return REDACTED_PLACEHOLDER
