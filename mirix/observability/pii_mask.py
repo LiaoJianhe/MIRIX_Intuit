@@ -34,7 +34,16 @@ from typing import Any, Callable, Final, Optional
 
 import httpx
 
-REDACTED_PLACEHOLDER: Final[str] = "[REDACTED — PII masking unavailable]"
+# Re-export from mirix.pii so the placeholder string and the
+# ispy-pii payload/extract helpers are defined once. Splunk-bound
+# error logs (mirix.pii) and Langfuse-bound trace masking (this
+# module) hit the same ispy-pii endpoint; sharing the wire-level
+# helpers keeps tier/format changes from drifting between paths.
+from mirix.pii import (
+    REDACTED_PLACEHOLDER,
+    build_ispy_payload,
+    extract_redacted,
+)
 
 _DEFAULT_TIMEOUT_S: Final[float] = 0.2
 # Bound the LRU so a long-running process doesn't accumulate unbounded
@@ -44,22 +53,6 @@ _DEFAULT_CACHE_SIZE: Final[int] = 4096
 
 def _enabled() -> bool:
     return os.getenv("MIRIX_LANGFUSE_MASK_ENABLED", "true").lower() == "true"
-
-
-def _payload(text: str) -> dict:
-    return {
-        "text": text,
-        "format": "PLAIN_TEXT",
-        "sensitivityLevel": "SENSITIVE",
-        "confidenceLevel": "LIKELY",
-    }
-
-
-def _extract_redacted(body: object) -> Optional[str]:
-    if not isinstance(body, dict):
-        return None
-    redacted = body.get("redactedText")
-    return redacted if isinstance(redacted, str) else None
 
 
 def build_langfuse_mask(
@@ -87,11 +80,10 @@ def build_langfuse_mask(
         if not text:
             return text
         try:
-            resp = client.post(endpoint, json=_payload(text))
+            resp = client.post(endpoint, json=build_ispy_payload(text))
             if resp.status_code != 200:
                 return REDACTED_PLACEHOLDER
-            redacted = _extract_redacted(resp.json())
-            return redacted if redacted is not None else REDACTED_PLACEHOLDER
+            return extract_redacted(resp.json())
         except Exception:
             return REDACTED_PLACEHOLDER
 

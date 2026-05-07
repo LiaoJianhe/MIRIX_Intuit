@@ -71,16 +71,33 @@ def _timeout_seconds() -> float:
         return _DEFAULT_TIMEOUT_MS / 1000.0
 
 
-def _payload(text: str) -> dict:
+def build_ispy_payload(text: str) -> dict:
+    """Construct the ispy-pii v2/analyze request body.
+
+    Shared between the sync log helper here and the Langfuse mask
+    callback in ``mirix.observability.pii_mask`` so a config change
+    (sensitivity tier, etc.) lands in exactly one place.
+
+    HIGHLY_SENSITIVE catches the strictest tier of detectors (SSN,
+    credit-card, IBAN, financial IDs, PHI) — what we actually need on
+    error logs and trace attributes that may echo financial / PHI
+    user content.
+    """
     return {
         "text": text,
         "format": "PLAIN_TEXT",
-        "sensitivityLevel": "SENSITIVE",
+        "sensitivityLevel": "HIGHLY_SENSITIVE",
         "confidenceLevel": "LIKELY",
     }
 
 
-def _extract_redacted(body: object) -> str:
+def extract_redacted(body: object) -> str:
+    """Pull ``redactedText`` from an ispy-pii response, or fall back.
+
+    Shared with ``mirix.observability.pii_mask``; centralized so the
+    fallback semantics (return the placeholder on any malformed
+    response) are identical across both call paths.
+    """
     if not isinstance(body, dict):
         return REDACTED_PLACEHOLDER
     redacted = body.get("redactedText")
@@ -108,11 +125,11 @@ def _mask_sync(text: str) -> str:
         return text
     try:
         resp = _get_sync_client().post(
-            _endpoint(), json=_payload(text), timeout=_timeout_seconds()
+            _endpoint(), json=build_ispy_payload(text), timeout=_timeout_seconds()
         )
         if resp.status_code != 200:
             return REDACTED_PLACEHOLDER
-        return _extract_redacted(resp.json())
+        return extract_redacted(resp.json())
     except Exception:
         return REDACTED_PLACEHOLDER
 
