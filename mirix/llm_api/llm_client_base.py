@@ -76,7 +76,7 @@ class LLMClientBase:
             t2 = time.time()
             self.logger.debug("LLM request time: %.2f seconds", t2 - t1)
         except Exception as e:
-            raise self.handle_llm_error(e)
+            raise await self.handle_llm_error(e)
 
         return self.convert_response_to_chat_completion(response_data, messages)
 
@@ -173,7 +173,7 @@ class LLMClientBase:
                 except Exception as langfuse_err:
                     # log then swallow if we were unable to update langfuse
                     self.logger.error(f"Failed to update LangFuse trace with error. Continuing: {langfuse_err}")
-                raise self.handle_llm_error(e)
+                raise await self.handle_llm_error(e)
 
             chat_completion_data = self.convert_response_to_chat_completion(response_data, messages)
 
@@ -265,10 +265,15 @@ class LLMClientBase:
         raise NotImplementedError
 
     @abstractmethod
-    def handle_llm_error(self, e: Exception) -> Exception:
+    async def handle_llm_error(self, e: Exception) -> Exception:
         """
         Maps provider-specific errors to common LLMError types.
         Each LLM provider should implement this to translate their specific errors.
+
+        Async because subclasses ``await`` ispy-pii from this path
+        (``mirix.pii.log_error_strip_pii``) on the strong-PII catch
+        branches; doing that synchronously would block the event loop.
+        See ``mirix.pii`` module docstring for the full rationale.
 
         Args:
             e: The original provider-specific exception

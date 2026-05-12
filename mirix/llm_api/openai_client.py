@@ -336,7 +336,7 @@ class OpenAIClient(LLMClientBase):
         )
         return response_stream
 
-    def handle_llm_error(self, e: Exception) -> Exception:
+    async def handle_llm_error(self, e: Exception) -> Exception:
         """
         Maps OpenAI-specific errors to common LLMError types.
         """
@@ -361,9 +361,9 @@ class OpenAIClient(LLMClientBase):
             # str(e). Redact via ispy-pii so the error reason
             # (context-length-exceeded, invalid args, etc.) stays
             # debuggable in Splunk with PII tokens scrubbed.
-            from mirix.pii import log_error_strip_pii_sync
+            from mirix.pii import log_error_strip_pii
 
-            log_error_strip_pii_sync(
+            await log_error_strip_pii(
                 logger,
                 "[OpenAI] Bad request (400):",
                 exc=e,
@@ -406,9 +406,9 @@ class OpenAIClient(LLMClientBase):
         if isinstance(e, openai.UnprocessableEntityError):
             # 422 responses can quote offending content. Redact via
             # ispy-pii so the validation error reason is preserved.
-            from mirix.pii import log_error_strip_pii_sync
+            from mirix.pii import log_error_strip_pii
 
-            log_error_strip_pii_sync(
+            await log_error_strip_pii(
                 logger,
                 "[OpenAI] Unprocessable entity (422):",
                 exc=e,
@@ -440,9 +440,9 @@ class OpenAIClient(LLMClientBase):
         if isinstance(e, openai.APIStatusError):
             # Catch-all for unrecognized 4xx/5xx — could echo request
             # body. Redact via ispy-pii.
-            from mirix.pii import log_error_strip_pii_sync
+            from mirix.pii import log_error_strip_pii
 
-            log_error_strip_pii_sync(
+            await log_error_strip_pii(
                 logger,
                 "[OpenAI] API status error (%s):",
                 e.status_code,
@@ -468,4 +468,4 @@ class OpenAIClient(LLMClientBase):
             )
 
         # Fallback for unexpected errors
-        return super().handle_llm_error(e)
+        return await super().handle_llm_error(e)

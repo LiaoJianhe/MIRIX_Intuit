@@ -1,6 +1,6 @@
 """ispy-pii client + safe error logging helper for MIRIX.
 
-Use :func:`log_error_strip_pii_sync` at any sync catch site where the
+Use :func:`log_error_strip_pii` at any async catch site where the
 exception's ``str(e)`` could echo user input (LLM provider 4xx response
 bodies, MIRIX-internal errors that wrap user content, ``inner_step()``
 failures whose wrapped ``LLMError`` carries the upstream provider
@@ -11,25 +11,30 @@ tokens (emails, SSNs, phone numbers, credit cards, etc.) scrubbed::
     try:
         ...
     except Exception as e:
-        pii.log_error_strip_pii_sync(
+        await pii.log_error_strip_pii(
             logger, "inner_step() failed: num_messages=%d", len(msgs), exc=e
         )
         raise
 
-Why a sync helper (and not the async one ECMS uses)?
+Why async (and not the sync helper this replaces)?
 
-MIRIX catch sites — ``agent.py:inner_step``, the LLM clients'
-``handle_llm_error`` methods — are sync (not coroutines). We can't
-``await`` from there. The mask call happens via ``httpx.Client``
-synchronously; the catch site blocks for ≤200ms (timeout). Acceptable
-for an error path — these fire rarely. Do not call this helper from a
-hot path.
+MIRIX is an async-native codebase (see CLAUDE.md: "All I/O is async —
+never introduce sync blocking calls"). Every catch site we mask from
+runs inside an async event loop — ``inner_step()``, the LLM clients'
+``handle_llm_error`` chain, the batch path. A synchronous
+``httpx.Client.post()`` here would block the loop for up to the
+ispy-pii timeout, mirroring the VEPAGE-983 anti-pattern where a sync
+``httpx`` call inside a logging filter stalled the FastAPI request
+thread. The mask call therefore runs through ``httpx.AsyncClient`` and
+yields cooperatively while waiting.
 
-The Langfuse trace path uses a separate, async-friendly seam (the
+The Langfuse trace path uses a separate seam (the
 ``mirix.observability.pii_mask`` masker registered as the Langfuse
-``mask=`` callback). The two paths are intentionally separate: error
+``mask=`` callback). That callback fires on the SDK's flush thread, not
+on a request handler's event loop, so synchronous ``httpx.Client`` is
+still correct there. The two paths are intentionally separate: error
 logs go to Splunk via stdlib logging; trace attributes go to Langfuse
-via the SDK's flush thread.
+via the SDK.
 
 The kill switch ``MIRIX_ISPY_PII_ENABLED=false`` disables the network
 call (passthrough). Defaults to enabled. If the network call fails we
@@ -60,7 +65,7 @@ def _enabled() -> bool:
 def get_ispy_pii_endpoint() -> str:
     """Resolve the ispy-pii v2/analyze endpoint from env.
 
-    Shared between the sync log helper here and the Langfuse mask
+    Shared between the async log helper here and the Langfuse mask
     callback in ``mirix.observability.pii_mask`` so deployment-time
     URL switches (preprod vs prod) land in one place.
     """
@@ -85,7 +90,7 @@ def get_ispy_pii_timeout_seconds() -> float:
 def build_ispy_payload(text: str) -> dict:
     """Construct the ispy-pii v2/analyze request body.
 
-    Shared between the sync log helper here and the Langfuse mask
+    Shared between the async log helper here and the Langfuse mask
     callback in ``mirix.observability.pii_mask`` so a config change
     (sensitivity tier, etc.) lands in exactly one place.
 
@@ -115,27 +120,27 @@ def extract_redacted(body: object) -> str:
     return redacted if isinstance(redacted, str) else REDACTED_PLACEHOLDER
 
 
-_sync_client: Optional[httpx.Client] = None
+_async_client: Optional[httpx.AsyncClient] = None
 
 
-def _get_sync_client() -> httpx.Client:
-    global _sync_client
-    if _sync_client is None:
-        _sync_client = httpx.Client(timeout=get_ispy_pii_timeout_seconds())
-    return _sync_client
+def _get_async_client() -> httpx.AsyncClient:
+    global _async_client
+    if _async_client is None:
+        _async_client = httpx.AsyncClient(timeout=get_ispy_pii_timeout_seconds())
+    return _async_client
 
 
-def _mask_sync(text: str) -> str:
-    """Synchronous ispy-pii redaction. Returns the placeholder on any failure.
+async def _mask_async(text: str) -> str:
+    """Async ispy-pii redaction. Returns the placeholder on any failure.
 
-    Must never raise — sync catch sites rely on this to log without
+    Must never raise — async catch sites rely on this to log without
     re-entering their own exception handler. The outer
     ``except Exception`` is deliberate.
     """
     if not text or not _enabled():
         return text
     try:
-        resp = _get_sync_client().post(
+        resp = await _get_async_client().post(
             get_ispy_pii_endpoint(),
             json=build_ispy_payload(text),
             timeout=get_ispy_pii_timeout_seconds(),
@@ -147,7 +152,7 @@ def _mask_sync(text: str) -> str:
         return REDACTED_PLACEHOLDER
 
 
-def log_error_strip_pii_sync(
+async def log_error_strip_pii(
     log: logging.Logger,
     fmt: str,
     *args: Any,
@@ -155,18 +160,24 @@ def log_error_strip_pii_sync(
     level: int = logging.ERROR,
     extra: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Log a sync catch-site exception with PII stripped from the message.
+    """Log an async catch-site exception with PII stripped from the message.
 
-    Use at sync catch sites where ``str(exc)`` could echo user input
+    Use at any async catch site where ``str(exc)`` could echo user input
     (LLM provider 4xx, ``inner_step()`` errors wrapping LLM responses,
-    etc.). The helper sends ``str(exc)`` to ispy-pii synchronously and
-    emits the redacted version — the error reason stays in Splunk for
+    etc.). The helper sends ``str(exc)`` to ispy-pii and emits the
+    redacted version — the error reason stays in Splunk for
     debuggability, with PII tokens scrubbed.
 
     The emitted log line is::
 
         <fmt % args> error_type=<type> msg=<masked str(exc)>
         <frames-only traceback ending in ExceptionType>
+
+    The ispy-pii network call happens inside this coroutine, so the
+    request thread cooperates with the event loop via ``await`` — the
+    masking never blocks other concurrent requests on the same worker.
+    This matches the rule in CLAUDE.md (only 5 sanctioned sync
+    touchpoints exist; ispy-pii is not one of them).
 
     ``extra``: optional dict of structured fields to attach to the log
     record (Splunk indexes these as searchable fields directly, without
@@ -179,10 +190,10 @@ def log_error_strip_pii_sync(
     the caller's ``extra``: ``error_type`` (the exception class name)
     and ``error`` (the masked exception message). This gives Splunk
     dashboards a structured field to key on — symmetric with the
-    async helper in ECMS (``common.pii.log_error_strip_pii``).
-    Caller-supplied fields take precedence on name collision.
+    ECMS helper in ``common.pii.log_error_strip_pii``. Caller-supplied
+    fields take precedence on name collision.
 
-    Blocks the calling thread for up to ``MIRIX_ISPY_PII_TIMEOUT_MS``
+    Yields the event loop for up to ``MIRIX_ISPY_PII_TIMEOUT_MS``
     waiting on ispy-pii. Do not call from a hot path.
     """
     # Belt-and-suspenders: every operation here is theoretically capable
@@ -192,10 +203,8 @@ def log_error_strip_pii_sync(
     # body and degrade silently on any failure — the alternative is
     # swallowing the original exception entirely.
     try:
-        masked = _mask_sync(str(exc))
+        masked = await _mask_async(str(exc))
         tb = safe_traceback(exc)
-        # Inject error_type / error (masked) as structured fields so
-        # Splunk dashboards can key on them. Caller-supplied keys win.
         combined_extra: Dict[str, Any] = {
             "error_type": type(exc).__name__,
             "error": masked,

@@ -110,12 +110,12 @@ class AnthropicClient(LLMClientBase):
             # request body which may carry user content. Redact via
             # ispy-pii so the error reason stays debuggable in Splunk
             # with PII tokens scrubbed.
-            from mirix.pii import log_error_strip_pii_sync
+            from mirix.pii import log_error_strip_pii
 
-            log_error_strip_pii_sync(
+            await log_error_strip_pii(
                 logger, "Error during send_llm_batch_request_async:", exc=e
             )
-            raise self.handle_llm_error(e)
+            raise await self.handle_llm_error(e)
 
     @trace_method
     async def _get_anthropic_client(
@@ -345,7 +345,7 @@ class AnthropicClient(LLMClientBase):
 
         return new_message_list
 
-    def handle_llm_error(self, e: Exception) -> Exception:
+    async def handle_llm_error(self, e: Exception) -> Exception:
         if isinstance(e, anthropic.APIConnectionError):
             logger.warning("[Anthropic] API connection error: %s", e.__cause__)
             return LLMConnectionError(
@@ -367,9 +367,9 @@ class AnthropicClient(LLMClientBase):
             # ("prompt is too long: 200758 tokens > 200000 maximum",
             # content-policy details, etc.) stays debuggable in Splunk
             # with PII tokens scrubbed.
-            from mirix.pii import log_error_strip_pii_sync
+            from mirix.pii import log_error_strip_pii
 
-            log_error_strip_pii_sync(
+            await log_error_strip_pii(
                 logger, "[Anthropic] Bad request:", exc=e, level=logging.WARNING
             )
             if "prompt is too long" in str(e).lower():
@@ -408,9 +408,9 @@ class AnthropicClient(LLMClientBase):
         if isinstance(e, anthropic.UnprocessableEntityError):
             # 422 responses can quote offending content. Redact via
             # ispy-pii so the validation error reason is preserved.
-            from mirix.pii import log_error_strip_pii_sync
+            from mirix.pii import log_error_strip_pii
 
-            log_error_strip_pii_sync(
+            await log_error_strip_pii(
                 logger,
                 "[Anthropic] Unprocessable entity:",
                 exc=e,
@@ -424,9 +424,9 @@ class AnthropicClient(LLMClientBase):
         if isinstance(e, anthropic.APIStatusError):
             # Catch-all for unrecognized 4xx/5xx — could echo request
             # body. Redact via ispy-pii.
-            from mirix.pii import log_error_strip_pii_sync
+            from mirix.pii import log_error_strip_pii
 
-            log_error_strip_pii_sync(
+            await log_error_strip_pii(
                 logger,
                 "[Anthropic] API status error:",
                 exc=e,
@@ -441,7 +441,7 @@ class AnthropicClient(LLMClientBase):
                 },
             )
 
-        return super().handle_llm_error(e)
+        return await super().handle_llm_error(e)
 
     # TODO: Input messages doesn't get used here
     # TODO: Clean up this interface

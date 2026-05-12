@@ -2744,10 +2744,10 @@ These keywords have been used to retrieve relevant memories from the database.
             # so the error logger itself doesn't raise (Message is a
             # Pydantic BaseModel, so .get() is unavailable, and len()
             # rejects scalars).
-            from mirix.pii import log_error_strip_pii_sync
+            from mirix.pii import log_error_strip_pii
 
             msgs_list = messages if isinstance(messages, list) else [messages]
-            log_error_strip_pii_sync(
+            await log_error_strip_pii(
                 logger,
                 f"[Mirix.Agent.{self.agent_state.name}] inner_step() failed: "
                 "num_messages=%d message_roles=%s",
@@ -2812,9 +2812,9 @@ These keywords have been used to retrieve relevant memories from the database.
             else:
                 # Redact str(e) via ispy-pii so the unrecognized error
                 # message is preserved (with PII scrubbed) for debugging.
-                from mirix.pii import log_error_strip_pii_sync
+                from mirix.pii import log_error_strip_pii
 
-                log_error_strip_pii_sync(
+                await log_error_strip_pii(
                     logger,
                     f"[Mirix.Agent.{self.agent_state.name}] inner_step() failed with "
                     "an unrecognized exception:",
