@@ -116,7 +116,13 @@ class ProviderManager:
 
         rp = get_relational_provider()
         if rp:
-            results = await rp.list("providers", limit=limit)
+            organization_id = actor.organization_id if actor is not None else None
+            results = await rp.find_using_named_query(
+                "providers",
+                "provider_manager.list_providers",
+                params={"organizationId": organization_id, "limit": limit},
+                page_size=limit or 50,
+            )
             return [PydanticProvider(**r) for r in results]
         async with self.session_maker() as session:
             providers = await ProviderModel.list(
@@ -126,6 +132,33 @@ class ProviderManager:
                 actor=actor,
             )
             return [provider.to_pydantic() for provider in providers]
+
+    @enforce_types
+    async def get_provider_by_id(
+        self, provider_id: str, actor: Optional[PydanticClient] = None
+    ) -> PydanticProvider:
+        """Fetch a provider by ID, scoped by actor.organization_id when available."""
+        from mirix.database.relational_provider import get_relational_provider
+        from mirix.orm.errors import NoResultFound as _NRF
+
+        rp = get_relational_provider()
+        if rp:
+            organization_id = actor.organization_id if actor is not None else None
+            rows = await rp.find_using_named_query(
+                "providers",
+                "provider_manager.get_provider_by_id",
+                params={"id": provider_id, "organizationId": organization_id},
+                page_size=1,
+            )
+            if not rows:
+                raise _NRF(f"Provider {provider_id} not found")
+            return PydanticProvider(**rows[0])
+
+        async with self.session_maker() as session:
+            provider = await ProviderModel.read(
+                db_session=session, identifier=provider_id, actor=actor
+            )
+            return provider.to_pydantic()
 
     @enforce_types
     async def get_anthropic_override_provider_id(self) -> Optional[str]:

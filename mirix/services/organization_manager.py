@@ -50,10 +50,15 @@ class OrganizationManager:
 
         provider = get_relational_provider()
         if provider:
-            result = await provider.read("organizations", org_id)
-            if result is None:
+            rows = await provider.find_using_named_query(
+                "organizations",
+                "organization_manager.get_organization_by_id",
+                params={"id": org_id},
+                page_size=1,
+            )
+            if not rows:
                 raise NoResultFound(f"Organization {org_id} not found")
-            pydantic_org = PydanticOrganization(**result)
+            pydantic_org = PydanticOrganization(**rows[0])
             try:
                 if cache_provider:
                     from mirix.settings import settings
@@ -186,7 +191,12 @@ class OrganizationManager:
 
         provider = get_relational_provider()
         if provider:
-            results = await provider.list("organizations", limit=limit)
+            results = await provider.find_using_named_query(
+                "organizations",
+                "organization_manager.list_organizations",
+                params={"limit": limit},
+                page_size=limit or 50,
+            )
             return [PydanticOrganization(**r) for r in results]
 
         async with self.session_maker() as session:

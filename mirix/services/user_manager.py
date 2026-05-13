@@ -473,10 +473,15 @@ class UserManager:
 
         provider = get_relational_provider()
         if provider:
-            result = await provider.read("users", user_id)
-            if result is None:
+            rows = await provider.find_using_named_query(
+                "users",
+                "user_manager.get_user_by_id",
+                params={"id": user_id},
+                page_size=1,
+            )
+            if not rows:
                 raise NoResultFound(f"User {user_id} not found")
-            pydantic_user = PydanticUser(**result)
+            pydantic_user = PydanticUser(**rows[0])
             try:
                 if cache_provider:
                     from mirix.settings import settings

@@ -295,6 +295,45 @@ class ClientAuthManager:
                 - "no_password": client has no password set
                 - "wrong_password": password mismatch
         """
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider is not None:
+            rows = await provider.find_using_named_query(
+                "clients",
+                "admin_user_manager.get_client_by_email",
+                params={"email": email.lower()},
+                page_size=1,
+            )
+            if not rows:
+                logger.warning("Login attempt for non-existent email: %s", email)
+                return None, None, "not_found"
+            row = rows[0]
+
+            if row.get("status") != "active":
+                logger.warning("Login attempt for inactive client: %s", email)
+                return None, None, "inactive"
+
+            password_hash = row.get("password_hash")
+            if not password_hash:
+                logger.warning("Login attempt for client without password: %s", email)
+                return None, None, "no_password"
+
+            if not self.verify_password(password, password_hash):
+                logger.warning("Failed login attempt for client: %s", email)
+                return None, None, "wrong_password"
+
+            await provider.update(
+                "clients",
+                row["id"],
+                {"last_login": datetime.now(timezone.utc)},
+            )
+
+            pydantic_client = PydanticClient(**row)
+            access_token = self.create_access_token(pydantic_client)
+            logger.info("Successful dashboard login for client: %s", email)
+            return pydantic_client, access_token, "ok"
+
         async with self.session_maker() as session:
             stmt = (
                 select(ClientModel)
@@ -347,6 +386,18 @@ class ClientAuthManager:
     @enforce_types
     async def get_client_by_email(self, email: str) -> Optional[PydanticClient]:
         """Get a client by email."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider is not None:
+            rows = await provider.find_using_named_query(
+                "clients",
+                "admin_user_manager.get_client_by_email",
+                params={"email": email.lower()},
+                page_size=1,
+            )
+            return PydanticClient(**rows[0]) if rows else None
+
         async with self.session_maker() as session:
             stmt = (
                 select(ClientModel)
@@ -365,6 +416,18 @@ class ClientAuthManager:
     @enforce_types
     async def list_dashboard_clients(self, cursor: Optional[str] = None, limit: int = 50) -> List[PydanticClient]:
         """List all clients that have dashboard access (email set)."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider is not None:
+            rows = await provider.find_using_named_query(
+                "clients",
+                "admin_user_manager.list_dashboard_clients",
+                params={"limit": limit, "cursor": cursor},
+                page_size=limit or 50,
+            )
+            return [PydanticClient(**r) for r in rows]
+
         async with self.session_maker() as session:
             stmt = (
                 select(ClientModel)
@@ -395,6 +458,38 @@ class ClientAuthManager:
         Returns:
             Updated client
         """
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider is not None:
+            existing = await provider.read("clients", client_id)
+            if existing is None:
+                from mirix.orm.errors import NoResultFound as _NRF
+
+                raise _NRF(f"Client {client_id} not found")
+            if existing.get("is_deleted"):
+                raise ValueError("Cannot update deleted client")
+
+            dup = await provider.find_using_named_query(
+                "clients",
+                "admin_user_manager.set_client_password",
+                params={"email": email.lower(), "excludeId": client_id},
+                page_size=1,
+            )
+            if dup:
+                raise ValueError(f"Email '{email}' already exists on another client")
+
+            updated = await provider.update(
+                "clients",
+                client_id,
+                {
+                    "email": email.lower(),
+                    "password_hash": self.hash_password(password),
+                },
+            )
+            logger.info("Set dashboard credentials for client: %s", updated.get("name"))
+            return PydanticClient(**updated)
+
         async with self.session_maker() as session:
             client = await ClientModel.read(db_session=session, identifier=client_id)
 
@@ -460,6 +555,22 @@ class ClientAuthManager:
     @enforce_types
     async def count_dashboard_clients(self) -> int:
         """Count total clients with dashboard access."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider is not None:
+            from common.ipsr.named_query_results import CountResult
+
+            rows = await provider.find_using_named_query(
+                "clients",
+                "admin_user_manager.count_dashboard_clients",
+                result_set_entity_class=CountResult,
+                page_size=1,
+            )
+            if not rows:
+                return 0
+            return int(rows[0].get("count") or 0)
+
         from sqlalchemy import func
 
         async with self.session_maker() as session:

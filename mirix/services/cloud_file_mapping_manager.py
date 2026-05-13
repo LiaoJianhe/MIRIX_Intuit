@@ -76,10 +76,11 @@ class CloudFileMappingManager:
 
         provider = get_relational_provider()
         if provider:
-            results = await provider.list(
+            results = await provider.find_using_named_query(
                 "cloud_file_mapping",
-                limit=1,
-                cloud_file_id=cloud_file_id,
+                "cloud_file_mapping_manager.list_by_cloud_id",
+                params={"cloudFileId": cloud_file_id},
+                page_size=1,
             )
             if results:
                 return results[0].get("local_file_id")
@@ -97,10 +98,11 @@ class CloudFileMappingManager:
 
         provider = get_relational_provider()
         if provider:
-            results = await provider.list(
+            results = await provider.find_using_named_query(
                 "cloud_file_mapping",
-                limit=1,
-                local_file_id=local_file_id,
+                "cloud_file_mapping_manager.list_by_local_id",
+                params={"localFileId": local_file_id},
+                page_size=1,
             )
             if results:
                 return results[0].get("cloud_file_id")
@@ -119,11 +121,21 @@ class CloudFileMappingManager:
         provider = get_relational_provider()
         if provider:
             if cloud_file_id is not None:
-                results = await provider.list("cloud_file_mapping", limit=1, cloud_file_id=cloud_file_id)
+                results = await provider.find_using_named_query(
+                    "cloud_file_mapping",
+                    "cloud_file_mapping_manager.list_by_cloud_id",
+                    params={"cloudFileId": cloud_file_id},
+                    page_size=1,
+                )
                 if results:
                     await provider.hard_delete("cloud_file_mapping", results[0]["id"])
             if local_file_id is not None:
-                results = await provider.list("cloud_file_mapping", limit=1, local_file_id=local_file_id)
+                results = await provider.find_using_named_query(
+                    "cloud_file_mapping",
+                    "cloud_file_mapping_manager.list_by_local_id",
+                    params={"localFileId": local_file_id},
+                    page_size=1,
+                )
                 if results:
                     await provider.hard_delete("cloud_file_mapping", results[0]["id"])
             return
@@ -180,6 +192,18 @@ class CloudFileMappingManager:
 
     async def list_files_with_status(self, status):
         """List all files with the given status."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider is not None:
+            rows = await provider.find_using_named_query(
+                "cloud_file_mapping",
+                "cloud_file_mapping_manager.list_files_with_status",
+                params={"status": status},
+                page_size=1000,
+            )
+            return [PydanticCloudFileMapping(**r) for r in rows]
+
         async with self.session_maker() as session:
             stmt = (
                 select(CloudFileMapping)
@@ -192,6 +216,17 @@ class CloudFileMappingManager:
 
     async def list_all_cloud_file_ids(self):
         """List all cloud file IDs."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider is not None:
+            rows = await provider.find_using_named_query(
+                "cloud_file_mapping",
+                "cloud_file_mapping_manager.list_all_cloud_file_ids",
+                page_size=5000,
+            )
+            return [r.get("cloud_file_id") for r in rows if r.get("cloud_file_id")]
+
         async with self.session_maker() as session:
             result = await session.execute(select(CloudFileMapping))
             rows = result.scalars().all()

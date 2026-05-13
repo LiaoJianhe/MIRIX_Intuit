@@ -176,18 +176,27 @@ class ClientManager:
 
         provider = get_relational_provider()
         if provider:
-            keys = await provider.list(
+            keys = await provider.find_using_named_query(
                 "client_api_keys",
-                filter_tags=None,
-                limit=1,
-                api_key_hash=hashed,
-                status="active",
+                "client_manager.get_client_by_api_key",
+                params={"apiKeyHash": hashed},
+                page_size=1,
             )
             if not keys:
                 return None
             client_id = keys[0].get("client_id", "")
-            client_data = await provider.read("clients", client_id)
-            if not client_data or client_data.get("is_deleted") or client_data.get("status") != "active":
+            client_rows = await provider.find_using_named_query(
+                "clients",
+                "client_manager.get_client_by_id",
+                params={"id": client_id},
+                page_size=1,
+            )
+            if not client_rows:
+                return None
+            client_data = client_rows[0]
+            # YAML already enforces is_deleted = false; keep the status filter
+            # in Python (named query does not constrain status on clients).
+            if client_data.get("status") != "active":
                 return None
             return PydanticClient(**client_data)
 
@@ -219,9 +228,11 @@ class ClientManager:
 
         provider = get_relational_provider()
         if provider:
-            records = await provider.list(
-                "client_api_keys", filter_tags=None, limit=100,
-                client_id=client_id,
+            records = await provider.find_using_named_query(
+                "client_api_keys",
+                "client_manager.list_client_api_keys",
+                params={"clientId": client_id},
+                page_size=100,
             )
             return [PydanticClientApiKey(**r) for r in records]
 
@@ -241,10 +252,20 @@ class ClientManager:
 
         provider = get_relational_provider()
         if provider:
-            result = await provider.update(
-                "client_api_keys", api_key_id, {"status": "revoked"}
+            # Read the row first so we can synthesize the response without relying on
+            # IPS Relational read-after-write consistency for the mutation NQ.
+            existing = await provider.read("client_api_keys", api_key_id)
+            if existing is None:
+                from mirix.orm.errors import NoResultFound as _NRF
+
+                raise _NRF(f"Client API key {api_key_id} not found")
+            await provider.mutate_using_named_query(
+                "client_api_keys",
+                "client_manager.revoke_client_api_key",
+                params={"id": api_key_id},
             )
-            return PydanticClientApiKey(**result)
+            existing["status"] = "revoked"
+            return PydanticClientApiKey(**existing)
 
         async with self.session_maker() as session:
             api_key = await ClientApiKeyModel.read(db_session=session, identifier=api_key_id)
@@ -300,7 +321,11 @@ class ClientManager:
 
         provider = get_relational_provider()
         if provider:
-            await provider.delete("clients", client_id, soft=True)
+            await provider.mutate_using_named_query(
+                "clients",
+                "client_manager.update_client_by_id",
+                params={"id": client_id},
+            )
             try:
                 from mirix.database.cache_provider import get_cache_provider
 
@@ -396,20 +421,31 @@ class ClientManager:
                 if ids:
                     await provider.bulk_delete(table, ids, soft=True)
 
-            # Soft delete agents/tools created by this client.
-            for table in ("agents", "tools"):
-                records = await provider.list(
+            # Soft delete agents/tools created by this client (A-9/T-8 collect + A-10 bulk mutate).
+            for table, list_nq, mutate_nq in (
+                ("agents", "client_manager.list_agent_by_client_id", "client_manager.update_agent_by_client_id"),
+                ("tools", "client_manager.list_tools_by_client_id", "client_manager.update_tool_by_client_id"),
+            ):
+                records = await provider.find_using_named_query(
                     table,
-                    filter_tags=None,
-                    limit=5000,
-                    _created_by_id=client_id,
+                    list_nq,
+                    params={"createdById": client_id},
+                    page_size=5000,
                 )
                 ids = [r.get("id") for r in records if r.get("id")]
-                for entity_id in ids:
-                    await provider.delete(table, entity_id, soft=True)
+                if ids:
+                    await provider.mutate_using_named_query(
+                        table,
+                        mutate_nq,
+                        params={"createdById": client_id},
+                    )
 
             # Soft delete the client record.
-            await provider.delete("clients", client_id, soft=True)
+            await provider.mutate_using_named_query(
+                "clients",
+                "client_manager.update_client_by_id",
+                params={"id": client_id},
+            )
 
             # Cache invalidation via cache provider abstraction.
             try:
@@ -750,10 +786,15 @@ class ClientManager:
         if provider:
             from mirix.orm.errors import NoResultFound as _NRF
 
-            result = await provider.read("clients", client_id)
-            if result is None:
+            rows = await provider.find_using_named_query(
+                "clients",
+                "client_manager.get_client_by_id",
+                params={"id": client_id},
+                page_size=1,
+            )
+            if not rows:
                 raise _NRF(f"Client {client_id} not found")
-            pydantic_client = PydanticClient(**result)
+            pydantic_client = PydanticClient(**rows[0])
             try:
                 if cache_provider:
                     from mirix.settings import settings

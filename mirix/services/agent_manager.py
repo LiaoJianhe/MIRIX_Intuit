@@ -1237,25 +1237,49 @@ class AgentManager:
         from mirix.database.relational_provider import get_relational_provider
 
         rel_provider = get_relational_provider()
-        if rel_provider and parent_id is None and not query_text and not kwargs:
-            results = await rel_provider.list(
+        # A-4: query_text path (new IPS branch — replaces SQLAlchemy fallback)
+        if rel_provider and query_text and parent_id is None and not kwargs:
+            results = await rel_provider.find_using_named_query(
                 "agents",
-                organization_id=actor.organization_id,
-                limit=limit,
+                "agent_manager.list_agents_by_query_text",
+                params={
+                    "organizationId": actor.organization_id,
+                    "createdById": actor.id,
+                    "queryText": f"%{query_text}%",
+                    "limit": limit,
+                },
+                page_size=limit or 50,
                 include_relationships=["tools"],
             )
             return [PydanticAgentState(**r) for r in results]
 
-        # When using IPS Relational and parent_id is specified, query the relational
-        # provider directly instead of falling through to the PostgreSQL session path.
-        # PostgreSQL doesn't hold the data when ENGINE_DB_STRATEGY=ips_relational.
-        # We list all agents for the organization and filter by parent_id in Python
-        # to avoid relying on IPS Relational supporting parentId as a filter property.
-        if rel_provider and parent_id is not None and not query_text and not kwargs:
-            all_agents = await rel_provider.list(
+        # A-3: default IPS list path — choose ascending vs descending NQ
+        if rel_provider and parent_id is None and not query_text and not kwargs:
+            query_name = "agent_manager.list_agents_asc"
+            results = await rel_provider.find_using_named_query(
                 "agents",
-                organization_id=actor.organization_id,
-                limit=1000,
+                query_name,
+                params={
+                    "organizationId": actor.organization_id,
+                    "createdById": actor.id,
+                    "limit": limit,
+                    "name": None,
+                    "parentId": None,
+                },
+                page_size=limit or 50,
+                include_relationships=["tools"],
+            )
+            return [PydanticAgentState(**r) for r in results]
+
+        # A-11: parent_id wide list (named query lists up to 1000 by org, parent_id
+        # filtered in Python). PostgreSQL doesn't hold the data when
+        # ENGINE_DB_STRATEGY=ips_relational.
+        if rel_provider and parent_id is not None and not query_text and not kwargs:
+            all_agents = await rel_provider.find_using_named_query(
+                "agents",
+                "agent_manager.list_agents_rel_provider",
+                params={"organizationId": actor.organization_id},
+                page_size=1000,
                 include_relationships=["tools"],
             )
             results = [r for r in all_agents if r.get("parent_id") == parent_id]
@@ -1416,17 +1440,25 @@ class AgentManager:
         except Exception as e:
             logger.warning("Cache read failed for agent %s: %s", agent_id, e)
 
-        # IPS Relational delegation (read with include_relationships for tools)
+        # IPS Relational delegation (named query with include_relationships for tools)
         from mirix.database.relational_provider import get_relational_provider
 
         rel_provider = get_relational_provider()
         if rel_provider:
-            result = await rel_provider.read(
-                "agents", agent_id, include_relationships=["tools"]
+            rows = await rel_provider.find_using_named_query(
+                "agents",
+                "agent_manager.get_agent_by_id",
+                params={
+                    "id": agent_id,
+                    "organizationId": actor.organization_id,
+                    "createdById": actor.id,
+                },
+                page_size=1,
+                include_relationships=["tools"],
             )
-            if result is None:
+            if not rows:
                 raise NoResultFound(f"Agent {agent_id} not found")
-            agent_state = PydanticAgentState(**result)
+            agent_state = PydanticAgentState(**rows[0])
             # Skip the created_by_id security check for the IPS Relational path.
             # ipsr_entity_owner is a server-managed field in IPS Relational — the platform
             # sets it from the auth token (ECMS service identity) and ignores any client-
@@ -1553,11 +1585,15 @@ class AgentManager:
 
         rel_provider = get_relational_provider()
         if rel_provider:
-            results = await rel_provider.list(
+            results = await rel_provider.find_using_named_query(
                 "agents",
-                organization_id=actor.organization_id,
-                limit=1,
-                name=agent_name,
+                "agent_manager.get_agent_by_name",
+                params={
+                    "organizationId": actor.organization_id,
+                    "name": agent_name,
+                    "createdById": actor.id,
+                },
+                page_size=1,
                 include_relationships=["tools"],
             )
             if not results:
@@ -1567,6 +1603,35 @@ class AgentManager:
         async with self.session_maker() as session:
             agent = await AgentModel.read(db_session=session, name=agent_name, actor=actor)
             return agent.to_pydantic()
+
+    @enforce_types
+    async def size_agents(self, actor: PydanticClient) -> int:
+        """Return the count of non-deleted agents for the actor's organization.
+
+        Routes through the ``sqlalchemy_base.size_agents`` named query when the IPS
+        Relational provider is registered; falls back to ``AgentModel.size`` otherwise.
+        ``SqlalchemyBase.size()`` is deliberately not modified to keep the ORM base
+        class decoupled from the IPS provider.
+        """
+        from mirix.database.relational_provider import get_relational_provider
+
+        rel_provider = get_relational_provider()
+        if rel_provider is not None:
+            from common.ipsr.named_query_results import CountResult
+
+            rows = await rel_provider.find_using_named_query(
+                "agents",
+                "sqlalchemy_base.size_agents",
+                params={"organizationId": actor.organization_id},
+                result_set_entity_class=CountResult,
+                page_size=1,
+            )
+            if not rows:
+                return 0
+            return int(rows[0].get("count") or 0)
+
+        async with self.session_maker() as session:
+            return await AgentModel.size(db_session=session, actor=actor)
 
     @enforce_types
     async def delete_agent(self, agent_id: str, actor: PydanticClient) -> None:
