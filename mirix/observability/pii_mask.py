@@ -29,7 +29,8 @@ network call; the mask becomes a passthrough. Defaults to enabled.
 from __future__ import annotations
 
 import os
-from functools import lru_cache
+import threading
+from collections import OrderedDict
 from typing import Any, Callable, Final, Optional
 
 import httpx
@@ -77,17 +78,50 @@ def build_langfuse_mask(
     """
     client = httpx.Client(timeout=timeout_seconds)
 
-    @lru_cache(maxsize=cache_size)
+    # Bounded LRU that only stores successful results. functools.lru_cache
+    # cannot distinguish "ispy-pii returned masked text" from "ispy-pii
+    # failed and we substituted the placeholder", so a single transient
+    # failure (429, 5xx, timeout, malformed body) would poison the cache
+    # for that string until process restart. After ispy-pii recovers,
+    # traces would still show the placeholder for every poisoned string.
+    # Use an OrderedDict + lock so insert/evict is thread-safe (the mask
+    # is invoked on the calling thread, which may be a request handler).
+    _cache: "OrderedDict[str, str]" = OrderedDict()
+    _cache_lock = threading.Lock()
+
+    def _cache_get(key: str) -> Optional[str]:
+        with _cache_lock:
+            value = _cache.get(key)
+            if value is not None:
+                _cache.move_to_end(key)
+            return value
+
+    def _cache_put(key: str, value: str) -> None:
+        with _cache_lock:
+            _cache[key] = value
+            _cache.move_to_end(key)
+            while len(_cache) > cache_size:
+                _cache.popitem(last=False)
+
     def _mask_one(text: str) -> str:
         if not text:
             return text
+        cached = _cache_get(text)
+        if cached is not None:
+            return cached
         try:
             resp = client.post(endpoint, json=build_ispy_payload(text))
             if resp.status_code != 200:
                 return REDACTED_PLACEHOLDER
-            return extract_redacted(resp.json())
+            result = extract_redacted(resp.json())
         except Exception:
             return REDACTED_PLACEHOLDER
+        # extract_redacted falls back to REDACTED_PLACEHOLDER on a
+        # malformed 200 response; treat that as a failure too and do not
+        # cache it, so the next call gets a fresh attempt.
+        if result != REDACTED_PLACEHOLDER:
+            _cache_put(text, result)
+        return result
 
     def mask(data: Any = None, **_: Any) -> Any:
         if not _enabled():
