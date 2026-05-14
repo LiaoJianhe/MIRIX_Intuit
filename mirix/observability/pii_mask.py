@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from collections import OrderedDict
 from typing import Any, Callable, Final, Optional
 
@@ -42,11 +43,18 @@ import httpx
 # helpers keeps tier/format changes from drifting between paths.
 from mirix.pii import (
     REDACTED_PLACEHOLDER,
+    backoff_seconds,
     build_ispy_payload,
     extract_redacted,
     get_ispy_pii_endpoint,
+    get_ispy_pii_max_retries,
+    get_ispy_pii_retry_backoff_ms,
     get_ispy_pii_timeout_seconds,
 )
+
+# Same retryable-status set as mirix.pii. Kept private to this module
+# to avoid coupling consumers of mirix.pii to the retry-status detail.
+_RETRYABLE_STATUS: Final[frozenset] = frozenset({429, 500, 502, 503, 504})
 
 _DEFAULT_TIMEOUT_S: Final[float] = 0.2
 # Bound the LRU so a long-running process doesn't accumulate unbounded
@@ -72,11 +80,25 @@ def build_langfuse_mask(
 
     The returned callable is closed over a long-lived
     :class:`httpx.Client` so connection pooling holds across the
-    process. The client is intentionally synchronous: the mask fires on
-    Langfuse's flush thread and never on a request handler's event
-    loop.
+    process. The client is synchronous because Langfuse's mask
+    contract is synchronous — verified against langfuse 3.x SDK,
+    ``_mask_attribute`` calls ``self._langfuse_client._mask(data=data)``
+    directly with no thread offload, and is invoked from public methods
+    like ``span()`` / ``update()`` / ``update_trace()`` on whichever
+    thread the caller is on. In MIRIX's deployment that's typically
+    the FastAPI request handler's event-loop thread, so this code path
+    does block the event loop for the duration of the ispy-pii call
+    (bounded by timeout × retries). A proper fix would move redaction
+    to an OTEL ``SpanProcessor.on_end`` hook that runs off the event
+    loop — tracked as a separate design ticket.
     """
-    client = httpx.Client(timeout=timeout_seconds)
+    # follow_redirects=True: defensive against the gateway ELB's
+    # http:// -> https:// 301. The default endpoint is already https://
+    # but if someone regresses the env-var override we don't want every
+    # call to silently fail-close on the 301.
+    client = httpx.Client(timeout=timeout_seconds, follow_redirects=True)
+    max_retries = get_ispy_pii_max_retries()
+    backoff_base = get_ispy_pii_retry_backoff_ms()
 
     # Bounded LRU that only stores successful results. functools.lru_cache
     # cannot distinguish "ispy-pii returned masked text" from "ispy-pii
@@ -109,11 +131,22 @@ def build_langfuse_mask(
         cached = _cache_get(text)
         if cached is not None:
             return cached
+        # Retries on 429/5xx per ispy-pii service-api docs. Sync
+        # time.sleep blocks the caller's thread (see docstring) —
+        # bounded by (max_retries + 1) * timeout + sum(backoffs).
+        payload = build_ispy_payload(text)
         try:
-            resp = client.post(endpoint, json=build_ispy_payload(text))
-            if resp.status_code != 200:
+            for attempt in range(max_retries + 1):
+                resp = client.post(endpoint, json=payload)
+                if resp.status_code == 200:
+                    result = extract_redacted(resp.json())
+                    break
+                if resp.status_code not in _RETRYABLE_STATUS:
+                    return REDACTED_PLACEHOLDER
+                if attempt < max_retries:
+                    time.sleep(backoff_seconds(attempt + 1, backoff_base))
+            else:
                 return REDACTED_PLACEHOLDER
-            result = extract_redacted(resp.json())
         except Exception:
             return REDACTED_PLACEHOLDER
         # extract_redacted falls back to REDACTED_PLACEHOLDER on a

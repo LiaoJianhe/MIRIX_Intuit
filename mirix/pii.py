@@ -44,8 +44,10 @@ logging paths must not re-enter their own exception handlers.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import random
 from typing import Any, Dict, Final, Optional
 
 import httpx
@@ -54,8 +56,21 @@ from mirix.log import safe_traceback
 
 REDACTED_PLACEHOLDER: Final[str] = "[REDACTED — PII masking unavailable]"
 
-_DEFAULT_ENDPOINT: Final[str] = "http://ispypiis-e2e.api.intuit.com/v2/analyze"
+# https:// only. The gateway ELB returns 301 on http:// and httpx does
+# not follow redirects by default, so a http:// URL silently fail-closes
+# every call to the placeholder. ECMS overrides via MIRIX_ISPY_PII_ENDPOINT;
+# the default is what's used in MIRIX-standalone / dev.
+_DEFAULT_ENDPOINT: Final[str] = "https://ispypiis-e2e.api.intuit.com/v2/analyze"
 _DEFAULT_TIMEOUT_MS: Final[int] = 200
+# Retry config — defaults match ECMS common/pii.py. ECMS overrides via
+# MIRIX_ISPY_PII_MAX_RETRIES / MIRIX_ISPY_PII_RETRY_BACKOFF_MS.
+_DEFAULT_MAX_RETRIES: Final[int] = 2
+_DEFAULT_RETRY_BACKOFF_MS: Final[int] = 50
+
+# HTTP status codes the ispy-pii service-api docs explicitly call out
+# as retryable with exponential backoff. 4xx other than 429 (bad payload,
+# auth) won't get better with a retry.
+_RETRYABLE_STATUS: Final[frozenset] = frozenset({429, 500, 502, 503, 504})
 
 
 def _enabled() -> bool:
@@ -85,6 +100,55 @@ def get_ispy_pii_timeout_seconds() -> float:
         )
     except ValueError:
         return _DEFAULT_TIMEOUT_MS / 1000.0
+
+
+def get_ispy_pii_max_retries() -> int:
+    """Resolve the max-retries setting from env. 0 disables retries.
+
+    Shared with ``mirix.observability.pii_mask``. Defaults to 2 (so
+    up to 3 attempts total: initial + 2 retries).
+    """
+    try:
+        return max(
+            0,
+            int(
+                os.getenv("MIRIX_ISPY_PII_MAX_RETRIES", str(_DEFAULT_MAX_RETRIES))
+            ),
+        )
+    except ValueError:
+        return _DEFAULT_MAX_RETRIES
+
+
+def get_ispy_pii_retry_backoff_ms() -> int:
+    """Resolve the base exponential backoff (ms) between retries.
+
+    Shared with ``mirix.observability.pii_mask``. Defaults to 50ms;
+    actual delays are ``base * 2^(attempt-1) * jitter(0.8-1.2)``.
+    """
+    try:
+        return max(
+            0,
+            int(
+                os.getenv(
+                    "MIRIX_ISPY_PII_RETRY_BACKOFF_MS",
+                    str(_DEFAULT_RETRY_BACKOFF_MS),
+                )
+            ),
+        )
+    except ValueError:
+        return _DEFAULT_RETRY_BACKOFF_MS
+
+
+def backoff_seconds(attempt: int, base_ms: int) -> float:
+    """Exponential backoff with ±20% jitter. ``attempt`` is 1-indexed
+    for the delay *after* attempt N. Jitter prevents thundering-herd
+    when ispy-pii recovers from a brief outage.
+
+    Shared with ``mirix.observability.pii_mask`` so the async and sync
+    callers compute the same wait curve.
+    """
+    delay_ms = base_ms * (2 ** (attempt - 1)) * random.uniform(0.8, 1.2)
+    return delay_ms / 1000.0
 
 
 def build_ispy_payload(text: str) -> dict:
@@ -129,7 +193,13 @@ _async_client: Optional[httpx.AsyncClient] = None
 def _get_async_client() -> httpx.AsyncClient:
     global _async_client
     if _async_client is None:
-        _async_client = httpx.AsyncClient(timeout=get_ispy_pii_timeout_seconds())
+        # follow_redirects=True: defensive against the gateway ELB's
+        # http:// -> https:// 301. The default endpoint is already
+        # https:// but if someone regresses the env-var override we
+        # don't want every call to silently fail-close on the 301.
+        _async_client = httpx.AsyncClient(
+            timeout=get_ispy_pii_timeout_seconds(), follow_redirects=True
+        )
     return _async_client
 
 
@@ -139,18 +209,31 @@ async def _mask_async(text: str) -> str:
     Must never raise — async catch sites rely on this to log without
     re-entering their own exception handler. The outer
     ``except Exception`` is deliberate.
+
+    Retries on 429/5xx with exponential backoff (per ispy-pii service-
+    api docs). Does NOT retry on 4xx auth errors, payload errors, or
+    network/timeout errors — those won't get better and retrying
+    timeouts only amplifies latency.
     """
     if not text or not _enabled():
         return text
     try:
-        resp = await _get_async_client().post(
-            get_ispy_pii_endpoint(),
-            json=build_ispy_payload(text),
-            timeout=get_ispy_pii_timeout_seconds(),
-        )
-        if resp.status_code != 200:
-            return REDACTED_PLACEHOLDER
-        return extract_redacted(resp.json())
+        url = get_ispy_pii_endpoint()
+        payload = build_ispy_payload(text)
+        timeout = get_ispy_pii_timeout_seconds()
+        max_retries = get_ispy_pii_max_retries()
+        backoff_base = get_ispy_pii_retry_backoff_ms()
+        client = _get_async_client()
+
+        for attempt in range(max_retries + 1):
+            resp = await client.post(url, json=payload, timeout=timeout)
+            if resp.status_code == 200:
+                return extract_redacted(resp.json())
+            if resp.status_code not in _RETRYABLE_STATUS:
+                return REDACTED_PLACEHOLDER
+            if attempt < max_retries:
+                await asyncio.sleep(backoff_seconds(attempt + 1, backoff_base))
+        return REDACTED_PLACEHOLDER
     except Exception:
         return REDACTED_PLACEHOLDER
 
