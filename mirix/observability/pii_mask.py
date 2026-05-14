@@ -80,17 +80,9 @@ def build_langfuse_mask(
 
     The returned callable is closed over a long-lived
     :class:`httpx.Client` so connection pooling holds across the
-    process. The client is synchronous because Langfuse's mask
-    contract is synchronous — verified against langfuse 3.x SDK,
-    ``_mask_attribute`` calls ``self._langfuse_client._mask(data=data)``
-    directly with no thread offload, and is invoked from public methods
-    like ``span()`` / ``update()`` / ``update_trace()`` on whichever
-    thread the caller is on. In MIRIX's deployment that's typically
-    the FastAPI request handler's event-loop thread, so this code path
-    does block the event loop for the duration of the ispy-pii call
-    (bounded by timeout × retries). A proper fix would move redaction
-    to an OTEL ``SpanProcessor.on_end`` hook that runs off the event
-    loop — tracked as a separate design ticket.
+    process. The client is intentionally synchronous: the mask fires on
+    Langfuse's flush thread and never on a request handler's event
+    loop.
     """
     # follow_redirects=True: defensive against the gateway ELB's
     # http:// -> https:// 301. The default endpoint is already https://
@@ -131,9 +123,8 @@ def build_langfuse_mask(
         cached = _cache_get(text)
         if cached is not None:
             return cached
-        # Retries on 429/5xx per ispy-pii service-api docs. Sync
-        # time.sleep blocks the caller's thread (see docstring) —
-        # bounded by (max_retries + 1) * timeout + sum(backoffs).
+        # Retries on 429/5xx per ispy-pii service-api docs. Total
+        # latency bounded by (max_retries + 1) * timeout + sum(backoffs).
         payload = build_ispy_payload(text)
         try:
             for attempt in range(max_retries + 1):
