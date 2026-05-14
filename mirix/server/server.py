@@ -635,7 +635,12 @@ class SyncServer(Server):
         user_id: Optional[str] = None,
     ) -> MirixUsageStatistics:
         """Send the input message through the agent"""
-        logger.debug(f"Got input messages: {input_messages}")
+        # Do not log message content — user text reaches Splunk at DEBUG. See VEPAGE-983.
+        logger.debug(
+            "Got input messages: type=%s count=%d",
+            type(input_messages).__name__,
+            len(input_messages) if isinstance(input_messages, list) else 1,
+        )
         mirix_agent = None
         try:
             mirix_agent = self.load_agent(
@@ -941,7 +946,8 @@ class SyncServer(Server):
         """
         Construct a system message from a message.
         """
-        logger.debug(f"Got message: {message}")
+        # Do not log message content — user text reaches Splunk at DEBUG. See VEPAGE-983.
+        logger.debug("Got message: length=%d", len(message) if message else 0)
         mirix_agent = None
         mirix_agent = self.load_agent(agent_id=agent_id, actor=actor)
         if mirix_agent is None:
@@ -954,7 +960,8 @@ class SyncServer(Server):
         """
         Construct a system message from a message.
         """
-        logger.debug(f"Got message: {message}")
+        # Do not log message content — user text reaches Splunk at DEBUG. See VEPAGE-983.
+        logger.debug("Got message: length=%d", len(message) if message else 0)
         mirix_agent = None
         mirix_agent = self.load_agent(agent_id=agent_id, actor=actor)
         if mirix_agent is None:
