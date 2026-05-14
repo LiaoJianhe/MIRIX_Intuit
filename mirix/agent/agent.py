@@ -985,8 +985,14 @@ class Agent(BaseAgent):
             if response_message.content:
                 # The content if then internal monologue, not chat
                 self.interface.internal_monologue(response_message.content, msg_obj=messages[-1])
-                # Log inner thoughts for debugging and analysis
-                printv(f"[Mirix.Agent.{self.agent_state.name}] INFO: Inner thoughts: {response_message.content}")
+                # Do not log raw LLM completion content to Splunk — content
+                # itself rides through the masked Langfuse trace. Length is
+                # enough to confirm "model produced something" at the log
+                # level.
+                printv(
+                    f"[Mirix.Agent.{self.agent_state.name}] INFO: Inner thoughts emitted: "
+                    f"len={len(response_message.content or '')}"
+                )
                 # Flag to avoid printing a duplicate if inner thoughts get popped from the function call
                 nonnull_content = True
 
@@ -1082,7 +1088,8 @@ class Agent(BaseAgent):
                 if response_message.content and not nonnull_content:
                     self.interface.internal_monologue(response_message.content, msg_obj=messages[-1])
                     printv(
-                        f"[Mirix.Agent.{self.agent_state.name}] INFO: Inner thoughts (from function call): {response_message.content}"
+                        f"[Mirix.Agent.{self.agent_state.name}] INFO: Inner thoughts (from function call) emitted: "
+                        f"len={len(response_message.content or '')}"
                     )
 
                 continue_chaining = True
@@ -1254,9 +1261,10 @@ class Agent(BaseAgent):
                 )
             )  # extend conversation with assistant's reply
             self.interface.internal_monologue(response_message.content, msg_obj=messages[-1])
-            # Log inner thoughts for debugging and analysis
+            # Content rides through the masked Langfuse trace; log shape only.
             printv(
-                f"[Mirix.Agent.{self.agent_state.name}] INFO: Inner thoughts (no function call): {response_message.content}"
+                f"[Mirix.Agent.{self.agent_state.name}] INFO: Inner thoughts (no function call) emitted: "
+                f"len={len(response_message.content or '')}"
             )
             continue_chaining = True
             function_failed = False
@@ -1453,7 +1461,13 @@ class Agent(BaseAgent):
                     printv(f"[Mirix.Agent.{self.agent_state.name}] WARNING: No topics extracted from input")
 
             except Exception as e:
-                printv(f"[Mirix.Agent.{self.agent_state.name}] INFO: Error in extracting the topic from the input: {e}")
+                # Don't interpolate `e` — its __str__ may carry user
+                # content from the LLM/parsing error. Type alone is
+                # enough at info level.
+                printv(
+                    f"[Mirix.Agent.{self.agent_state.name}] INFO: Error in extracting the topic "
+                    f"from the input: error_type={type(e).__name__}"
+                )
                 pass
 
         # Main loop:ing
@@ -2429,16 +2443,25 @@ These keywords have been used to retrieve relevant memories from the database.
                     try:
                         function_args = json.loads(choice.message.tool_calls[0].function.arguments)
                         topics = function_args.get("topic")
-                        printv(f"[Mirix.Agent.{self.agent_state.name}] INFO: Extracted topics: {topics}")
+                        # Topics derive from user messages; log shape only.
+                        printv(
+                            f"[Mirix.Agent.{self.agent_state.name}] INFO: Extracted topics: "
+                            f"count={len(topics) if isinstance(topics, list) else 0}"
+                        )
                         return topics
                     except (json.JSONDecodeError, KeyError) as parse_error:
                         printv(
-                            f"[Mirix.Agent.{self.agent_state.name}] WARNING: Failed to parse topic extraction response: {parse_error}"
+                            f"[Mirix.Agent.{self.agent_state.name}] WARNING: Failed to parse topic "
+                            f"extraction response: error_type={type(parse_error).__name__}"
                         )
                         continue
 
         except Exception as e:
-            printv(f"[Mirix.Agent.{self.agent_state.name}] INFO: Error in extracting the topic from the messages: {e}")
+            # Don't interpolate `e` — LLM error path may carry user content.
+            printv(
+                f"[Mirix.Agent.{self.agent_state.name}] INFO: Error in extracting the topic "
+                f"from the messages: error_type={type(e).__name__}"
+            )
 
         return None
 
@@ -2566,7 +2589,11 @@ These keywords have been used to retrieve relevant memories from the database.
                 f"[Mirix.Agent.{self.agent_state.name}] INFO: Starting agent step - step_count: {step_count}, chaining: {chaining}"
             )
             if topics:
-                printv(f"[Mirix.Agent.{self.agent_state.name}] INFO: Step topics: {topics}")
+                # Topics derive from user messages; log shape only.
+                printv(
+                    f"[Mirix.Agent.{self.agent_state.name}] INFO: Step topics: "
+                    f"count={len(topics) if isinstance(topics, list) else 0}"
+                )
 
             # Step 0: build the system message on-the-fly from agent_state.system + memories
             raw_system = self.agent_state.system or ""
@@ -2707,8 +2734,26 @@ These keywords have been used to retrieve relevant memories from the database.
             )
 
         except Exception as e:
-            printv(
-                f"[Mirix.Agent.{self.agent_state.name}] ERROR: inner_step() failed\nmessages = {messages}\nerror = {e}"
+            # str(e) for an LLMError wraps the upstream provider's 4xx
+            # response which can include the user's prompt. Redact via
+            # ispy-pii so the error REASON ("prompt is too long: …",
+            # "content_policy_violation: …") stays debuggable in Splunk
+            # with PII tokens scrubbed.
+            #
+            # `messages` is typed Union[Message, List[Message]]; normalize
+            # so the error logger itself doesn't raise (Message is a
+            # Pydantic BaseModel, so .get() is unavailable, and len()
+            # rejects scalars).
+            from mirix.pii import log_error_strip_pii
+
+            msgs_list = messages if isinstance(messages, list) else [messages]
+            await log_error_strip_pii(
+                logger,
+                f"[Mirix.Agent.{self.agent_state.name}] inner_step() failed: "
+                "num_messages=%d message_roles=%s",
+                len(msgs_list),
+                [getattr(m, "role", None) for m in msgs_list],
+                exc=e,
             )
             if is_context_overflow_error(e):
                 num_accumulated = len(accumulated) + len(messages)
@@ -2765,8 +2810,15 @@ These keywords have been used to retrieve relevant memories from the database.
                     details={"num_in_context_messages": num_accumulated},
                 )
             else:
-                printv(
-                    f"[Mirix.Agent.{self.agent_state.name}] ERROR: inner_step() failed with an unrecognized exception: '{str(e)}'"
+                # Redact str(e) via ispy-pii so the unrecognized error
+                # message is preserved (with PII scrubbed) for debugging.
+                from mirix.pii import log_error_strip_pii
+
+                await log_error_strip_pii(
+                    logger,
+                    f"[Mirix.Agent.{self.agent_state.name}] inner_step() failed with "
+                    "an unrecognized exception:",
+                    exc=e,
                 )
                 raise e
 

@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 from typing import Dict, List, Optional, Union
 
@@ -105,9 +106,16 @@ class AnthropicClient(LLMClientBase):
             return batch_response
 
         except Exception as e:
-            # Enhance logging here if additional context is needed
-            logger.error("Error during send_llm_batch_request_async.", exc_info=True)
-            raise self.handle_llm_error(e)
+            # str(e) for an anthropic.BadRequestError includes the
+            # request body which may carry user content. Redact via
+            # ispy-pii so the error reason stays debuggable in Splunk
+            # with PII tokens scrubbed.
+            from mirix.pii import log_error_strip_pii
+
+            await log_error_strip_pii(
+                logger, "Error during send_llm_batch_request_async:", exc=e
+            )
+            raise await self.handle_llm_error(e)
 
     @trace_method
     async def _get_anthropic_client(
@@ -337,7 +345,7 @@ class AnthropicClient(LLMClientBase):
 
         return new_message_list
 
-    def handle_llm_error(self, e: Exception) -> Exception:
+    async def handle_llm_error(self, e: Exception) -> Exception:
         if isinstance(e, anthropic.APIConnectionError):
             logger.warning("[Anthropic] API connection error: %s", e.__cause__)
             return LLMConnectionError(
@@ -354,7 +362,16 @@ class AnthropicClient(LLMClientBase):
             )
 
         if isinstance(e, anthropic.BadRequestError):
-            logger.warning("[Anthropic] Bad request: %s", str(e))
+            # 400 responses from Anthropic can echo the request payload
+            # in str(e). Redact via ispy-pii so the error reason
+            # ("prompt is too long: 200758 tokens > 200000 maximum",
+            # content-policy details, etc.) stays debuggable in Splunk
+            # with PII tokens scrubbed.
+            from mirix.pii import log_error_strip_pii
+
+            await log_error_strip_pii(
+                logger, "[Anthropic] Bad request:", exc=e, level=logging.WARNING
+            )
             if "prompt is too long" in str(e).lower():
                 # If the context window is too large, we expect to receive:
                 # 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'prompt is too long: 200758 tokens > 200000 maximum'}}
@@ -389,14 +406,32 @@ class AnthropicClient(LLMClientBase):
             )
 
         if isinstance(e, anthropic.UnprocessableEntityError):
-            logger.warning("[Anthropic] Unprocessable entity: %s", str(e))
+            # 422 responses can quote offending content. Redact via
+            # ispy-pii so the validation error reason is preserved.
+            from mirix.pii import log_error_strip_pii
+
+            await log_error_strip_pii(
+                logger,
+                "[Anthropic] Unprocessable entity:",
+                exc=e,
+                level=logging.WARNING,
+            )
             return LLMUnprocessableEntityError(
                 message=f"Invalid request content for Anthropic: {str(e)}",
                 code=ErrorCode.INTERNAL_SERVER_ERROR,
             )
 
         if isinstance(e, anthropic.APIStatusError):
-            logger.warning("[Anthropic] API status error: %s", str(e))
+            # Catch-all for unrecognized 4xx/5xx — could echo request
+            # body. Redact via ispy-pii.
+            from mirix.pii import log_error_strip_pii
+
+            await log_error_strip_pii(
+                logger,
+                "[Anthropic] API status error:",
+                exc=e,
+                level=logging.WARNING,
+            )
             return LLMServerError(
                 message=f"Anthropic API error: {str(e)}",
                 code=ErrorCode.INTERNAL_SERVER_ERROR,
@@ -406,7 +441,7 @@ class AnthropicClient(LLMClientBase):
                 },
             )
 
-        return super().handle_llm_error(e)
+        return await super().handle_llm_error(e)
 
     # TODO: Input messages doesn't get used here
     # TODO: Clean up this interface
