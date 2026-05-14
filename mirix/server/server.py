@@ -709,7 +709,7 @@ class AsyncServer(Server):
         direct_writes: Optional[List[dict]] = None,
     ) -> MirixUsageStatistics:
         """Send the input message through the agent"""
-        # Do not log message content — user text reaches Splunk at DEBUG. See VEPAGE-983.
+        # Do not log message content — user text reaches Splunk at DEBUG.
         logger.debug(
             "Got input messages: type=%s count=%d",
             type(input_messages).__name__,
@@ -1030,7 +1030,7 @@ class AsyncServer(Server):
         """
         Construct a system message from a message.
         """
-        # Do not log message content — user text reaches Splunk at DEBUG. See VEPAGE-983.
+        # Do not log message content — user text reaches Splunk at DEBUG.
         logger.debug("Got message: length=%d", len(message) if message else 0)
         mirix_agent = None
         mirix_agent = await self.load_agent(agent_id=agent_id, actor=actor)
@@ -1042,7 +1042,7 @@ class AsyncServer(Server):
         """
         Construct a system message from a message.
         """
-        # Do not log message content — user text reaches Splunk at DEBUG. See VEPAGE-983.
+        # Do not log message content — user text reaches Splunk at DEBUG.
         logger.debug("Got message: length=%d", len(message) if message else 0)
         mirix_agent = None
         mirix_agent = await self.load_agent(agent_id=agent_id, actor=actor)
