@@ -94,15 +94,18 @@ def build_ispy_payload(text: str) -> dict:
     callback in ``mirix.observability.pii_mask`` so a config change
     (sensitivity tier, etc.) lands in exactly one place.
 
-    HIGHLY_SENSITIVE catches the strictest tier of detectors (SSN,
-    credit-card, IBAN, financial IDs, PHI) — what we actually need on
-    error logs and trace attributes that may echo financial / PHI
-    user content.
+    SENSITIVE is the documented default tier per sdm-docs/ispypii: it
+    covers common PII (names, emails, phone numbers, addresses, SSNs,
+    credit cards). HIGHLY_SENSITIVE — which sounds stricter — is
+    actually a narrower subset (only passwords, API keys, SSNs, credit
+    cards, driver's licenses), so it would miss the long tail of names
+    and contact details that error logs and trace attributes most
+    often echo.
     """
     return {
         "text": text,
         "format": "PLAIN_TEXT",
-        "sensitivityLevel": "HIGHLY_SENSITIVE",
+        "sensitivityLevel": "SENSITIVE",
         "confidenceLevel": "LIKELY",
     }
 
