@@ -112,9 +112,7 @@ class AnthropicClient(LLMClientBase):
             # with PII tokens scrubbed.
             from mirix.pii import log_error_strip_pii
 
-            await log_error_strip_pii(
-                logger, "Error during send_llm_batch_request_async:", exc=e
-            )
+            await log_error_strip_pii(logger, "Error during send_llm_batch_request_async:", exc=e)
             raise await self.handle_llm_error(e)
 
     @trace_method
@@ -369,9 +367,7 @@ class AnthropicClient(LLMClientBase):
             # with PII tokens scrubbed.
             from mirix.pii import log_error_strip_pii
 
-            await log_error_strip_pii(
-                logger, "[Anthropic] Bad request:", exc=e, level=logging.WARNING
-            )
+            await log_error_strip_pii(logger, "[Anthropic] Bad request:", exc=e, level=logging.WARNING)
             if "prompt is too long" in str(e).lower():
                 # If the context window is too large, we expect to receive:
                 # 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'prompt is too long: 200758 tokens > 200000 maximum'}}
