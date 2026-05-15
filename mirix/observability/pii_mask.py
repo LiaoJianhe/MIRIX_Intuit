@@ -29,7 +29,9 @@ network call; the mask becomes a passthrough. Defaults to enabled.
 from __future__ import annotations
 
 import os
-from functools import lru_cache
+import threading
+import time
+from collections import OrderedDict
 from typing import Any, Callable, Final, Optional
 
 import httpx
@@ -41,11 +43,18 @@ import httpx
 # helpers keeps tier/format changes from drifting between paths.
 from mirix.pii import (
     REDACTED_PLACEHOLDER,
+    backoff_seconds,
     build_ispy_payload,
     extract_redacted,
     get_ispy_pii_endpoint,
+    get_ispy_pii_max_retries,
+    get_ispy_pii_retry_backoff_ms,
     get_ispy_pii_timeout_seconds,
 )
+
+# Same retryable-status set as mirix.pii. Kept private to this module
+# to avoid coupling consumers of mirix.pii to the retry-status detail.
+_RETRYABLE_STATUS: Final[frozenset] = frozenset({429, 500, 502, 503, 504})
 
 _DEFAULT_TIMEOUT_S: Final[float] = 0.2
 # Bound the LRU so a long-running process doesn't accumulate unbounded
@@ -75,19 +84,68 @@ def build_langfuse_mask(
     Langfuse's flush thread and never on a request handler's event
     loop.
     """
-    client = httpx.Client(timeout=timeout_seconds)
+    # follow_redirects=True: defensive against the gateway ELB's
+    # http:// -> https:// 301. The default endpoint is already https://
+    # but if someone regresses the env-var override we don't want every
+    # call to silently fail-close on the 301.
+    client = httpx.Client(timeout=timeout_seconds, follow_redirects=True)
+    max_retries = get_ispy_pii_max_retries()
+    backoff_base = get_ispy_pii_retry_backoff_ms()
 
-    @lru_cache(maxsize=cache_size)
+    # Bounded LRU that only stores successful results. functools.lru_cache
+    # cannot distinguish "ispy-pii returned masked text" from "ispy-pii
+    # failed and we substituted the placeholder", so a single transient
+    # failure (429, 5xx, timeout, malformed body) would poison the cache
+    # for that string until process restart. After ispy-pii recovers,
+    # traces would still show the placeholder for every poisoned string.
+    # Use an OrderedDict + lock so insert/evict is thread-safe (the mask
+    # is invoked on the calling thread, which may be a request handler).
+    _cache: "OrderedDict[str, str]" = OrderedDict()
+    _cache_lock = threading.Lock()
+
+    def _cache_get(key: str) -> Optional[str]:
+        with _cache_lock:
+            value = _cache.get(key)
+            if value is not None:
+                _cache.move_to_end(key)
+            return value
+
+    def _cache_put(key: str, value: str) -> None:
+        with _cache_lock:
+            _cache[key] = value
+            _cache.move_to_end(key)
+            while len(_cache) > cache_size:
+                _cache.popitem(last=False)
+
     def _mask_one(text: str) -> str:
         if not text:
             return text
+        cached = _cache_get(text)
+        if cached is not None:
+            return cached
+        # Retries on 429/5xx per ispy-pii service-api docs. Total
+        # latency bounded by (max_retries + 1) * timeout + sum(backoffs).
+        payload = build_ispy_payload(text)
         try:
-            resp = client.post(endpoint, json=build_ispy_payload(text))
-            if resp.status_code != 200:
+            for attempt in range(max_retries + 1):
+                resp = client.post(endpoint, json=payload)
+                if resp.status_code == 200:
+                    result = extract_redacted(resp.json())
+                    break
+                if resp.status_code not in _RETRYABLE_STATUS:
+                    return REDACTED_PLACEHOLDER
+                if attempt < max_retries:
+                    time.sleep(backoff_seconds(attempt + 1, backoff_base))
+            else:
                 return REDACTED_PLACEHOLDER
-            return extract_redacted(resp.json())
         except Exception:
             return REDACTED_PLACEHOLDER
+        # extract_redacted falls back to REDACTED_PLACEHOLDER on a
+        # malformed 200 response; treat that as a failure too and do not
+        # cache it, so the next call gets a fresh attempt.
+        if result != REDACTED_PLACEHOLDER:
+            _cache_put(text, result)
+        return result
 
     def mask(data: Any = None, **_: Any) -> Any:
         if not _enabled():
