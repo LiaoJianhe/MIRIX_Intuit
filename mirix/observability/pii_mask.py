@@ -46,6 +46,7 @@ from mirix.pii import (
     backoff_seconds,
     build_ispy_payload,
     extract_redacted,
+    get_ispy_pii_auth_headers,
     get_ispy_pii_endpoint,
     get_ispy_pii_max_retries,
     get_ispy_pii_retry_backoff_ms,
@@ -84,11 +85,13 @@ def build_langfuse_mask(
     Langfuse's flush thread and never on a request handler's event
     loop.
     """
-    # follow_redirects=True: defensive against the gateway ELB's
-    # http:// -> https:// 301. The default endpoint is already https://
-    # but if someone regresses the env-var override we don't want every
-    # call to silently fail-close on the 301.
-    client = httpx.Client(timeout=timeout_seconds, follow_redirects=True)
+    # follow_redirects: ELB returns 301 on http://.
+    # headers: PrivateAuth; empty when env vars unset (standalone).
+    client = httpx.Client(
+        timeout=timeout_seconds,
+        follow_redirects=True,
+        headers=get_ispy_pii_auth_headers(),
+    )
     max_retries = get_ispy_pii_max_retries()
     backoff_base = get_ispy_pii_retry_backoff_ms()
 

@@ -75,9 +75,7 @@ async def test_log_error_strip_pii_includes_template_masked_msg_and_traceback(ca
     try:
         _raise_with_user_msg(runtime_pii)
     except ValueError as e:
-        await log_error_strip_pii(
-            test_logger, "Failed to X: user_id=%s", "u_456", exc=e
-        )
+        await log_error_strip_pii(test_logger, "Failed to X: user_id=%s", "u_456", exc=e)
 
     rec = caplog.records[-1]
     msg = rec.getMessage()
@@ -155,9 +153,7 @@ async def test_log_error_strip_pii_supports_warning_level():
     try:
         _raise_with_user_msg("oops")
     except ValueError as e:
-        await log_error_strip_pii(
-            test_logger, "X failed", exc=e, level=logging.WARNING
-        )
+        await log_error_strip_pii(test_logger, "X failed", exc=e, level=logging.WARNING)
 
     assert records[-1].levelno == logging.WARNING
 
@@ -390,3 +386,77 @@ async def test_log_error_strip_pii_caller_extra_overrides_auto_injected():
     rec = records[-1]
     assert rec.error == "caller-supplied"
     assert rec.error_type == "CallerType"
+
+
+# get_ispy_pii_auth_headers
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_auth_headers_empty_without_creds(monkeypatch):
+    """No env vars => no header."""
+    from mirix.pii import get_ispy_pii_auth_headers
+
+    monkeypatch.delenv("MIRIX_ISPY_PII_APPID", raising=False)
+    monkeypatch.delenv("MIRIX_ISPY_PII_APP_SECRET", raising=False)
+    assert get_ispy_pii_auth_headers() == {}
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_auth_headers_empty_with_partial_creds(monkeypatch):
+    """Only one of the two env vars set => no header."""
+    from mirix.pii import get_ispy_pii_auth_headers
+
+    monkeypatch.setenv("MIRIX_ISPY_PII_APPID", "Intuit.test")
+    monkeypatch.delenv("MIRIX_ISPY_PII_APP_SECRET", raising=False)
+    assert get_ispy_pii_auth_headers() == {}
+
+    monkeypatch.delenv("MIRIX_ISPY_PII_APPID", raising=False)
+    monkeypatch.setenv("MIRIX_ISPY_PII_APP_SECRET", "secret")
+    assert get_ispy_pii_auth_headers() == {}
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_auth_headers_with_creds(monkeypatch):
+    """Both env vars => Intuit_IAM_Authentication header."""
+    from mirix.pii import get_ispy_pii_auth_headers
+
+    monkeypatch.setenv(
+        "MIRIX_ISPY_PII_APPID",
+        "Intuit.expertise.help.contextandmemoryservice",
+    )
+    monkeypatch.setenv("MIRIX_ISPY_PII_APP_SECRET", "s3cr3t")
+    headers = get_ispy_pii_auth_headers()
+    assert headers["Authorization"] == (
+        "Intuit_IAM_Authentication intuit_appid=Intuit.expertise.help.contextandmemoryservice,intuit_app_secret=s3cr3t"
+    )
+    assert headers["intuit_offeringid"] == ("Intuit.expertise.help.contextandmemoryservice")
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_async_client_sends_auth_header(monkeypatch):
+    """Boundary: headers actually reach the wire."""
+    import mirix.pii as _pii
+
+    monkeypatch.setenv("MIRIX_ISPY_PII_APPID", "Intuit.test")
+    monkeypatch.setenv("MIRIX_ISPY_PII_APP_SECRET", "shh")
+
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["authorization"] = request.headers.get("authorization", "")
+        captured["intuit_offeringid"] = request.headers.get("intuit_offeringid", "")
+        return httpx.Response(200, json={"redactedText": "ok"})
+
+    transport = httpx.MockTransport(handler)
+    _pii._async_client = httpx.AsyncClient(
+        transport=transport,
+        timeout=0.2,
+        follow_redirects=True,
+        headers=_pii.get_ispy_pii_auth_headers(),
+    )
+    masked = await _pii._mask_async("hello world")
+    assert masked == "ok"
+    assert captured["authorization"].startswith("Intuit_IAM_Authentication ")
+    assert "intuit_appid=Intuit.test" in captured["authorization"]
+    assert "intuit_app_secret=shh" in captured["authorization"]
+    assert captured["intuit_offeringid"] == "Intuit.test"
