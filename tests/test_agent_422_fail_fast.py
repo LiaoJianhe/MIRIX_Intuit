@@ -179,9 +179,9 @@ class TestGetAiReplyFastFailOn422:
             )
 
         # First pass: retry_limit attempts; second_try: another retry_limit attempts.
-        assert call_count == retry_limit * 2, (
-            f"Expected {retry_limit * 2} LLM calls (initial retries + second_try retries), got {call_count}"
-        )
+        assert (
+            call_count == retry_limit * 2
+        ), f"Expected {retry_limit * 2} LLM calls (initial retries + second_try retries), got {call_count}"
 
 
 class TestStepFastFailOn422:

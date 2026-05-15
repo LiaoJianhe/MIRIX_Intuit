@@ -2774,8 +2774,7 @@ These keywords have been used to retrieve relevant memories from the database.
             msgs_list = messages if isinstance(messages, list) else [messages]
             await log_error_strip_pii(
                 logger,
-                f"[Mirix.Agent.{self.agent_state.name}] inner_step() failed: "
-                "num_messages=%d message_roles=%s",
+                f"[Mirix.Agent.{self.agent_state.name}] inner_step() failed: " "num_messages=%d message_roles=%s",
                 len(msgs_list),
                 [getattr(m, "role", None) for m in msgs_list],
                 exc=e,
@@ -2841,8 +2840,7 @@ These keywords have been used to retrieve relevant memories from the database.
 
                 await log_error_strip_pii(
                     logger,
-                    f"[Mirix.Agent.{self.agent_state.name}] inner_step() failed with "
-                    "an unrecognized exception:",
+                    f"[Mirix.Agent.{self.agent_state.name}] inner_step() failed with " "an unrecognized exception:",
                     exc=e,
                 )
                 raise e

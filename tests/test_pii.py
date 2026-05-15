@@ -75,9 +75,7 @@ async def test_log_error_strip_pii_includes_template_masked_msg_and_traceback(ca
     try:
         _raise_with_user_msg(runtime_pii)
     except ValueError as e:
-        await log_error_strip_pii(
-            test_logger, "Failed to X: user_id=%s", "u_456", exc=e
-        )
+        await log_error_strip_pii(test_logger, "Failed to X: user_id=%s", "u_456", exc=e)
 
     rec = caplog.records[-1]
     msg = rec.getMessage()
@@ -155,9 +153,7 @@ async def test_log_error_strip_pii_supports_warning_level():
     try:
         _raise_with_user_msg("oops")
     except ValueError as e:
-        await log_error_strip_pii(
-            test_logger, "X failed", exc=e, level=logging.WARNING
-        )
+        await log_error_strip_pii(test_logger, "X failed", exc=e, level=logging.WARNING)
 
     assert records[-1].levelno == logging.WARNING
 

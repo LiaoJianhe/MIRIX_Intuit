@@ -94,10 +94,7 @@ def get_ispy_pii_timeout_seconds() -> float:
     the env var is the millisecond value (``MIRIX_ISPY_PII_TIMEOUT_MS``).
     """
     try:
-        return (
-            int(os.getenv("MIRIX_ISPY_PII_TIMEOUT_MS", str(_DEFAULT_TIMEOUT_MS)))
-            / 1000.0
-        )
+        return int(os.getenv("MIRIX_ISPY_PII_TIMEOUT_MS", str(_DEFAULT_TIMEOUT_MS))) / 1000.0
     except ValueError:
         return _DEFAULT_TIMEOUT_MS / 1000.0
 
@@ -111,9 +108,7 @@ def get_ispy_pii_max_retries() -> int:
     try:
         return max(
             0,
-            int(
-                os.getenv("MIRIX_ISPY_PII_MAX_RETRIES", str(_DEFAULT_MAX_RETRIES))
-            ),
+            int(os.getenv("MIRIX_ISPY_PII_MAX_RETRIES", str(_DEFAULT_MAX_RETRIES))),
         )
     except ValueError:
         return _DEFAULT_MAX_RETRIES
@@ -197,9 +192,7 @@ def _get_async_client() -> httpx.AsyncClient:
         # http:// -> https:// 301. The default endpoint is already
         # https:// but if someone regresses the env-var override we
         # don't want every call to silently fail-close on the 301.
-        _async_client = httpx.AsyncClient(
-            timeout=get_ispy_pii_timeout_seconds(), follow_redirects=True
-        )
+        _async_client = httpx.AsyncClient(timeout=get_ispy_pii_timeout_seconds(), follow_redirects=True)
     return _async_client
 
 
