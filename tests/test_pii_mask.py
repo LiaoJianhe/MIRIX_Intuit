@@ -205,12 +205,7 @@ def test_set_langfuse_mask_none_clears_registration():
 
 
 def test_mask_sends_intuit_iam_auth_header_when_creds_present(monkeypatch):
-    """The sync httpx.Client is constructed with PrivateAuth header
-    when MIRIX_ISPY_PII_APPID and MIRIX_ISPY_PII_APP_SECRET are set.
-
-    Boundary test: confirms the headers reach the wire via the
-    MockTransport request, not just that the helper returns a dict.
-    """
+    """Boundary: PrivateAuth header reaches the wire when env vars set."""
     monkeypatch.setenv("MIRIX_ISPY_PII_APPID", "Intuit.test")
     monkeypatch.setenv("MIRIX_ISPY_PII_APP_SECRET", "shh")
 
@@ -230,14 +225,7 @@ def test_mask_sends_intuit_iam_auth_header_when_creds_present(monkeypatch):
 
 
 def test_mask_omits_auth_header_when_creds_absent(monkeypatch):
-    """No PrivateAuth env vars => no Authorization header is sent.
-
-    Protects MIRIX-standalone / OSS callers from getting an empty
-    "Intuit_IAM_Authentication intuit_appid=,intuit_app_secret=" header
-    that would be rejected by the gateway. The mask still runs the
-    request — the upstream is presumed to accept it or return its own
-    auth error, which is the correct OSS behavior.
-    """
+    """No env vars => no Authorization header is sent."""
     monkeypatch.delenv("MIRIX_ISPY_PII_APPID", raising=False)
     monkeypatch.delenv("MIRIX_ISPY_PII_APP_SECRET", raising=False)
 

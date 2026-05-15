@@ -85,15 +85,8 @@ def build_langfuse_mask(
     Langfuse's flush thread and never on a request handler's event
     loop.
     """
-    # follow_redirects=True: defensive against the gateway ELB's
-    # http:// -> https:// 301. The default endpoint is already https://
-    # but if someone regresses the env-var override we don't want every
-    # call to silently fail-close on the 301.
-    # headers: PrivateAuth for the Intuit API gateway. See
-    # mirix.pii.get_ispy_pii_auth_headers() — empty dict means no header
-    # is sent, which is fine in MIRIX-standalone / OSS where the caller
-    # talks to an unauthenticated dev ispy-pii. ECMS sets the env vars
-    # in populate_env_for_mirix() so the header IS sent in pre-prod/prod.
+    # follow_redirects: ELB returns 301 on http://.
+    # headers: PrivateAuth; empty when env vars unset (standalone).
     client = httpx.Client(
         timeout=timeout_seconds,
         follow_redirects=True,

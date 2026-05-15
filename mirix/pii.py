@@ -23,9 +23,7 @@ never introduce sync blocking calls"). Every catch site we mask from
 runs inside an async event loop — ``inner_step()``, the LLM clients'
 ``handle_llm_error`` chain, the batch path. A synchronous
 ``httpx.Client.post()`` here would block the loop for up to the
-ispy-pii timeout, mirroring the VEPAGE-983 anti-pattern where a sync
-``httpx`` call inside a logging filter stalled the FastAPI request
-thread. The mask call therefore runs through ``httpx.AsyncClient`` and
+ispy-pii timeout. The mask call runs through ``httpx.AsyncClient`` and
 yields cooperatively while waiting.
 
 The Langfuse trace path uses a separate seam (the
@@ -36,25 +34,13 @@ still correct there. The two paths are intentionally separate: error
 logs go to Splunk via stdlib logging; trace attributes go to Langfuse
 via the SDK.
 
-The kill switch ``MIRIX_ISPY_PII_ENABLED=false`` disables the network
-call (passthrough). Defaults to enabled. If the network call fails we
-substitute :data:`REDACTED_PLACEHOLDER` so the helper never raises —
-logging paths must not re-enter their own exception handlers.
+``MIRIX_ISPY_PII_ENABLED=false`` disables the network call
+(passthrough). Failures substitute :data:`REDACTED_PLACEHOLDER` so the
+helper never raises.
 
-Authentication: the Intuit API gateway in front of ispy-pii requires a
-PrivateAuth ``Authorization`` header on every request. We build it
-from ``MIRIX_ISPY_PII_APPID`` and ``MIRIX_ISPY_PII_APP_SECRET`` (set by
-ECMS in ``populate_env_for_mirix()`` from its IDPS-resolved
-credentials). When those env vars are absent (MIRIX standalone / OSS)
-the helper sends no header — appropriate for unauthenticated dev
-ispy-pii deployments.
-
-Earlier comments in this repo (and in the original :pr:`100`) claimed
-that the gateway accepted mesh-mTLS identity alone and that
-``Intuit_IAM_Authentication`` was the wrong shape. The gateway logs
-(``key='appAuth' reason='authHeader' value='emptyAuthHeader'``)
-disproved that — every unauthenticated call to
-``ispypiis-e2e.api.intuit.com`` is rejected with 401 by ``gw-go-filter``.
+PrivateAuth ``Authorization`` header is built from
+``MIRIX_ISPY_PII_APPID`` + ``MIRIX_ISPY_PII_APP_SECRET``. When unset
+(standalone / OSS) no header is sent.
 """
 
 from __future__ import annotations
@@ -71,20 +57,14 @@ from mirix.log import safe_traceback
 
 REDACTED_PLACEHOLDER: Final[str] = "[REDACTED — PII masking unavailable]"
 
-# https:// only. The gateway ELB returns 301 on http:// and httpx does
-# not follow redirects by default, so a http:// URL silently fail-closes
-# every call to the placeholder. ECMS overrides via MIRIX_ISPY_PII_ENDPOINT;
-# the default is what's used in MIRIX-standalone / dev.
+# https:// only — http:// returns 301 at the ELB and httpx doesn't
+# follow redirects by default.
 _DEFAULT_ENDPOINT: Final[str] = "https://ispypiis-e2e.api.intuit.com/v2/analyze"
 _DEFAULT_TIMEOUT_MS: Final[int] = 200
-# Retry config — defaults match ECMS common/pii.py. ECMS overrides via
-# MIRIX_ISPY_PII_MAX_RETRIES / MIRIX_ISPY_PII_RETRY_BACKOFF_MS.
 _DEFAULT_MAX_RETRIES: Final[int] = 2
 _DEFAULT_RETRY_BACKOFF_MS: Final[int] = 50
 
-# HTTP status codes the ispy-pii service-api docs explicitly call out
-# as retryable with exponential backoff. 4xx other than 429 (bad payload,
-# auth) won't get better with a retry.
+# Retryable per ispy-pii service-api docs.
 _RETRYABLE_STATUS: Final[frozenset] = frozenset({429, 500, 502, 503, 504})
 
 
@@ -93,27 +73,7 @@ def _enabled() -> bool:
 
 
 def get_ispy_pii_auth_headers() -> Dict[str, str]:
-    """Build the Intuit PrivateAuth header for ispy-pii from env vars.
-
-    The Intuit API gateway in front of ispy-pii (gw-go-filter) requires
-    a PrivateAuth ``Authorization`` header for service-to-service calls.
-    Without it the gateway returns 401 with
-    ``key='appAuth' reason='authHeader' value='emptyAuthHeader'``,
-    we fail-close to :data:`REDACTED_PLACEHOLDER`, and every trace
-    attribute / error log gets the placeholder instead of real masked
-    content.
-
-    Returns an empty dict when ``MIRIX_ISPY_PII_APPID`` or
-    ``MIRIX_ISPY_PII_APP_SECRET`` are unset. That preserves MIRIX-
-    standalone / OSS behavior: the masker still issues unauthenticated
-    requests, which is the right thing to do when an unauthenticated
-    ispy-pii deployment is available, or where the caller hasn't
-    onboarded the gateway PrivateAuth flow yet. ECMS sets both env
-    vars in ``populate_env_for_mirix()``.
-
-    Shared with ``mirix.observability.pii_mask`` so a future format
-    change (e.g. switching to PrivateAuthPlus) lands in one place.
-    """
+    """Intuit PrivateAuth header from env vars; empty dict if unset."""
     app_id = os.getenv("MIRIX_ISPY_PII_APPID", "")
     app_secret = os.getenv("MIRIX_ISPY_PII_APP_SECRET", "")
     if not app_id or not app_secret:
@@ -233,12 +193,8 @@ _async_client: Optional[httpx.AsyncClient] = None
 def _get_async_client() -> httpx.AsyncClient:
     global _async_client
     if _async_client is None:
-        # follow_redirects=True: defensive against the gateway ELB's
-        # http:// -> https:// 301. The default endpoint is already
-        # https:// but if someone regresses the env-var override we
-        # don't want every call to silently fail-close on the 301.
-        # headers: PrivateAuth for the Intuit API gateway. See
-        # get_ispy_pii_auth_headers() — empty dict in MIRIX-standalone.
+        # follow_redirects: ELB returns 301 on http://.
+        # headers: PrivateAuth; empty when env vars unset (standalone).
         _async_client = httpx.AsyncClient(
             timeout=get_ispy_pii_timeout_seconds(),
             follow_redirects=True,

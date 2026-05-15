@@ -75,9 +75,7 @@ async def test_log_error_strip_pii_includes_template_masked_msg_and_traceback(ca
     try:
         _raise_with_user_msg(runtime_pii)
     except ValueError as e:
-        await log_error_strip_pii(
-            test_logger, "Failed to X: user_id=%s", "u_456", exc=e
-        )
+        await log_error_strip_pii(test_logger, "Failed to X: user_id=%s", "u_456", exc=e)
 
     rec = caplog.records[-1]
     msg = rec.getMessage()
@@ -155,9 +153,7 @@ async def test_log_error_strip_pii_supports_warning_level():
     try:
         _raise_with_user_msg("oops")
     except ValueError as e:
-        await log_error_strip_pii(
-            test_logger, "X failed", exc=e, level=logging.WARNING
-        )
+        await log_error_strip_pii(test_logger, "X failed", exc=e, level=logging.WARNING)
 
     assert records[-1].levelno == logging.WARNING
 
@@ -392,14 +388,12 @@ async def test_log_error_strip_pii_caller_extra_overrides_auto_injected():
     assert rec.error_type == "CallerType"
 
 
-# ---------------------------------------------------------------------------
-# get_ispy_pii_auth_headers — Intuit PrivateAuth header construction
-# ---------------------------------------------------------------------------
+# get_ispy_pii_auth_headers
 
 
 @pytest.mark.asyncio(loop_scope="function")
 async def test_auth_headers_empty_without_creds(monkeypatch):
-    """No env vars set => no header. Preserves MIRIX-standalone behavior."""
+    """No env vars => no header."""
     from mirix.pii import get_ispy_pii_auth_headers
 
     monkeypatch.delenv("MIRIX_ISPY_PII_APPID", raising=False)
@@ -409,7 +403,7 @@ async def test_auth_headers_empty_without_creds(monkeypatch):
 
 @pytest.mark.asyncio(loop_scope="function")
 async def test_auth_headers_empty_with_partial_creds(monkeypatch):
-    """One env var set but not the other => no header. Fail-safe partial config."""
+    """Only one of the two env vars set => no header."""
     from mirix.pii import get_ispy_pii_auth_headers
 
     monkeypatch.setenv("MIRIX_ISPY_PII_APPID", "Intuit.test")
@@ -423,7 +417,7 @@ async def test_auth_headers_empty_with_partial_creds(monkeypatch):
 
 @pytest.mark.asyncio(loop_scope="function")
 async def test_auth_headers_with_creds(monkeypatch):
-    """Both env vars set => Intuit_IAM_Authentication header + offering id."""
+    """Both env vars => Intuit_IAM_Authentication header."""
     from mirix.pii import get_ispy_pii_auth_headers
 
     monkeypatch.setenv(
@@ -433,24 +427,14 @@ async def test_auth_headers_with_creds(monkeypatch):
     monkeypatch.setenv("MIRIX_ISPY_PII_APP_SECRET", "s3cr3t")
     headers = get_ispy_pii_auth_headers()
     assert headers["Authorization"] == (
-        "Intuit_IAM_Authentication "
-        "intuit_appid=Intuit.expertise.help.contextandmemoryservice,"
-        "intuit_app_secret=s3cr3t"
+        "Intuit_IAM_Authentication intuit_appid=Intuit.expertise.help.contextandmemoryservice,intuit_app_secret=s3cr3t"
     )
-    assert headers["intuit_offeringid"] == (
-        "Intuit.expertise.help.contextandmemoryservice"
-    )
+    assert headers["intuit_offeringid"] == ("Intuit.expertise.help.contextandmemoryservice")
 
 
 @pytest.mark.asyncio(loop_scope="function")
 async def test_async_client_sends_auth_header(monkeypatch):
-    """The cached AsyncClient is constructed with the auth header attached.
-
-    Boundary test: verifies the headers reach the wire by inspecting the
-    Request the AsyncClient hands to its transport. Without this, a
-    regression that drops headers from the kwargs would still pass the
-    unit tests for ``get_ispy_pii_auth_headers`` above.
-    """
+    """Boundary: headers actually reach the wire."""
     import mirix.pii as _pii
 
     monkeypatch.setenv("MIRIX_ISPY_PII_APPID", "Intuit.test")
