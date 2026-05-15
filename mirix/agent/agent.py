@@ -28,7 +28,7 @@ from mirix.constants import (
     REQ_HEARTBEAT_MESSAGE,
 )
 from mirix.embeddings import embedding_model
-from mirix.errors import ContextWindowExceededError, LLMError
+from mirix.errors import ContextWindowExceededError, LLMError, LLMUnprocessableEntityError
 from mirix.functions.functions import get_function_from_module
 from mirix.helpers import ToolRulesSolver
 from mirix.helpers.message_helpers import prepare_input_message_create
@@ -804,6 +804,8 @@ class Agent(BaseAgent):
                     continue
 
             except LLMError as llm_error:
+                if isinstance(llm_error, LLMUnprocessableEntityError):
+                    raise
                 llm_error_desc = f"{type(llm_error).__name__}: {llm_error!r}"
                 if attempt >= empty_response_retry_limit:
                     printv(
@@ -1479,125 +1481,148 @@ class Agent(BaseAgent):
         total_usage = UsageStatistics()
         step_count = 0
         loop_input_messages: List[Message] = list(normalized_input_messages)
-        while True:
-            kwargs["first_message"] = False
-            kwargs["step_count"] = step_count
+        try:
+            while True:
+                kwargs["first_message"] = False
+                kwargs["step_count"] = step_count
 
-            loop_iteration_messages = list(loop_input_messages)
-            if self.agent_state.is_type(AgentType.meta_memory_agent) and step_count == 0:
-                meta_message = prepare_input_message_create(
-                    MessageCreate(
-                        role="user",
-                        content="[System Message] As the meta memory manager, analyze the provided content and perform your function.",
-                        filter_tags=self.filter_tags,
-                    ),
-                    self.agent_state.id,
-                    wrap_user_message=False,
-                    wrap_system_message=True,
+                loop_iteration_messages = list(loop_input_messages)
+                if self.agent_state.is_type(AgentType.meta_memory_agent) and step_count == 0:
+                    meta_message = prepare_input_message_create(
+                        MessageCreate(
+                            role="user",
+                            content="[System Message] As the meta memory manager, analyze the provided content and perform your function.",
+                            filter_tags=self.filter_tags,
+                        ),
+                        self.agent_state.id,
+                        wrap_user_message=False,
+                        wrap_system_message=True,
+                    )
+                    loop_iteration_messages.append(meta_message)
+
+                step_response = await self.inner_step(
+                    messages=loop_iteration_messages,
+                    accumulated=accumulated,
+                    chaining=chaining,
+                    llm_client=llm_client,
+                    retained_count=len(retained_input_sets),
+                    **kwargs,
                 )
-                loop_iteration_messages.append(meta_message)
 
-            step_response = await self.inner_step(
-                messages=loop_iteration_messages,
-                accumulated=accumulated,
-                chaining=chaining,
-                llm_client=llm_client,
-                retained_count=len(retained_input_sets),
-                **kwargs,
-            )
+                continue_chaining = step_response.continue_chaining
+                function_failed = step_response.function_failed
+                usage = step_response.usage
 
-            continue_chaining = step_response.continue_chaining
-            function_failed = step_response.function_failed
-            usage = step_response.usage
+                # Accumulate step messages for next chaining iteration
+                accumulated = accumulated + step_response.messages
 
-            # Accumulate step messages for next chaining iteration
-            accumulated = accumulated + step_response.messages
+                step_count += 1
+                total_usage += usage
+                counter += 1
+                self.interface.step_complete()
 
-            step_count += 1
-            total_usage += usage
-            counter += 1
-            self.interface.step_complete()
-
-            # Chain stops
-            if not chaining and (not function_failed):
-                printv(f"[Mirix.Agent.{self.agent_state.name}] INFO: No chaining, stopping after one step")
-                break
-            elif max_chaining_steps is not None and counter == max_chaining_steps:
-                # Add warning message based on agent type
-                if self.agent_state.is_type(AgentType.chat_agent):
-                    warning_content = "[System Message] You have reached the maximum chaining steps. Please call 'send_message' to send your response to the user."
+                # Chain stops
+                if not chaining and (not function_failed):
+                    printv(f"[Mirix.Agent.{self.agent_state.name}] INFO: No chaining, stopping after one step")
+                    break
+                elif max_chaining_steps is not None and counter == max_chaining_steps:
+                    # Add warning message based on agent type
+                    if self.agent_state.is_type(AgentType.chat_agent):
+                        warning_content = "[System Message] You have reached the maximum chaining steps. Please call 'send_message' to send your response to the user."
+                    else:
+                        warning_content = "[System Message] You have reached the maximum chaining steps. Please call 'finish_memory_update' to end the chaining."
+                    loop_input_messages = [
+                        Message.dict_to_message(
+                            agent_id=self.agent_state.id,
+                            model=self.model,
+                            openai_message_dict={
+                                "role": "user",
+                                "content": warning_content,
+                            },
+                        )
+                    ]
+                    continue  # give agent one more chance to respond
+                elif max_chaining_steps is not None and counter > max_chaining_steps:
+                    printv(
+                        f"[Mirix.Agent.{self.agent_state.name}] INFO: Hit max chaining steps, stopping after {counter} steps"
+                    )
+                    break
+                elif function_failed:
+                    assert self.agent_state.created_by_id is not None
+                    loop_input_messages = [
+                        Message.dict_to_message(
+                            agent_id=self.agent_state.id,
+                            model=self.model,
+                            openai_message_dict={
+                                "role": "user",  # TODO: change to system?
+                                "content": get_contine_chaining(FUNC_FAILED_HEARTBEAT_MESSAGE),
+                            },
+                        )
+                    ]
+                    continue  # always chain
+                elif continue_chaining:
+                    assert self.agent_state.created_by_id is not None
+                    loop_input_messages = [
+                        Message.dict_to_message(
+                            agent_id=self.agent_state.id,
+                            model=self.model,
+                            openai_message_dict={
+                                "role": "user",  # TODO: change to system?
+                                "content": get_contine_chaining(REQ_HEARTBEAT_MESSAGE),
+                            },
+                        )
+                    ]
+                    continue  # always chain
+                # Mirix no-op / yield
                 else:
-                    warning_content = "[System Message] You have reached the maximum chaining steps. Please call 'finish_memory_update' to end the chaining."
-                loop_input_messages = [
-                    Message.dict_to_message(
-                        agent_id=self.agent_state.id,
-                        model=self.model,
-                        openai_message_dict={
-                            "role": "user",
-                            "content": warning_content,
-                        },
-                    )
-                ]
-                continue  # give agent one more chance to respond
-            elif max_chaining_steps is not None and counter > max_chaining_steps:
-                printv(
-                    f"[Mirix.Agent.{self.agent_state.name}] INFO: Hit max chaining steps, stopping after {counter} steps"
+                    break
+
+            # Retention write-back: persist input messages and prune old ones if configured
+            if should_write_retention and input_messages_for_persistence:
+                await self.message_manager.create_many_messages(
+                    input_messages_for_persistence,
+                    actor=self.actor,
+                    client_id=self.client_id,
+                    user_id=self.user_id,
                 )
-                break
-            elif function_failed:
-                assert self.agent_state.created_by_id is not None
-                loop_input_messages = [
-                    Message.dict_to_message(
-                        agent_id=self.agent_state.id,
-                        model=self.model,
-                        openai_message_dict={
-                            "role": "user",  # TODO: change to system?
-                            "content": get_contine_chaining(FUNC_FAILED_HEARTBEAT_MESSAGE),
-                        },
-                    )
-                ]
-                continue  # always chain
-            elif continue_chaining:
-                assert self.agent_state.created_by_id is not None
-                loop_input_messages = [
-                    Message.dict_to_message(
-                        agent_id=self.agent_state.id,
-                        model=self.model,
-                        openai_message_dict={
-                            "role": "user",  # TODO: change to system?
-                            "content": get_contine_chaining(REQ_HEARTBEAT_MESSAGE),
-                        },
-                    )
-                ]
-                continue  # always chain
-            # Mirix no-op / yield
-            else:
-                break
+                await self.message_manager.hard_delete_user_messages_for_agent(
+                    agent_id=self.agent_state.id,
+                    user_id=self.user_id,
+                    actor=self.actor,
+                    keep_newest_n=retention,
+                )
 
-        # Retention write-back: persist input messages and prune old ones if configured
-        if should_write_retention and input_messages_for_persistence:
-            await self.message_manager.create_many_messages(
-                input_messages_for_persistence,
-                actor=self.actor,
-                client_id=self.client_id,
-                user_id=self.user_id,
+            # Await the parallel summary task (dispatched before sub-agents ran).
+            # Raises on failure so the worker redelivers the message — processing_complete
+            # stays False and the retry gets a clean full reprocess.
+            if summary_task is not None:
+                try:
+                    await summary_task
+                except Exception as e:
+                    logger.warning("Failed to generate summary for source %s: %s", self.memory_source_id, e)
+                    raise
+        except LLMUnprocessableEntityError as e:
+            logger.warning(
+                "Source %s rejected by LLM provider (422); marking processing complete to suppress retries. error=%s",
+                self.memory_source_id,
+                e,
             )
-            await self.message_manager.hard_delete_user_messages_for_agent(
-                agent_id=self.agent_state.id,
-                user_id=self.user_id,
-                actor=self.actor,
-                keep_newest_n=retention,
+            emit_idempotency_skip_span(
+                name="Source Rejected: LLM 422",
+                reason="llm-422-content-rejected",
+                metadata={"memory_source_id": self.memory_source_id, "error": str(e)[:500]},
             )
-
-        # Await the parallel summary task (dispatched before sub-agents ran).
-        # Raises on failure so the worker redelivers the message — processing_complete
-        # stays False and the retry gets a clean full reprocess.
-        if summary_task is not None:
-            try:
-                await summary_task
-            except Exception as e:
-                logger.warning("Failed to generate summary for source %s: %s", self.memory_source_id, e)
-                raise
+            if self.agent_state.is_type(AgentType.meta_memory_agent) and self.memory_source_id:
+                try:
+                    await self.memory_source_manager.mark_processing_complete(self.memory_source_id)
+                except Exception as mark_err:
+                    logger.warning(
+                        "Failed to mark source %s complete after 422: %s",
+                        self.memory_source_id,
+                        mark_err,
+                    )
+                    raise
+            return MirixUsageStatistics(step_count=0)
 
         # Mark memory source as fully processed after all agents complete
         if self.agent_state.is_type(AgentType.meta_memory_agent) and self.memory_source_id:
