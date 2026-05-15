@@ -40,6 +40,21 @@ The kill switch ``MIRIX_ISPY_PII_ENABLED=false`` disables the network
 call (passthrough). Defaults to enabled. If the network call fails we
 substitute :data:`REDACTED_PLACEHOLDER` so the helper never raises —
 logging paths must not re-enter their own exception handlers.
+
+Authentication: the Intuit API gateway in front of ispy-pii requires a
+PrivateAuth ``Authorization`` header on every request. We build it
+from ``MIRIX_ISPY_PII_APPID`` and ``MIRIX_ISPY_PII_APP_SECRET`` (set by
+ECMS in ``populate_env_for_mirix()`` from its IDPS-resolved
+credentials). When those env vars are absent (MIRIX standalone / OSS)
+the helper sends no header — appropriate for unauthenticated dev
+ispy-pii deployments.
+
+Earlier comments in this repo (and in the original :pr:`100`) claimed
+that the gateway accepted mesh-mTLS identity alone and that
+``Intuit_IAM_Authentication`` was the wrong shape. The gateway logs
+(``key='appAuth' reason='authHeader' value='emptyAuthHeader'``)
+disproved that — every unauthenticated call to
+``ispypiis-e2e.api.intuit.com`` is rejected with 401 by ``gw-go-filter``.
 """
 
 from __future__ import annotations
@@ -77,6 +92,36 @@ def _enabled() -> bool:
     return os.getenv("MIRIX_ISPY_PII_ENABLED", "true").lower() == "true"
 
 
+def get_ispy_pii_auth_headers() -> Dict[str, str]:
+    """Build the Intuit PrivateAuth header for ispy-pii from env vars.
+
+    The Intuit API gateway in front of ispy-pii (gw-go-filter) requires
+    a PrivateAuth ``Authorization`` header for service-to-service calls.
+    Without it the gateway returns 401 with
+    ``key='appAuth' reason='authHeader' value='emptyAuthHeader'``,
+    we fail-close to :data:`REDACTED_PLACEHOLDER`, and every trace
+    attribute / error log gets the placeholder instead of real masked
+    content.
+
+    Returns an empty dict when ``MIRIX_ISPY_PII_APPID`` or
+    ``MIRIX_ISPY_PII_APP_SECRET`` are unset. That preserves MIRIX-
+    standalone / OSS behavior: the masker still issues unauthenticated
+    requests, which is the right thing to do when an unauthenticated
+    ispy-pii deployment is available, or where the caller hasn't
+    onboarded the gateway PrivateAuth flow yet. ECMS sets both env
+    vars in ``populate_env_for_mirix()``.
+
+    Shared with ``mirix.observability.pii_mask`` so a future format
+    change (e.g. switching to PrivateAuthPlus) lands in one place.
+    """
+    app_id = os.getenv("MIRIX_ISPY_PII_APPID", "")
+    app_secret = os.getenv("MIRIX_ISPY_PII_APP_SECRET", "")
+    if not app_id or not app_secret:
+        return {}
+    auth_value = f"Intuit_IAM_Authentication intuit_appid={app_id},intuit_app_secret={app_secret}"
+    return {"Authorization": auth_value, "intuit_offeringid": app_id}
+
+
 def get_ispy_pii_endpoint() -> str:
     """Resolve the ispy-pii v2/analyze endpoint from env.
 
@@ -94,10 +139,7 @@ def get_ispy_pii_timeout_seconds() -> float:
     the env var is the millisecond value (``MIRIX_ISPY_PII_TIMEOUT_MS``).
     """
     try:
-        return (
-            int(os.getenv("MIRIX_ISPY_PII_TIMEOUT_MS", str(_DEFAULT_TIMEOUT_MS)))
-            / 1000.0
-        )
+        return int(os.getenv("MIRIX_ISPY_PII_TIMEOUT_MS", str(_DEFAULT_TIMEOUT_MS))) / 1000.0
     except ValueError:
         return _DEFAULT_TIMEOUT_MS / 1000.0
 
@@ -111,9 +153,7 @@ def get_ispy_pii_max_retries() -> int:
     try:
         return max(
             0,
-            int(
-                os.getenv("MIRIX_ISPY_PII_MAX_RETRIES", str(_DEFAULT_MAX_RETRIES))
-            ),
+            int(os.getenv("MIRIX_ISPY_PII_MAX_RETRIES", str(_DEFAULT_MAX_RETRIES))),
         )
     except ValueError:
         return _DEFAULT_MAX_RETRIES
@@ -197,8 +237,12 @@ def _get_async_client() -> httpx.AsyncClient:
         # http:// -> https:// 301. The default endpoint is already
         # https:// but if someone regresses the env-var override we
         # don't want every call to silently fail-close on the 301.
+        # headers: PrivateAuth for the Intuit API gateway. See
+        # get_ispy_pii_auth_headers() — empty dict in MIRIX-standalone.
         _async_client = httpx.AsyncClient(
-            timeout=get_ispy_pii_timeout_seconds(), follow_redirects=True
+            timeout=get_ispy_pii_timeout_seconds(),
+            follow_redirects=True,
+            headers=get_ispy_pii_auth_headers(),
         )
     return _async_client
 

@@ -202,3 +202,51 @@ def test_set_langfuse_mask_none_clears_registration():
     set_langfuse_mask(lambda data, **kwargs: data)
     set_langfuse_mask(None)
     assert get_langfuse_mask() is ispy_pii_mask
+
+
+def test_mask_sends_intuit_iam_auth_header_when_creds_present(monkeypatch):
+    """The sync httpx.Client is constructed with PrivateAuth header
+    when MIRIX_ISPY_PII_APPID and MIRIX_ISPY_PII_APP_SECRET are set.
+
+    Boundary test: confirms the headers reach the wire via the
+    MockTransport request, not just that the helper returns a dict.
+    """
+    monkeypatch.setenv("MIRIX_ISPY_PII_APPID", "Intuit.test")
+    monkeypatch.setenv("MIRIX_ISPY_PII_APP_SECRET", "shh")
+
+    captured: dict = {}
+
+    def handler(request):
+        captured["authorization"] = request.headers.get("authorization", "")
+        captured["intuit_offeringid"] = request.headers.get("intuit_offeringid", "")
+        return httpx.Response(200, json={"redactedText": "ok"})
+
+    mask = _build_mask_with_transport(httpx.MockTransport(handler))
+    assert mask(data="user query") == "ok"
+    assert captured["authorization"].startswith("Intuit_IAM_Authentication ")
+    assert "intuit_appid=Intuit.test" in captured["authorization"]
+    assert "intuit_app_secret=shh" in captured["authorization"]
+    assert captured["intuit_offeringid"] == "Intuit.test"
+
+
+def test_mask_omits_auth_header_when_creds_absent(monkeypatch):
+    """No PrivateAuth env vars => no Authorization header is sent.
+
+    Protects MIRIX-standalone / OSS callers from getting an empty
+    "Intuit_IAM_Authentication intuit_appid=,intuit_app_secret=" header
+    that would be rejected by the gateway. The mask still runs the
+    request — the upstream is presumed to accept it or return its own
+    auth error, which is the correct OSS behavior.
+    """
+    monkeypatch.delenv("MIRIX_ISPY_PII_APPID", raising=False)
+    monkeypatch.delenv("MIRIX_ISPY_PII_APP_SECRET", raising=False)
+
+    captured: dict = {}
+
+    def handler(request):
+        captured["authorization"] = request.headers.get("authorization")
+        return httpx.Response(200, json={"redactedText": "ok"})
+
+    mask = _build_mask_with_transport(httpx.MockTransport(handler))
+    assert mask(data="user query") == "ok"
+    assert captured["authorization"] is None

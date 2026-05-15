@@ -46,6 +46,7 @@ from mirix.pii import (
     backoff_seconds,
     build_ispy_payload,
     extract_redacted,
+    get_ispy_pii_auth_headers,
     get_ispy_pii_endpoint,
     get_ispy_pii_max_retries,
     get_ispy_pii_retry_backoff_ms,
@@ -88,7 +89,16 @@ def build_langfuse_mask(
     # http:// -> https:// 301. The default endpoint is already https://
     # but if someone regresses the env-var override we don't want every
     # call to silently fail-close on the 301.
-    client = httpx.Client(timeout=timeout_seconds, follow_redirects=True)
+    # headers: PrivateAuth for the Intuit API gateway. See
+    # mirix.pii.get_ispy_pii_auth_headers() — empty dict means no header
+    # is sent, which is fine in MIRIX-standalone / OSS where the caller
+    # talks to an unauthenticated dev ispy-pii. ECMS sets the env vars
+    # in populate_env_for_mirix() so the header IS sent in pre-prod/prod.
+    client = httpx.Client(
+        timeout=timeout_seconds,
+        follow_redirects=True,
+        headers=get_ispy_pii_auth_headers(),
+    )
     max_retries = get_ispy_pii_max_retries()
     backoff_base = get_ispy_pii_retry_backoff_ms()
 
