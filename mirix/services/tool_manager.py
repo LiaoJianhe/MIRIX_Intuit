@@ -173,7 +173,7 @@ class ToolManager:
             results = await provider.find_using_named_query(
                 "tools",
                 "tool_manager.list_tools",
-                params={"organizationId": actor.organization_id, "limit": limit},
+                params={"organizationId": actor.organization_id, "cursor": cursor},
                 page_size=limit or 50,
             )
             return [PydanticTool(**r) for r in results]
@@ -221,6 +221,13 @@ class ToolManager:
         provider = get_relational_provider()
         if provider:
             await provider.hard_delete("tools", tool_id)
+            # Invalidate tool cache to prevent stale reads after deletion.
+            from mirix.database.cache_provider import get_cache_provider
+
+            cache_provider = get_cache_provider()
+            if cache_provider:
+                tool_cache_key = f"{cache_provider.TOOL_PREFIX}{tool_id}"
+                await cache_provider.delete(tool_cache_key)
             return
 
         async with self.session_maker() as session:

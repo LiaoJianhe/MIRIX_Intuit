@@ -192,7 +192,7 @@ class RawMemoryManager:
 
         # IPS provider delegation (create)
         if provider:
-            result = await provider.create("raw_memory", raw_memory_dict)
+            result = await provider.create("raw_memory", raw_memory_dict, actor=actor)
             return PydanticRawMemoryItem(**result)
 
         # Create the raw memory item (with conditional Redis caching)
@@ -229,7 +229,7 @@ class RawMemoryManager:
 
         provider = get_relational_provider()
         if provider:
-            result = await provider.read("raw_memory", memory_id)
+            result = await provider.read("raw_memory", memory_id, actor=actor)
             if result is None:
                 raise NoResultFound(f"Raw memory record with id {memory_id} not found.")
             pydantic_memory = PydanticRawMemoryItem(**result)
@@ -360,7 +360,14 @@ class RawMemoryManager:
 
         provider = get_relational_provider()
         if provider:
-            existing = await provider.read("raw_memory", memory_id)
+            # IPS branch: last-write-wins semantics. Unlike the PG branch (which
+            # uses SELECT FOR UPDATE to serialize concurrent append/merge updates
+            # on the same row), IPS Relational has no row-level lock primitive
+            # exposed here. Concurrent updates from two callers may race; the
+            # one that lands last in IPS overwrites the other. This is an
+            # intentional trade-off: most clients update distinct rows, and the
+            # IPS path optimises for throughput over write-serialisation.
+            existing = await provider.read("raw_memory", memory_id, actor=actor)
             if existing is None:
                 raise ValueError(f"Raw memory {memory_id} not found")
 
@@ -418,7 +425,17 @@ class RawMemoryManager:
             if actor:
                 existing["_last_updated_by_id"] = actor.id
 
-            updated = await provider.update("raw_memory", memory_id, existing)
+            updated = await provider.update(
+                "raw_memory", memory_id, existing, actor=actor
+            )
+            try:
+                from mirix.services.memory_manager_helpers import invalidate_memory_cache
+
+                await invalidate_memory_cache("raw_memory", [memory_id])
+            except Exception as exc:
+                logger.warning(
+                    "Cache invalidation skipped for raw_memory %s: %s", memory_id, exc
+                )
             return PydanticRawMemoryItem(**updated)
 
         async with self.session_maker() as session:
@@ -557,7 +574,7 @@ class RawMemoryManager:
 
         provider = get_relational_provider()
         if provider:
-            existing = await provider.read("raw_memory", memory_id)
+            existing = await provider.read("raw_memory", memory_id, actor=actor)
             if existing is None:
                 logger.warning("Raw memory not found for deletion: id=%s", memory_id)
                 return False
@@ -573,7 +590,15 @@ class RawMemoryManager:
                 logger.warning("Raw memory %s not found for deletion (user mismatch)", memory_id)
                 return False
 
-            await provider.delete("raw_memory", memory_id)
+            await provider.delete("raw_memory", memory_id, actor=actor)
+            try:
+                from mirix.services.memory_manager_helpers import invalidate_memory_cache
+
+                await invalidate_memory_cache("raw_memory", [memory_id])
+            except Exception as exc:
+                logger.warning(
+                    "Cache invalidation skipped for raw_memory %s: %s", memory_id, exc
+                )
             logger.info("Raw memory deleted: id=%s", memory_id)
             return True
 
@@ -708,7 +733,7 @@ class RawMemoryManager:
                 from mirix.services.hybrid_search_helper import hybrid_search
 
                 relational_provider = get_relational_provider()
-                results = await hybrid_search(
+                results, next_cursor = await hybrid_search(
                     table="raw_memory",
                     search_provider=search_provider,
                     relational_provider=relational_provider,
@@ -722,7 +747,7 @@ class RawMemoryManager:
                     time_range=time_range,
                     search_method="string_match",
                 )
-                return [PydanticRawMemoryItem(**r) for r in results], None
+                return [PydanticRawMemoryItem(**r) for r in results], next_cursor
 
         async with self.session_maker() as session:
             # Base query filtering by organization_id

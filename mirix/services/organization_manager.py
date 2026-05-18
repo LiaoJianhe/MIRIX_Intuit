@@ -194,7 +194,7 @@ class OrganizationManager:
             results = await provider.find_using_named_query(
                 "organizations",
                 "organization_manager.list_organizations",
-                params={"limit": limit},
+                params={"cursor": cursor},
                 page_size=limit or 50,
             )
             return [PydanticOrganization(**r) for r in results]

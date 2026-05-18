@@ -1224,6 +1224,7 @@ class AgentManager:
         query_text: Optional[str] = None,
         parent_id: Optional[str] = None,
         user: Optional[PydanticUser] = None,
+        sort_desc: bool = False,
         **kwargs,
     ) -> List[PydanticAgentState]:
         """
@@ -1233,6 +1234,9 @@ class AgentManager:
 
         When parent_id is provided, tries to use Redis cache via parent's children_ids first,
         then falls back to PostgreSQL if cache miss.
+
+        ``sort_desc`` selects descending vs ascending creation-time ordering for the IPS
+        Relational path (``agent_manager.list_agents_desc`` vs ``agent_manager.list_agents_asc``).
         """
         from mirix.database.relational_provider import get_relational_provider
 
@@ -1246,23 +1250,25 @@ class AgentManager:
                     "organizationId": actor.organization_id,
                     "createdById": actor.id,
                     "queryText": f"%{query_text}%",
-                    "limit": limit,
                 },
                 page_size=limit or 50,
                 include_relationships=["tools"],
             )
             return [PydanticAgentState(**r) for r in results]
 
-        # A-3: default IPS list path — choose ascending vs descending NQ
+        # A-3: default IPS list path — choose ascending vs descending NQ based on sort_desc
         if rel_provider and parent_id is None and not query_text and not kwargs:
-            query_name = "agent_manager.list_agents_asc"
+            query_name = (
+                "agent_manager.list_agents_desc"
+                if sort_desc
+                else "agent_manager.list_agents_asc"
+            )
             results = await rel_provider.find_using_named_query(
                 "agents",
                 query_name,
                 params={
                     "organizationId": actor.organization_id,
                     "createdById": actor.id,
-                    "limit": limit,
                     "name": None,
                     "parentId": None,
                 },
@@ -1271,14 +1277,17 @@ class AgentManager:
             )
             return [PydanticAgentState(**r) for r in results]
 
-        # A-11: parent_id wide list (named query lists up to 1000 by org, parent_id
+        # A-11: parent_id wide list (named query lists up to 1000 by org+client, parent_id
         # filtered in Python). PostgreSQL doesn't hold the data when
         # ENGINE_DB_STRATEGY=ips_relational.
         if rel_provider and parent_id is not None and not query_text and not kwargs:
             all_agents = await rel_provider.find_using_named_query(
                 "agents",
                 "agent_manager.list_agents_rel_provider",
-                params={"organizationId": actor.organization_id},
+                params={
+                    "organizationId": actor.organization_id,
+                    "createdById": actor.id,
+                },
                 page_size=1000,
                 include_relationships=["tools"],
             )
@@ -1445,6 +1454,10 @@ class AgentManager:
 
         rel_provider = get_relational_provider()
         if rel_provider:
+            # Use the named query (which filters by organizationId + ipsrentityowner) rather
+            # than provider.read(actor=actor) so we get include_relationships=["tools"] in
+            # a single round trip.  The actor param on provider.read would handle org/client
+            # isolation identically but does not support relationship expansion.
             rows = await rel_provider.find_using_named_query(
                 "agents",
                 "agent_manager.get_agent_by_id",
@@ -1459,12 +1472,8 @@ class AgentManager:
             if not rows:
                 raise NoResultFound(f"Agent {agent_id} not found")
             agent_state = PydanticAgentState(**rows[0])
-            # Skip the created_by_id security check for the IPS Relational path.
-            # ipsr_entity_owner is a server-managed field in IPS Relational — the platform
-            # sets it from the auth token (ECMS service identity) and ignores any client-
-            # supplied value. This means created_by_id from ipsr_entity_owner always
-            # reflects the ECMS service app ID, not the MIRIX client UUID. Isolation for
-            # the IPS path is provided at the organization level by IPS Relational itself.
+            # created_by_id security check is enforced at the query level (ipsrentityowner
+            # == :createdById in the YAML NQ), so no additional Python check is needed.
 
             try:
                 if cache_provider:
@@ -1622,7 +1631,10 @@ class AgentManager:
             rows = await rel_provider.find_using_named_query(
                 "agents",
                 "sqlalchemy_base.size_agents",
-                params={"organizationId": actor.organization_id},
+                params={
+                    "organizationId": actor.organization_id,
+                    "createdById": actor.id,
+                },
                 result_set_entity_class=CountResult,
                 page_size=1,
             )

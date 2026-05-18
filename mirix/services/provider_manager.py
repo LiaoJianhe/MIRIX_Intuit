@@ -120,7 +120,7 @@ class ProviderManager:
             results = await rp.find_using_named_query(
                 "providers",
                 "provider_manager.list_providers",
-                params={"organizationId": organization_id, "limit": limit},
+                params={"organizationId": organization_id},
                 page_size=limit or 50,
             )
             return [PydanticProvider(**r) for r in results]

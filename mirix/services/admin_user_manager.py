@@ -214,6 +214,64 @@ class ClientAuthManager:
 
         org_id = organization_id or OrganizationManager.DEFAULT_ORG_ID
 
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider is not None:
+            # Duplicate-email check via IPS NQ
+            existing = await provider.find_using_named_query(
+                "clients",
+                "admin_user_manager.get_client_by_email",
+                params={"email": email.lower()},
+                page_size=1,
+            )
+            if existing:
+                raise ValueError(f"Email '{email}' already exists")
+
+            password_hash = self.hash_password(password)
+            client_id = f"client-{uuid.uuid4().hex[:8]}"
+
+            client_data = {
+                "id": client_id,
+                "name": name,
+                "email": email.lower(),
+                "password_hash": password_hash,
+                "status": "active",
+                "write_scope": write_scope,
+                "read_scopes": read_scopes if read_scopes is not None else [write_scope],
+                "organization_id": org_id,
+            }
+            created_client = await provider.create("clients", client_data)
+            logger.info(
+                "Registered client for dashboard (IPS): %s (%s)",
+                name,
+                email.lower(),
+            )
+
+            # Create companion admin user
+            admin_user_id = f"user-{client_id.replace('client-', '')}"
+            try:
+                existing_user = await provider.read("users", admin_user_id)
+                if existing_user is None:
+                    await provider.create(
+                        "users",
+                        {
+                            "id": admin_user_id,
+                            "name": "Admin",
+                            "status": "active",
+                            "timezone": "UTC",
+                            "organization_id": org_id,
+                            "is_admin": True,
+                        },
+                    )
+                    logger.info("Created admin user for client (IPS): %s -> %s", client_id, admin_user_id)
+            except Exception as e:
+                logger.warning("Failed to create admin user for client %s: %s", client_id, e)
+
+            from mirix.schemas.client import Client as PydanticClient
+
+            return PydanticClient(**created_client)
+
         async with self.session_maker() as session:
             stmt = (
                 select(ClientModel)
@@ -374,6 +432,18 @@ class ClientAuthManager:
     @enforce_types
     async def get_client_by_id(self, client_id: str) -> Optional[PydanticClient]:
         """Get a client by ID."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider is not None:
+            rows = await provider.find_using_named_query(
+                "clients",
+                "client_manager.get_client_by_id",
+                params={"id": client_id},
+                page_size=1,
+            )
+            return PydanticClient(**rows[0]) if rows else None
+
         async with self.session_maker() as session:
             try:
                 client = await ClientModel.read(db_session=session, identifier=client_id)
@@ -423,7 +493,7 @@ class ClientAuthManager:
             rows = await provider.find_using_named_query(
                 "clients",
                 "admin_user_manager.list_dashboard_clients",
-                params={"limit": limit, "cursor": cursor},
+                params={"cursor": cursor},
                 page_size=limit or 50,
             )
             return [PydanticClient(**r) for r in rows]
@@ -529,6 +599,37 @@ class ClientAuthManager:
         Returns:
             True if successful, False otherwise
         """
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider is not None:
+            rows = await provider.find_using_named_query(
+                "clients",
+                "client_manager.get_client_by_id",
+                params={"id": client_id},
+                page_size=1,
+            )
+            if not rows:
+                return False
+            client_data = rows[0]
+            password_hash = client_data.get("password_hash")
+            if not password_hash:
+                logger.warning(
+                    "Password change failed: client has no password set: %s",
+                    client_id,
+                )
+                return False
+            if not self.verify_password(current_password, password_hash):
+                logger.warning(
+                    "Password change failed: incorrect current password for %s",
+                    client_id,
+                )
+                return False
+            new_hash = self.hash_password(new_password)
+            await provider.update("clients", client_id, {"password_hash": new_hash})
+            logger.info("Password changed for client: %s", client_data.get("name", client_id))
+            return True
+
         async with self.session_maker() as session:
             client = await ClientModel.read(db_session=session, identifier=client_id)
 

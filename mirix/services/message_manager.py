@@ -51,7 +51,7 @@ class MessageManager:
             rows = await rprovider.find_using_named_query(
                 "messages",
                 "message_manager.get_message_by_id",
-                params={"id": message_id},
+                params={"id": message_id, "organizationId": actor.organization_id},
                 page_size=1,
             )
             if not rows:
@@ -99,13 +99,17 @@ class MessageManager:
 
         rprovider = get_relational_provider()
         if rprovider is not None and message_ids:
+            # The server's parameter binding layer treats every named parameter
+            # as a single scalar varchar — list-valued bindings for `IN (:ids)`
+            # are rejected with a generic 400. The YAML therefore expects a
+            # comma-separated string and expands it server-side via
+            # `string_to_array(CAST(:ids AS varchar), ',')` + `= ANY(...)`.
             rows = await rprovider.find_using_named_query(
                 "messages",
                 "message_manager.get_messages_by_ids",
                 params={
-                    "ids": list(message_ids),
+                    "ids": ",".join(message_ids),
                     "organizationId": actor.organization_id,
-                    "limit": len(message_ids),
                 },
                 page_size=len(message_ids),
             )
@@ -287,6 +291,20 @@ class MessageManager:
         """
         from mirix.database.redis_client import get_redis_client
         from mirix.schemas.message import MessageRole
+
+        from mirix.database.relational_provider import get_relational_provider
+
+        rel_provider = get_relational_provider()
+        if rel_provider:
+            # IPS branch: use the soft-delete mutation NQ (mirrors PG soft-delete path)
+            await rel_provider.mutate_using_named_query(
+                "messages",
+                "message_manager.update_by_client_id",
+                params={"clientId": actor.id},
+            )
+            # Count is not reliable from IPS mutation NQs; return 0 as a sentinel.
+            # Callers that need an exact count should use the PG path.
+            return 0
 
         async with self.session_maker() as session:
             # Get IDs for non-system messages only (preserve system messages)
@@ -665,7 +683,7 @@ class MessageManager:
                     params={
                         "agentId": agent_id,
                         "queryText": f"%{query_text}%",
-                        "limit": limit,
+                        "organizationId": actor.organization_id if actor else None,
                     },
                     page_size=limit or 50,
                 )
@@ -682,7 +700,6 @@ class MessageManager:
                 query_name,
                 params={
                     "agentId": agent_id,
-                    "limit": limit,
                     "organizationId": actor.organization_id if actor else None,
                     "role": role_value,
                     "userId": (filters or {}).get("user_id"),
@@ -747,7 +764,6 @@ class MessageManager:
                     "agentId": agent_id,
                     "userId": user_id,
                     "organizationId": actor.organization_id,
-                    "limit": limit,
                 },
                 page_size=limit or 10,
             )

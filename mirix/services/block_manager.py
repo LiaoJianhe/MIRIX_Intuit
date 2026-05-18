@@ -58,7 +58,7 @@ class BlockManager:
 
         provider = get_relational_provider()
         if provider:
-            existing = await provider.read("block", block.id)
+            existing = await provider.read("block", block.id, actor=actor)
             if existing:
                 update_data = BlockUpdate(**block.model_dump(exclude_none=True))
                 return await self.update_block(block.id, update_data, actor, user=user)
@@ -70,7 +70,7 @@ class BlockManager:
             data["organization_id"] = actor.organization_id
             data["user_id"] = final_user_id
             data["filter_tags"] = filter_tags or None
-            result = await provider.create("block", data)
+            result = await provider.create("block", data, actor=actor)
             return PydanticBlock(**result)
 
         db_block = await self.get_block_by_id(block.id, user=None)
@@ -199,14 +199,15 @@ class BlockManager:
 
         provider = get_relational_provider()
         if provider:
-            existing = await provider.read("block", block_id)
+            existing = await provider.read("block", block_id, actor=actor)
             if existing is None:
                 raise NoResultFound(f"Block {block_id} not found")
             update_data = block_update.model_dump(exclude_unset=True, exclude_none=True)
             if user is not None:
                 update_data["user_id"] = user.id
             update_data["last_updated_by_id"] = actor.id
-            result = await provider.update("block", block_id, update_data)
+            result = await provider.update("block", block_id, update_data, actor=actor)
+            await self._invalidate_block_cache(block_id)
             return PydanticBlock(**result)
 
         async with self.session_maker() as session:
@@ -240,10 +241,13 @@ class BlockManager:
 
         provider = get_relational_provider()
         if provider:
-            existing = await provider.read("block", block_id)
+            existing = await provider.read("block", block_id, actor=actor)
             if existing is None:
                 raise NoResultFound(f"Block {block_id} not found")
-            await provider.update("block", block_id, {"filter_tags": new_filter_tags})
+            await provider.update(
+                "block", block_id, {"filter_tags": new_filter_tags}, actor=actor
+            )
+            await self._invalidate_block_cache(block_id)
             return
 
         async with self.session_maker() as session:
@@ -260,10 +264,10 @@ class BlockManager:
 
         provider = get_relational_provider()
         if provider:
-            existing = await provider.read("block", block_id)
+            existing = await provider.read("block", block_id, actor=actor)
             if existing is None:
                 raise NoResultFound(f"Block {block_id} not found")
-            await provider.delete("block", block_id)
+            await provider.delete("block", block_id, actor=actor)
             await self._invalidate_block_cache(block_id)
             return PydanticBlock(**existing)
 
@@ -357,7 +361,7 @@ class BlockManager:
                     from mirix.services.hybrid_search_helper import hybrid_search
 
                     relational_provider = get_relational_provider()
-                    results = await hybrid_search(
+                    results, _next_cursor = await hybrid_search(
                         table="block",
                         search_provider=search_provider,
                         relational_provider=relational_provider,
@@ -399,7 +403,7 @@ class BlockManager:
                 from mirix.services.hybrid_search_helper import hybrid_search
 
                 relational_provider = get_relational_provider()
-                results = await hybrid_search(
+                results, _next_cursor = await hybrid_search(
                     table="block",
                     search_provider=search_provider,
                     relational_provider=relational_provider,
@@ -420,22 +424,22 @@ class BlockManager:
                 and any_scopes
                 and len(any_scopes) == 1
             ):
-                async with self.session_maker() as session:
-                    scope = any_scopes[0]
-                    assert org_id is not None
-                    logger.debug(
-                        "No blocks found for user %s, scope %s. Creating from default user template.",
-                        user.id,
-                        scope,
-                    )
-                    blocks = await self._copy_blocks_from_default_user(
-                        session=session,
-                        target_user=user,
-                        scope=scope,
-                        organization_id=org_id,
-                        block_filter_tags=filter_tags_set_on_create,
-                    )
-                    return [b.to_pydantic() for b in blocks]
+                scope = any_scopes[0]
+                assert org_id is not None
+                logger.debug(
+                    "No blocks found for user %s, scope %s. Creating from default user template via IPS provider.",
+                    user.id,
+                    scope,
+                )
+                relational_provider = get_relational_provider()
+                return await self._copy_blocks_from_default_user_via_provider(
+                    target_user=user,
+                    scope=scope,
+                    organization_id=org_id,
+                    block_filter_tags=filter_tags_set_on_create,
+                    search_provider=search_provider,
+                    relational_provider=relational_provider,
+                )
             return pydantic_blocks
 
         async with self.session_maker() as session:
@@ -502,6 +506,135 @@ class BlockManager:
                 )
 
             return [block.to_pydantic() for block in blocks]
+
+    async def _copy_blocks_from_default_user_via_provider(
+        self,
+        target_user: PydanticUser,
+        scope: str,
+        organization_id: str,
+        block_filter_tags: Optional[Dict[str, Any]] = None,
+        *,
+        search_provider: Any,
+        relational_provider: Any,
+    ) -> List[PydanticBlock]:
+        """IPS-aware counterpart of :meth:`_copy_blocks_from_default_user`.
+
+        Finds template blocks for ``scope`` on the org default user via IPS
+        Search, then creates per-user copies through ``provider.create``.
+        Avoids the cross-backend write where the IPS branch previously fell
+        through to direct SQL.
+        """
+        from mirix.schemas.block import Block as PydanticBlock
+        from mirix.services.user_manager import UserManager
+
+        user_manager = UserManager()
+        try:
+            org_default_user = await user_manager.get_or_create_org_default_user(
+                org_id=organization_id
+            )
+            default_user_id = org_default_user.id
+        except Exception as exc:
+            logger.warning(
+                "Failed to get org default user, falling back to global admin: %s", exc
+            )
+            default_user_id = UserManager.ADMIN_USER_ID
+
+        # Find template blocks for this scope on the default user via IPS Search.
+        template_results, _next = await search_provider.search(
+            "block",
+            query_text="",
+            search_method="string_match",
+            search_field="",
+            user_id=default_user_id,
+            organization_id=organization_id,
+            filter_tags=None,
+            scopes=[scope],
+            limit=100,
+        )
+
+        if not template_results:
+            logger.warning(
+                "No template blocks found for scope %s via IPS Search. "
+                "Ensure create_meta_agent was called with a blocks config for this scope. "
+                "User %s will have no blocks.",
+                scope,
+                target_user.id,
+            )
+            return []
+
+        # De-duplicate templates by ``label`` to mirror the PG ORM contract,
+        # where ``seed_template_block_for_actor_scope_if_necessary`` enforces
+        # exactly one template per (user, scope, label).  IPS Search may return
+        # multiple historical rows for the same logical template when a
+        # previous run's cleanup deletes the IPS Relational row but the IPS
+        # Search index still has stale documents (eventual consistency lag).
+        # Without this de-dup, every new test user would copy N stale rows
+        # for the same label, which (a) creates N redundant blocks per label
+        # and (b) overwhelms the IPS Relational write path with a burst of
+        # CREATE + domain-event UPSERT calls, eventually marking the provider
+        # unhealthy ("IPS Relational is unavailable").  The PG path never
+        # exhibits this because deletes are synchronous against a single
+        # source of truth.  Keep the first template seen per label (search
+        # results are stable / the duplicates are byte-identical templates).
+        deduped_templates: List[Dict[str, Any]] = []
+        seen_labels: set[str] = set()
+        for tpl in template_results:
+            tpl_label = tpl.get("label")
+            if not tpl_label or tpl_label in seen_labels:
+                continue
+            seen_labels.add(tpl_label)
+            deduped_templates.append(tpl)
+        if len(deduped_templates) != len(template_results):
+            logger.info(
+                "Deduped %d stale template duplicates for scope=%s on default "
+                "user %s (kept %d unique label(s): %s)",
+                len(template_results) - len(deduped_templates),
+                scope,
+                default_user_id,
+                len(deduped_templates),
+                sorted(seen_labels),
+            )
+        template_results = deduped_templates
+
+        sanitized_bft = {
+            k: v for k, v in (block_filter_tags or {}).items() if k != "scope"
+        }
+        merged_tags = {**sanitized_bft, "scope": scope}
+
+        new_blocks: List[PydanticBlock] = []
+        for template in template_results:
+            try:
+                new_block_id = PydanticBlock._generate_id()
+                data = {
+                    "id": new_block_id,
+                    "label": template.get("label"),
+                    "value": template.get("value"),
+                    "limit": template.get("limit"),
+                    "user_id": target_user.id,
+                    "organization_id": organization_id,
+                    "filter_tags": merged_tags,
+                    "_created_by_id": target_user.id,
+                    "_last_updated_by_id": target_user.id,
+                }
+                result = await relational_provider.create("block", data)
+                new_blocks.append(PydanticBlock(**result))
+            except Exception as exc:
+                logger.error(
+                    "Failed to copy template block %s for user %s: %s",
+                    template.get("id"),
+                    target_user.id,
+                    exc,
+                    exc_info=True,
+                )
+                continue
+
+        logger.info(
+            "Created %d blocks for user %s from IPS template (scope=%s)",
+            len(new_blocks),
+            target_user.id,
+            scope,
+        )
+        return new_blocks
 
     async def _copy_blocks_from_default_user(
         self,
@@ -708,17 +841,12 @@ class BlockManager:
 
         provider = get_relational_provider()
         if provider:
-            records = await provider.list(
+            count = await provider.bulk_delete_with_events(
                 "block",
-                user_id=user_id,
-                filter_tags=None,
-                limit=5000,
+                filters={"user_id": user_id},
+                soft=True,
             )
-            ids = [r.get("id") for r in records if r.get("id")]
-            if not ids:
-                return 0
-            result = await provider.bulk_delete("block", ids, soft=True)
-            return int(result.get("success", 0) or 0)
+            return int(count)
 
         async with self.session_maker() as session:
             stmt = select(BlockModel).where(
@@ -771,17 +899,12 @@ class BlockManager:
 
         provider = get_relational_provider()
         if provider:
-            records = await provider.list(
+            count = await provider.bulk_delete_with_events(
                 "block",
-                user_id=user_id,
-                filter_tags=None,
-                limit=5000,
+                filters={"user_id": user_id},
+                soft=False,
             )
-            ids = [r.get("id") for r in records if r.get("id")]
-            if not ids:
-                return 0
-            result = await provider.bulk_delete("block", ids, soft=False)
-            return int(result.get("success", 0) or 0)
+            return int(count)
 
         async with self.session_maker() as session:
             stmt = select(BlockModel.id).where(BlockModel.user_id == user_id)

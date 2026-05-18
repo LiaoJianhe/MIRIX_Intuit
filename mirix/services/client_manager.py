@@ -194,10 +194,9 @@ class ClientManager:
             if not client_rows:
                 return None
             client_data = client_rows[0]
-            # YAML already enforces is_deleted = false; keep the status filter
-            # in Python (named query does not constrain status on clients).
-            if client_data.get("status") != "active":
-                return None
+            # client_manager.get_client_by_api_key YAML already enforces
+            # status = 'active' and is_deleted = false on the api_key row,
+            # so no additional Python status check is needed here.
             return PydanticClient(**client_data)
 
         async with self.session_maker() as session:
@@ -265,6 +264,13 @@ class ClientManager:
                 params={"id": api_key_id},
             )
             existing["status"] = "revoked"
+            # Invalidate the cached client so callers get fresh api_key status data.
+            from mirix.database.cache_provider import get_cache_provider
+
+            cache_provider = get_cache_provider()
+            client_id = existing.get("client_id")
+            if cache_provider and client_id:
+                await cache_provider.delete(f"{cache_provider.CLIENT_PREFIX}{client_id}")
             return PydanticClientApiKey(**existing)
 
         async with self.session_maker() as session:
@@ -280,7 +286,16 @@ class ClientManager:
 
         provider = get_relational_provider()
         if provider:
+            # Read before delete so we can extract client_id for cache invalidation.
+            existing = await provider.read("client_api_keys", api_key_id)
             await provider.hard_delete("client_api_keys", api_key_id)
+            # Invalidate cached client to reflect removal of the api key.
+            from mirix.database.cache_provider import get_cache_provider
+
+            cache_provider = get_cache_provider()
+            client_id = (existing or {}).get("client_id")
+            if cache_provider and client_id:
+                await cache_provider.delete(f"{cache_provider.CLIENT_PREFIX}{client_id}")
             return
 
         async with self.session_maker() as session:
@@ -881,7 +896,12 @@ class ClientManager:
 
         provider = get_relational_provider()
         if provider:
-            results = await provider.list("clients", limit=limit)
+            results = await provider.find_using_named_query(
+                "clients",
+                "client_manager.list_clients",
+                params={"cursor": cursor},
+                page_size=limit or 50,
+            )
             return [PydanticClient(**r) for r in results]
         async with self.session_maker() as session:
             results = await ClientModel.list(db_session=session, cursor=cursor, limit=limit)

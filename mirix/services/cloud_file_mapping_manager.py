@@ -155,6 +155,28 @@ class CloudFileMappingManager:
 
     async def check_if_existing(self, cloud_file_id=None, local_file_id=None) -> bool:
         """Check if the file_ids exist in the database."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider is not None:
+            if cloud_file_id is not None:
+                rows = await provider.find_using_named_query(
+                    "cloud_file_mapping",
+                    "cloud_file_mapping_manager.list_by_cloud_id",
+                    params={"cloudFileId": cloud_file_id},
+                    page_size=1,
+                )
+                return bool(rows)
+            elif local_file_id is not None:
+                rows = await provider.find_using_named_query(
+                    "cloud_file_mapping",
+                    "cloud_file_mapping_manager.list_by_local_id",
+                    params={"localFileId": local_file_id},
+                    page_size=1,
+                )
+                return bool(rows)
+            return False
+
         async with self.session_maker() as session:
             if cloud_file_id is not None:
                 try:
@@ -172,6 +194,43 @@ class CloudFileMappingManager:
 
     async def set_processed(self, cloud_file_id=None, local_file_id=None) -> PydanticCloudFileMapping:
         """Set status to processed."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider is not None:
+            # Step 1: resolve the IPS entity ID via a lookup NQ
+            rows = None
+            if cloud_file_id is not None:
+                rows = await provider.find_using_named_query(
+                    "cloud_file_mapping",
+                    "cloud_file_mapping_manager.list_by_cloud_id",
+                    params={"cloudFileId": cloud_file_id},
+                    page_size=1,
+                )
+            elif local_file_id is not None:
+                rows = await provider.find_using_named_query(
+                    "cloud_file_mapping",
+                    "cloud_file_mapping_manager.list_by_local_id",
+                    params={"localFileId": local_file_id},
+                    page_size=1,
+                )
+            if not rows:
+                raise ValueError("File Not Found")
+            mapping_id = rows[0].get("id")
+            if not mapping_id:
+                raise ValueError("File Not Found")
+            # Step 2: apply the status mutation
+            await provider.mutate_using_named_query(
+                "cloud_file_mapping",
+                "cloud_file_mapping_manager.set_status_by_id",
+                params={"id": mapping_id, "status": "processed"},
+            )
+            # Step 3: re-read and return the updated row
+            updated = await provider.read("cloud_file_mapping", mapping_id)
+            if updated is None:
+                raise ValueError("File Not Found after update")
+            return PydanticCloudFileMapping(**updated)
+
         async with self.session_maker() as session:
             mapping = None
             if cloud_file_id is not None:
@@ -234,6 +293,17 @@ class CloudFileMappingManager:
 
     async def list_all_local_file_ids(self):
         """List all local file IDs."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider is not None:
+            rows = await provider.find_using_named_query(
+                "cloud_file_mapping",
+                "cloud_file_mapping_manager.list_all_local_file_ids",
+                page_size=5000,
+            )
+            return [r.get("local_file_id") for r in rows if r.get("local_file_id")]
+
         async with self.session_maker() as session:
             result = await session.execute(select(CloudFileMapping))
             rows = result.scalars().all()

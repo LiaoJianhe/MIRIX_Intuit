@@ -69,7 +69,7 @@ class FileManager:
             results = await provider.find_using_named_query(
                 "files",
                 "file_manager.list_file_metadata_by_org",
-                params={"organizationId": organization_id, "limit": limit},
+                params={"organizationId": organization_id, "cursor": cursor},
                 page_size=limit or 50,
             )
             return [PydanticFileMetadata(**r) for r in results]
@@ -124,6 +124,7 @@ class FileManager:
             results = await provider.find_using_named_query(
                 "files",
                 "file_manager.list_all_file_metadata",
+                params={"cursor": cursor},
                 page_size=limit or 50,
             )
             return [PydanticFileMetadata(**r) for r in results]

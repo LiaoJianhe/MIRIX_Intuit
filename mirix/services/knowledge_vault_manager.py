@@ -316,14 +316,14 @@ class KnowledgeVaultManager:
                     # Remove the rank_score field before creating the object
                     data.pop("rank_score", None)
 
-                # Parse JSON fields that are returned as strings from raw SQL
-                json_fields = ["last_modify", "embedding_config"]
-                for field in json_fields:
-                    if field in data and isinstance(data[field], str):
-                        try:
-                            data[field] = json.loads(data[field])
-                        except (json.JSONDecodeError, TypeError):
-                            pass
+                    # Parse JSON fields that are returned as strings from raw SQL
+                    json_fields = ["last_modify", "embedding_config"]
+                    for field in json_fields:
+                        if field in data and isinstance(data[field], str):
+                            try:
+                                data[field] = json.loads(data[field])
+                            except (json.JSONDecodeError, TypeError):
+                                pass
 
                     # Parse embedding fields
                     embedding_fields = ["caption_embedding"]
@@ -423,7 +423,10 @@ class KnowledgeVaultManager:
 
         provider = get_relational_provider()
         if provider:
-            result = await provider.read("knowledge_vault", knowledge_vault_item_id)
+            from mirix.services.memory_manager_helpers import actor_from_user
+
+            actor = actor_from_user(user)
+            result = await provider.read("knowledge_vault", knowledge_vault_item_id, actor=actor)
             if result is None:
                 raise NoResultFound(f"Knowledge vault item with id {knowledge_vault_item_id} not found.")
             return PydanticKnowledgeVaultItem(**result)
@@ -481,6 +484,22 @@ class KnowledgeVaultManager:
         Filter by user_id from actor.
         Returns None if no items exist.
         """
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            from mirix.services.memory_manager_helpers import (
+                find_most_recently_updated,
+            )
+
+            row = await find_most_recently_updated(
+                provider,
+                "knowledge_vault",
+                user_id=user.id,
+                organization_id=user.organization_id,
+            )
+            return PydanticKnowledgeVaultItem(**row) if row else None
+
         async with self.session_maker() as session:
             # Use proper PostgreSQL JSON text extraction and casting for ordering
             from sqlalchemy import DateTime, cast, text
@@ -495,7 +514,7 @@ class KnowledgeVaultManager:
             result = await session.execute(query.limit(1))
             item = result.scalar_one_or_none()
 
-            return [item.to_pydantic()] if item else None
+            return item.to_pydantic() if item else None
 
     @enforce_types
     async def create_item(
@@ -527,7 +546,7 @@ class KnowledgeVaultManager:
             item_data["client_id"] = client_id
             item_data["user_id"] = user_id
             item_data.setdefault("organization_id", actor.organization_id)
-            result = await provider.create("knowledge_vault", item_data)
+            result = await provider.create("knowledge_vault", item_data, actor=actor)
             return PydanticKnowledgeVaultItem(**result)
 
         # Ensure ID is set before model_dump
@@ -562,10 +581,20 @@ class KnowledgeVaultManager:
     async def create_many_items(
         self,
         knowledge_vault: List[PydanticKnowledgeVaultItem],
-        user: PydanticUser,
+        actor: PydanticClient,
+        client_id: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> List[PydanticKnowledgeVaultItem]:
-        """Create multiple knowledge vault items."""
-        return [await self.create_item(k, user) for k in knowledge_vault]
+        """Create multiple knowledge vault items.
+
+        Signature mirrors :meth:`create_item`. Previously this passed a user
+        object as the second positional arg to ``create_item(k, user)`` which
+        broke at runtime (``create_item`` expects an actor).
+        """
+        return [
+            await self.create_item(k, actor, client_id=client_id, user_id=user_id)
+            for k in knowledge_vault
+        ]
 
     @enforce_types
     async def insert_knowledge(
@@ -620,7 +649,7 @@ class KnowledgeVaultManager:
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "operation": "created",
                 }
-                result = await provider.create("knowledge_vault", data_dict)
+                result = await provider.create("knowledge_vault", data_dict, actor=actor)
                 return PydanticKnowledgeVaultItem(**result)
 
             # Conditionally calculate embeddings based on BUILD_EMBEDDINGS_FOR_MEMORY flag
@@ -684,7 +713,11 @@ class KnowledgeVaultManager:
             )
 
         async with self.session_maker() as session:
-            query = select(func.count(KnowledgeVaultItem.id)).where(KnowledgeVaultItem.user_id == user.id)
+            query = select(func.count(KnowledgeVaultItem.id)).where(
+                KnowledgeVaultItem.user_id == user.id,
+                KnowledgeVaultItem.organization_id == user.organization_id,
+                KnowledgeVaultItem.is_deleted == False,
+            )
             result = await session.execute(query)
             return result.scalar_one()
 
@@ -770,7 +803,7 @@ class KnowledgeVaultManager:
             from mirix.services.hybrid_search_helper import hybrid_search
 
             relational_provider = get_relational_provider()
-            results = await hybrid_search(
+            results, _next_cursor = await hybrid_search(
                 table="knowledge_vault",
                 search_provider=search_provider,
                 relational_provider=relational_provider,
@@ -1079,7 +1112,17 @@ class KnowledgeVaultManager:
 
         provider = get_relational_provider()
         if provider:
-            await provider.delete("knowledge_vault", knowledge_vault_item_id)
+            await provider.delete("knowledge_vault", knowledge_vault_item_id, actor=actor)
+            try:
+                from mirix.services.memory_manager_helpers import invalidate_memory_cache
+
+                await invalidate_memory_cache("knowledge_vault", [knowledge_vault_item_id])
+            except Exception as exc:
+                logger.warning(
+                    "Cache invalidation skipped for knowledge_vault %s: %s",
+                    knowledge_vault_item_id,
+                    exc,
+                )
             return
 
         async with self.session_maker() as session:
@@ -1115,16 +1158,12 @@ class KnowledgeVaultManager:
 
         provider = get_relational_provider()
         if provider:
-            records = await provider.list(
+            result = await provider.bulk_delete_with_events(
                 "knowledge_vault",
-                filter_tags=None,
-                limit=5000,
-                _created_by_id=actor.id,
+                filters={"_created_by_id": actor.id},
+                soft=False,
+                actor=actor,
             )
-            ids = [r.get("id") for r in records if r.get("id")]
-            if not ids:
-                return 0
-            result = await provider.bulk_delete("knowledge_vault", ids, soft=False)
             return int(result.get("success", 0) or 0)
 
         async with self.session_maker() as session:
@@ -1171,16 +1210,12 @@ class KnowledgeVaultManager:
 
         provider = get_relational_provider()
         if provider:
-            records = await provider.list(
+            result = await provider.bulk_delete_with_events(
                 "knowledge_vault",
-                filter_tags=None,
-                limit=5000,
-                _created_by_id=actor.id,
+                filters={"_created_by_id": actor.id},
+                soft=True,
+                actor=actor,
             )
-            ids = [r.get("id") for r in records if r.get("id")]
-            if not ids:
-                return 0
-            result = await provider.bulk_delete("knowledge_vault", ids, soft=True)
             return int(result.get("success", 0) or 0)
 
         async with self.session_maker() as session:
@@ -1233,16 +1268,11 @@ class KnowledgeVaultManager:
 
         provider = get_relational_provider()
         if provider:
-            records = await provider.list(
+            result = await provider.bulk_delete_with_events(
                 "knowledge_vault",
-                user_id=user_id,
-                filter_tags=None,
-                limit=5000,
+                filters={"user_id": user_id},
+                soft=True,
             )
-            ids = [r.get("id") for r in records if r.get("id")]
-            if not ids:
-                return 0
-            result = await provider.bulk_delete("knowledge_vault", ids, soft=True)
             return int(result.get("success", 0) or 0)
 
         async with self.session_maker() as session:
@@ -1296,16 +1326,11 @@ class KnowledgeVaultManager:
 
         provider = get_relational_provider()
         if provider:
-            records = await provider.list(
+            result = await provider.bulk_delete_with_events(
                 "knowledge_vault",
-                user_id=user_id,
-                filter_tags=None,
-                limit=5000,
+                filters={"user_id": user_id},
+                soft=False,
             )
-            ids = [r.get("id") for r in records if r.get("id")]
-            if not ids:
-                return 0
-            result = await provider.bulk_delete("knowledge_vault", ids, soft=False)
             return int(result.get("success", 0) or 0)
 
         async with self.session_maker() as session:
@@ -1380,7 +1405,7 @@ class KnowledgeVaultManager:
             from mirix.services.hybrid_search_helper import hybrid_search
 
             relational_provider = get_relational_provider()
-            results = await hybrid_search(
+            results, _next_cursor = await hybrid_search(
                 table="knowledge_vault",
                 search_provider=search_provider,
                 relational_provider=relational_provider,

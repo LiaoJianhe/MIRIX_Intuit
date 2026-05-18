@@ -303,6 +303,45 @@ class UserManager:
             except Exception as e:
                 logger.warning("Failed to update cache for user %s: %s", user_id, e)
 
+    async def _invalidate_agent_cache_for_user(self, user_id: str) -> None:
+        """Scan and delete all Redis agent-cache entries.
+
+        Called after bulk-deleting a user's memories so stale agent state
+        (which may embed message/memory references) is evicted.  This mirrors
+        the equivalent loop in the PG branch of ``delete_memories_by_user_id``.
+        """
+        from mirix.log import get_logger
+
+        logger = get_logger(__name__)
+        try:
+            from mirix.database.redis_client import get_redis_client
+
+            redis_client = get_redis_client()
+            if redis_client:
+                scan_cursor = 0
+                invalidated = 0
+                while True:
+                    scan_cursor, keys = await redis_client.client.scan(
+                        cursor=scan_cursor,
+                        match=f"{redis_client.AGENT_PREFIX}*",
+                        count=100,
+                    )
+                    if keys:
+                        await redis_client.client.delete(*keys)
+                        invalidated += len(keys)
+                    if scan_cursor == 0:
+                        break
+                if invalidated:
+                    logger.debug(
+                        "Invalidated %d agent caches after deleting memories for user %s",
+                        invalidated,
+                        user_id,
+                    )
+        except Exception as e:
+            logger.warning(
+                "Failed to invalidate agent cache for user %s: %s", user_id, e
+            )
+
     async def delete_memories_by_user_id(self, user_id: str):
         """
         Hard delete memories, messages, and blocks for a user using memory managers' bulk delete.
@@ -364,6 +403,9 @@ class UserManager:
                 user_id,
                 total_deleted,
             )
+            # Invalidate agent caches that might reference deleted messages/memories
+            # for this user — mirrors the equivalent cleanup in the PG branch.
+            await self._invalidate_agent_cache_for_user(user_id)
             return
 
         # Import managers
@@ -411,25 +453,8 @@ class UserManager:
             # Messages for this user are already deleted by delete_by_user_id above.
             # No message_ids maintenance needed (column removed).
 
-            # Invalidate agent caches that might reference deleted messages for this user
-            from mirix.database.redis_client import get_redis_client
-
-            redis_client = get_redis_client()
-            if redis_client:
-                # Use SCAN to find all agent keys and delete them
-                cursor = 0
-                invalidated_count = 0
-                while True:
-                    cursor, keys = await redis_client.client.scan(
-                        cursor=cursor, match=f"{redis_client.AGENT_PREFIX}*", count=100
-                    )
-                    if keys:
-                        await redis_client.client.delete(*keys)
-                        invalidated_count += len(keys)
-                    if cursor == 0:
-                        break
-                if invalidated_count > 0:
-                    logger.debug("Invalidated %d agent caches due to user deletion", invalidated_count)
+            # Invalidate agent caches that might reference deleted messages for this user.
+            await self._invalidate_agent_cache_for_user(user_id)
 
             logger.info(
                 "Bulk deleted all memories for user %s: "
@@ -652,10 +677,11 @@ class UserManager:
 
         provider = get_relational_provider()
         if provider:
-            results = await provider.list(
+            results = await provider.find_using_named_query(
                 "users",
-                organization_id=organization_id,
-                limit=limit,
+                "user_manager.list_users",
+                params={"cursor": cursor},
+                page_size=limit or 50,
             )
             return [PydanticUser(**r) for r in results]
 

@@ -39,7 +39,7 @@ class TestHybridSearch:
             return_value=[{"id": "r1", "updated_at": "2025-06-01T00:00:00+00:00"}]
         )
 
-        merged = await hybrid_search(
+        merged, next_cursor = await hybrid_search(
             "episodic_memory",
             search,
             relational,
@@ -48,6 +48,7 @@ class TestHybridSearch:
         )
 
         assert {r["id"] for r in merged} == {"s1", "r1"}
+        assert next_cursor is None
         search.search.assert_awaited_once()
         relational.list.assert_awaited_once()
         call_kw = relational.list.await_args
@@ -73,7 +74,9 @@ class TestHybridSearch:
             ]
         )
 
-        merged = await hybrid_search("raw_memory", search, relational, limit=10)
+        merged, _next_cursor = await hybrid_search(
+            "raw_memory", search, relational, limit=10
+        )
 
         assert len(merged) == 1
         assert merged[0]["src"] == "relational"
@@ -93,7 +96,9 @@ class TestHybridSearch:
             ]
         )
 
-        merged = await hybrid_search("raw_memory", search, relational, limit=10)
+        merged, _next_cursor = await hybrid_search(
+            "raw_memory", search, relational, limit=10
+        )
 
         assert len(merged) == 1
         assert merged[0]["src"] == "search"
@@ -113,7 +118,9 @@ class TestHybridSearch:
         relational = AsyncMock()
         relational.list = AsyncMock(return_value=[])
 
-        merged = await hybrid_search("semantic_memory", search, relational, limit=2)
+        merged, _next_cursor = await hybrid_search(
+            "semantic_memory", search, relational, limit=2
+        )
         assert len(merged) == 2
 
     async def test_search_raises_propagates(self):
@@ -135,6 +142,29 @@ class TestHybridSearch:
 
         with pytest.raises(RuntimeError, match="relational down"):
             await hybrid_search("episodic_memory", search, relational)
+
+    async def test_next_cursor_propagates_from_search_provider(self):
+        """The cursor returned by search_provider.search() is propagated to the caller."""
+        search = AsyncMock()
+        search.search = AsyncMock(
+            return_value=(
+                [{"id": "s1", "updated_at": "2024-01-01T00:00:00+00:00"}],
+                "opaque-cursor-token",
+            )
+        )
+        relational = AsyncMock()
+        relational.list = AsyncMock(return_value=[])
+
+        merged, next_cursor = await hybrid_search(
+            "episodic_memory",
+            search,
+            relational,
+            user_id="u1",
+            limit=10,
+        )
+
+        assert next_cursor == "opaque-cursor-token"
+        assert len(merged) == 1
 
 
 @pytest.mark.asyncio
