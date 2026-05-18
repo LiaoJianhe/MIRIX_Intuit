@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, String, Text, text
+from sqlalchemy import JSON, Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from mirix.orm.mixins import OrganizationMixin, UserMixin
@@ -88,7 +88,29 @@ class MemorySource(SqlalchemyBase, OrganizationMixin, UserMixin):
         nullable=False,
         default=False,
         server_default=text("FALSE"),
-        doc="Whether all agents have finished processing this source",
+        doc="Whether all agents have finished processing this source (legacy; superseded by status)",
+    )
+
+    status: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        default="pending",
+        server_default=text("'pending'"),
+        doc="Processing state: pending | processing | completed | failed",
+    )
+
+    error_message: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+        doc="Error detail when status='failed' (provider-mapped exception class + message)",
+    )
+
+    delivery_attempts: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+        doc="Number of times this source has been delivered to a worker",
     )
 
     batch_hash: Mapped[Optional[str]] = mapped_column(
@@ -108,6 +130,11 @@ class MemorySource(SqlalchemyBase, OrganizationMixin, UserMixin):
         filter(
             None,
             [
+                # status must be one of the four allowed states
+                CheckConstraint(
+                    "status IN ('pending', 'processing', 'completed', 'failed')",
+                    name="ck_memory_sources_status",
+                ),
                 # Partial unique index: external_id dedup (PostgreSQL only)
                 (
                     Index(

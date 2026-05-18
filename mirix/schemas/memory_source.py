@@ -39,7 +39,15 @@ class MemorySource(MemorySourceBase):
     occurred_at: Optional[datetime] = Field(None, description="When the source event happened")
     summary: Optional[str] = Field(None, description="Client-provided or generated summary")
     summary_source: Optional[str] = Field(None, description="How the summary was produced: client or generated")
-    processing_complete: bool = Field(False, description="Whether all agents have finished processing")
+    processing_complete: bool = Field(
+        False, description="Whether all agents have finished processing (legacy; superseded by status)"
+    )
+    status: str = Field(
+        "pending",
+        description="Processing state: pending | processing | completed | failed",
+    )
+    error_message: Optional[str] = Field(None, description="Error detail when status='failed'")
+    delivery_attempts: int = Field(0, description="Number of times this source has been delivered to a worker")
     batch_hash: Optional[str] = Field(None, description="SHA-256 fallback dedup hash")
     filter_tags: Optional[Dict[str, Any]] = Field(
         None, description="Custom filter tags for filtering and categorization (includes scope for access control)"
@@ -55,3 +63,6 @@ class MemorySourceUpdate(MemorySourceBase):
     summary: Optional[str] = Field(None, description="Summary text")
     summary_source: Optional[str] = Field(None, description="How the summary was produced")
     processing_complete: Optional[bool] = Field(None, description="Whether processing is complete")
+    status: Optional[str] = Field(None, description="Processing state: pending | processing | completed | failed")
+    error_message: Optional[str] = Field(None, description="Error detail when status='failed'")
+    delivery_attempts: Optional[int] = Field(None, description="Delivery attempt counter")
