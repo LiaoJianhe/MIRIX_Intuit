@@ -756,8 +756,9 @@ class Agent(BaseAgent):
             except Exception as exc:
                 bucket = classify(exc)
                 if bucket is Bucket.PERMANENT:
-                    # Don't retry, don't sleep — propagate to the policy wrapper
-                    # which writes status='failed' on the memory_sources row.
+                    # Permanent errors are not retryable. Propagate to the caller
+                    # immediately so the outer policy wrapper can classify and
+                    # decide whether to ack or surface the failure.
                     log_telemetry(self.logger, "_get_ai_reply permanent")
                     self.logger.info(
                         "[Mirix.Agent.%s] _get_ai_reply: permanent error (%s) — propagating immediately",
