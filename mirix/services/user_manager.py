@@ -185,25 +185,37 @@ class UserManager:
 
         provider = get_relational_provider()
         if provider:
+            # raw_memory is included here; messages is handled separately below
+            # via mutate_using_named_query (messages is an engine table, not IEDM).
             memory_tables = [
                 "episodic_memory",
                 "semantic_memory",
                 "procedural_memory",
                 "resource_memory",
                 "knowledge_vault",
-                "messages",
+                "raw_memory",
                 "block",
             ]
             soft_deleted = 0
             for table in memory_tables:
-                records = await provider.list(
-                    table, user_id=user_id, filter_tags=None, limit=5000
+                rows = await provider.find_using_named_query(
+                    table,
+                    f"user_manager.list_ids_{table}_by_user",
+                    params={"userId": user_id},
+                    page_size=5000,
                 )
-                ids = [r.get("id") for r in records if r.get("id")]
+                ids = [r.get("id") for r in rows if r.get("id")]
                 if not ids:
                     continue
                 result = await provider.bulk_delete(table, ids, soft=True)
                 soft_deleted += int(result.get("success", 0) or 0)
+
+            # Soft delete messages for this user (engine table — no domain events needed).
+            await provider.mutate_using_named_query(
+                "messages",
+                "message_manager.update_by_user_id",
+                params={"userId": user_id},
+            )
 
             # Soft delete user record through provider path.
             await provider.delete("users", user_id, soft=True)
@@ -376,27 +388,39 @@ class UserManager:
 
         provider = get_relational_provider()
         if provider:
+            # raw_memory is included here; messages is handled separately below
+            # via mutate_using_named_query (messages is an engine table, not IEDM).
             memory_tables = [
                 "episodic_memory",
                 "semantic_memory",
                 "procedural_memory",
                 "resource_memory",
                 "knowledge_vault",
-                "messages",
+                "raw_memory",
                 "block",
             ]
             total_deleted = 0
             for table in memory_tables:
-                records = await provider.list(
-                    table, user_id=user_id, filter_tags=None, limit=5000
+                rows = await provider.find_using_named_query(
+                    table,
+                    f"user_manager.list_ids_{table}_by_user",
+                    params={"userId": user_id},
+                    page_size=5000,
                 )
-                ids = [r.get("id") for r in records if r.get("id")]
+                ids = [r.get("id") for r in rows if r.get("id")]
                 if not ids:
                     continue
                 result = await provider.bulk_delete(table, ids, soft=False)
                 deleted = int(result.get("success", 0) or 0)
                 total_deleted += deleted
                 logger.debug("Bulk deleted %d %s records via provider", deleted, table)
+
+            # Hard delete messages for this user (engine table — no domain events needed).
+            await provider.mutate_using_named_query(
+                "messages",
+                "message_manager.update_by_user_id",
+                params={"userId": user_id},
+            )
 
             logger.info(
                 "Bulk deleted memories for user %s via provider path (%d records)",

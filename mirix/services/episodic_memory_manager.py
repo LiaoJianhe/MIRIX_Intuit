@@ -746,14 +746,15 @@ class EpisodicMemoryManager:
 
         provider = get_relational_provider()
         if provider:
-            records = await provider.list(
+            records = await provider.find_using_named_query(
                 "episodic_memory",
-                user_id=user.id,
-                time_range={
-                    "occurred_at__gte": start_time.isoformat() if start_time else None,
-                    "occurred_at__lte": end_time.isoformat() if end_time else None,
+                "episodic_memory_manager.list_by_occurred_at_range",
+                params={
+                    "userId": user.id,
+                    "since": start_time.isoformat() if start_time else None,
+                    "until": end_time.isoformat() if end_time else None,
                 },
-                limit=1000,
+                page_size=1000,
             )
             return [PydanticEpisodicEvent(**r) for r in records]
 

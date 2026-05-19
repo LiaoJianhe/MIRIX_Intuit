@@ -415,26 +415,35 @@ class ClientManager:
 
         provider = get_relational_provider()
         if provider:
-            # Soft delete memory records owned by the client.
+            # Soft delete memory records owned by the client via named queries.
+            # raw_memory is included here; messages is handled separately below
+            # via mutate_using_named_query (messages is an engine table, not IEDM).
             memory_tables = [
                 "episodic_memory",
                 "semantic_memory",
                 "procedural_memory",
                 "resource_memory",
                 "knowledge_vault",
-                "messages",
+                "raw_memory",
                 "block",
             ]
             for table in memory_tables:
-                records = await provider.list(
+                rows = await provider.find_using_named_query(
                     table,
-                    filter_tags=None,
-                    limit=5000,
-                    _created_by_id=client_id,
+                    f"client_manager.list_ids_{table}_by_client",
+                    params={"createdById": client_id},
+                    page_size=5000,
                 )
-                ids = [r.get("id") for r in records if r.get("id")]
+                ids = [r.get("id") for r in rows if r.get("id")]
                 if ids:
                     await provider.bulk_delete(table, ids, soft=True)
+
+            # Soft delete messages owned by this client (engine table — no domain events needed).
+            await provider.mutate_using_named_query(
+                "messages",
+                "message_manager.update_by_client_id",
+                params={"clientId": client_id},
+            )
 
             # Soft delete agents/tools created by this client (A-9/T-8 collect + A-10 bulk mutate).
             for table, list_nq, mutate_nq in (
@@ -627,18 +636,22 @@ class ClientManager:
             logger.info(
                 "Bulk deleting memories via IPS Relational for client %s", client_id
             )
+            # raw_memory is included here; messages is handled separately below
+            # via mutate_using_named_query (messages is an engine table, not IEDM).
             memory_tables = [
                 "episodic_memory", "semantic_memory", "procedural_memory",
-                "resource_memory", "knowledge_vault", "block", "messages",
+                "resource_memory", "knowledge_vault", "raw_memory", "block",
             ]
             total = 0
             for table in memory_tables:
-                records = await provider.list(
-                    table, filter_tags=None, limit=5000,
-                    _created_by_id=client_id,
+                rows = await provider.find_using_named_query(
+                    table,
+                    f"client_manager.list_ids_{table}_by_client",
+                    params={"createdById": client_id},
+                    page_size=5000,
                 )
-                if records:
-                    ids = [r.get("id", "") for r in records if r.get("id")]
+                if rows:
+                    ids = [r.get("id", "") for r in rows if r.get("id")]
                     if ids:
                         result = await provider.bulk_delete(
                             table, ids, soft=False
@@ -646,6 +659,13 @@ class ClientManager:
                         deleted = int(result.get("success", 0) or 0)
                         total += deleted
                         logger.debug("Bulk deleted %d %s records", deleted, table)
+
+            # Hard delete messages owned by this client (engine table — no domain events needed).
+            await provider.mutate_using_named_query(
+                "messages",
+                "message_manager.update_by_client_id",
+                params={"clientId": client_id},
+            )
 
             logger.info("IPS bulk delete complete for client %s: %d total records", client_id, total)
             return

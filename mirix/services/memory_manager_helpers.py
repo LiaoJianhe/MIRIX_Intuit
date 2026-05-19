@@ -11,9 +11,11 @@ knowledge_vault):
   IDs in a memory table, swallowing cache errors with a warning so a Redis
   outage never blocks the underlying provider write.
 - :func:`find_most_recently_updated`: provider-agnostic helper that returns
-  the most-recently-updated row for a memory table given a set of filters,
-  using the existing ``provider.list(..., sort="updated_at", limit=1)``
-  contract.
+  the most-recently-updated row for a memory table given a set of filters.
+  For tables with a registered named query (semantic_memory, knowledge_vault),
+  uses ``find_using_named_query`` with ``ORDER BY COALESCE(ipsrupdatedon,
+  ipsrcreatedon) DESC`` and ``page_size=1``. Falls back to
+  ``provider.list(..., sort="updated_at", limit=1)`` for other tables.
 - :func:`actor_from_user`: build a duck-typed actor object from a
   ``PydanticUser`` so memory-manager call sites that have only a user
   (no client) can still feed the actor-aware provider methods.
@@ -96,6 +98,15 @@ async def invalidate_memory_cache(table: str, ids: Iterable[str]) -> None:
             )
 
 
+# Tables with a dedicated named query that returns the single most-recently-updated
+# row ordered by COALESCE(ipsrupdatedon, ipsrcreatedon) DESC. Only applicable when
+# user_id and organization_id are both provided (the common call pattern).
+_MOST_RECENTLY_UPDATED_QUERIES: Dict[str, str] = {
+    "semantic_memory": "memory_manager_helpers.get_most_recently_updated_semantic_memory",
+    "knowledge_vault": "memory_manager_helpers.get_most_recently_updated_knowledge_vault",
+}
+
+
 async def find_most_recently_updated(
     provider: Any,
     table: str,
@@ -107,13 +118,27 @@ async def find_most_recently_updated(
 ) -> Optional[Dict[str, Any]]:
     """Return the most-recently-updated row for ``table`` matching the filters.
 
-    Uses ``provider.list(... sort="updated_at", limit=1)``; falls back to the
-    most-recently-created row when no row has an ``updated_at`` (the provider's
-    ``time_range_or_null_updated`` ORDER BY already covers this case via its
-    cursor pagination, but we keep an explicit second call for safety).
+    For tables registered in ``_MOST_RECENTLY_UPDATED_QUERIES`` (semantic_memory,
+    knowledge_vault), uses a named query with server-side ordering so a single
+    round-trip returns the correct row. Only active when ``user_id`` and
+    ``organization_id`` are both provided; falls back to the ``provider.list``
+    path otherwise.
+
+    For other tables, uses ``provider.list(... sort="updated_at", limit=1)``
+    and falls back to ``sort="created_at"`` when no row has an ``updated_at``.
 
     Returns ``None`` when no matching row exists.
     """
+    query_name = _MOST_RECENTLY_UPDATED_QUERIES.get(table)
+    if query_name and user_id is not None and organization_id is not None and client_id is None and not extra_filters:
+        rows = await provider.find_using_named_query(
+            table,
+            query_name,
+            params={"userId": user_id, "organizationId": organization_id},
+            page_size=1,
+        )
+        return rows[0] if rows else None
+
     filter_kwargs: Dict[str, Any] = {}
     if user_id is not None:
         filter_kwargs["user_id"] = user_id
