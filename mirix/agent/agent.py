@@ -639,18 +639,16 @@ class Agent(BaseAgent):
         existing_file_uris: Optional[List[str]] = None,
         llm_client: Optional[LLMClient] = None,
     ) -> ChatCompletionResponse:
-        """Call the LLM once, with a tight bounded retry for Transient errors only.
+        """Call the LLM once, with a bounded retry for Transient errors only.
 
-        VEPAGE-1091: Layer 1 of the three-layer retry model. This loop catches
-        transient blips (rate limits, 5xx, connection errors) for a couple of
-        fast retries. Permanent errors (422 risk-screening, 400 schema, 401/403)
-        propagate immediately — the Layer 2 wrapper (error_policy.process_with_policy)
-        classifies them and writes status='failed'.
+        Transient errors (rate limits, 5xx, connection errors) are retried a
+        few times with short exponential backoff. Permanent errors (422, 400,
+        401, 403) propagate on the first occurrence so the caller's policy
+        wrapper can classify and decide what to do.
 
-        Budget knobs in mirix/settings.py:
-        - llm_inline_retry_max_attempts (Layer 1 retry count)
-        - llm_inline_retry_base_seconds  (backoff base)
-        - llm_inline_retry_max_delay     (backoff cap)
+        Budget settings (mirix/settings.py):
+            llm_inline_retry_max_attempts, llm_inline_retry_base_seconds,
+            llm_inline_retry_max_delay.
         """
         log_telemetry(self.logger, "_get_ai_reply start")
         allowed_tool_names = self.tool_rules_solver.get_allowed_tool_names(

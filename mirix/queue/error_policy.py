@@ -1,13 +1,12 @@
 """Centralized error classification and whole-step retry policy.
 
-VEPAGE-1091 / Phase A. This module is the single source of truth for what
-counts as a Transient error (worth retrying) vs a Permanent error (don't
-retry, write status='failed' and ack). The same classify() function is
-used by Layer 1 (inline LLM retry in _get_ai_reply) and Layer 2 (whole-step
-retry around agent.step), so the contract is consistent across both.
+Single source of truth for what counts as a Transient error (worth retrying)
+vs a Permanent error (don't retry). The same classify() function is used by
+the inline LLM retry in _get_ai_reply and the whole-step retry around
+agent.step, so the contract is consistent.
 
-Runtimes (in-memory, vanilla Kafka, Numaflow) all call process_with_policy()
-and translate the returned Outcome to their own ack/redeliver mechanism.
+Callers run an agent step under process_with_policy; the returned Outcome
+tells the consumer loop whether to ack the message or let it be redelivered.
 """
 
 from __future__ import annotations
@@ -34,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 
 class Bucket(str, Enum):
-    """Two-state error model. See VEPAGE-1091 design doc."""
+    """Two-state error model: retry or don't."""
 
     TRANSIENT = "transient"
     PERMANENT = "permanent"
@@ -48,18 +47,17 @@ class OutcomeKind(str, Enum):
 
 @dataclass(frozen=True)
 class Outcome:
-    """Result of process_with_policy. Runtimes translate this into ack/raise."""
+    """Result of process_with_policy. Consumers translate this into ack/raise."""
 
     kind: OutcomeKind
     cause: Optional[BaseException] = None
     bucket: Optional[Bucket] = None
 
 
-# Exception class → Bucket. Subclass matches use isinstance, so more
-# specific entries should still come first by convention even though the
-# classifier walks the tuple in order.
+# Subclass matches use isinstance — order is not significant for correctness,
+# but kept stable for readability.
 _PERMANENT_TYPES: tuple[type[BaseException], ...] = (
-    LLMUnprocessableEntityError,  # 422 — LXS Risk Screening (the bug)
+    LLMUnprocessableEntityError,  # 422
     LLMBadRequestError,           # 400
     LLMAuthenticationError,       # 401
     LLMPermissionDeniedError,     # 403
@@ -67,21 +65,21 @@ _PERMANENT_TYPES: tuple[type[BaseException], ...] = (
 
 _TRANSIENT_TYPES: tuple[type[BaseException], ...] = (
     LLMRateLimitError,    # 429
-    LLMServerError,       # 5xx (incl. 424 dependency timeout)
-    LLMConnectionError,   # network blip
+    LLMServerError,       # 5xx
+    LLMConnectionError,
 )
 
-# One-shot warning per unknown exception class so we triage and classify it
-# later without flooding logs.
+# One-shot warning per unknown exception class so the log doesn't flood when
+# a new error type starts appearing in production.
 _unknown_warned: set[type[BaseException]] = set()
 
 
 def classify(exc: BaseException) -> Bucket:
     """Map an exception to a Bucket.
 
-    Unknown exception classes default to TRANSIENT — we'd rather waste a
-    redelivery than silently swallow a bug. First sight of an unknown class
-    logs a warning so it can be added to one of the explicit lists.
+    Unknown exception classes default to TRANSIENT: a wasted redelivery is
+    preferable to silently swallowing a bug. The first occurrence of each
+    unmapped class emits a warning so the explicit lists can be updated.
     """
     if isinstance(exc, _PERMANENT_TYPES):
         return Bucket.PERMANENT
@@ -91,16 +89,16 @@ def classify(exc: BaseException) -> Bucket:
     if exc_type not in _unknown_warned:
         _unknown_warned.add(exc_type)
         logger.warning(
-            "error_policy: unmapped exception class %s defaulted to Transient — add to error_policy._PERMANENT_TYPES or _TRANSIENT_TYPES",
+            "error_policy: unmapped exception class %s defaulted to Transient — "
+            "add to _PERMANENT_TYPES or _TRANSIENT_TYPES",
             exc_type.__name__,
         )
     return Bucket.TRANSIENT
 
 
 def _backoff_seconds(attempt: int, base: float, cap: float) -> float:
-    """Exponential backoff with jitter, capped. attempt is 0-indexed."""
+    """Exponential backoff with full jitter, capped. attempt is 0-indexed."""
     raw = min(cap, base * (2**attempt))
-    # Full jitter halves the worst case but keeps the cap as the ceiling.
     return raw * (0.5 + 0.5 * random.random())
 
 
@@ -110,26 +108,25 @@ async def process_with_policy(
     memory_source_id: Optional[str] = None,
     on_permanent: Optional[Callable[[str, str, BaseException], Awaitable[None]]] = None,
 ) -> Outcome:
-    """Run agent.step() under Layer 2 policy.
+    """Run an agent step under the whole-step retry policy.
 
     run_step is a zero-argument async callable that invokes agent.step(...)
-    with whatever caller-specific arguments it needs. Keeping it opaque here
-    means this module doesn't depend on Agent.
+    with caller-specific arguments. Keeping it opaque means this module does
+    not depend on Agent.
 
-    on_permanent (optional) is called with (memory_source_id, error_message, exc)
-    when a Permanent error is seen, so the caller can write status='failed' +
-    error_message to the memory_sources row. Decoupled to avoid a circular
-    import on MemorySourceManager.
+    on_permanent, when provided, is invoked with (memory_source_id, error_message,
+    exc) the first time a Permanent classification is reached. It is purely
+    advisory — its exceptions are caught and logged. Callers can use it to
+    emit additional telemetry. No retry decision depends on it.
 
-    Returns Outcome describing what happened. The caller's runtime layer
-    decides what ack/raise mechanism to use.
+    Returns an Outcome; the caller's consumer loop decides ack vs raise.
     """
     max_attempts = max(1, settings.whole_step_retry_max_attempts)
     base = settings.whole_step_retry_base_seconds
     cap = settings.whole_step_retry_max_delay
 
     last_exc: Optional[BaseException] = None
-    for attempt in range(max_attempts + 1):  # initial try + max_attempts retries
+    for attempt in range(max_attempts + 1):  # initial attempt + max_attempts retries
         try:
             await run_step()
             return Outcome(kind=OutcomeKind.COMPLETED)
@@ -153,7 +150,6 @@ async def process_with_policy(
                             memory_source_id,
                         )
                 return Outcome(kind=OutcomeKind.PERMANENT_FAILURE, cause=exc, bucket=bucket)
-            # Transient — sleep and retry if budget remains.
             if attempt < max_attempts:
                 sleep_s = _backoff_seconds(attempt, base, cap)
                 logger.info(
@@ -166,7 +162,6 @@ async def process_with_policy(
                 )
                 await asyncio.sleep(sleep_s)
                 continue
-            # Budget exhausted.
             logger.warning(
                 "error_policy: transient retries exhausted on memory_source=%s after %d attempts: %s",
                 memory_source_id,
@@ -175,5 +170,7 @@ async def process_with_policy(
             )
             return Outcome(kind=OutcomeKind.TRANSIENT_EXHAUSTED, cause=exc, bucket=Bucket.TRANSIENT)
 
-    # Unreachable but keeps the type checker happy.
+    # Defensive — the loop above either returns or continues. This line satisfies
+    # the type checker for the case where max_attempts is somehow exceeded
+    # without a return path being taken.
     return Outcome(kind=OutcomeKind.TRANSIENT_EXHAUSTED, cause=last_exc, bucket=Bucket.TRANSIENT)

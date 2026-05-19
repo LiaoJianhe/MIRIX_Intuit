@@ -1,18 +1,17 @@
-"""Tests for the refactored Agent._get_ai_reply retry behavior (VEPAGE-1091).
+"""Tests for the refactored Agent._get_ai_reply retry behavior.
 
-These tests cover the Layer 1 contract directly:
-- 422 (LLMUnprocessableEntityError) propagates on the first attempt — no retry,
-  no sleep. This is the user-visible 422 fix.
-- 429 (LLMRateLimitError) and other Transient errors retry up to
-  settings.llm_inline_retry_max_attempts then propagate.
-- Empty-response ValueErrors classify as Transient and retry.
+Covers:
+- LLMUnprocessableEntityError (422) propagates on the first attempt; no retry,
+  no sleep.
+- LLMRateLimitError (429) and other Transient errors retry up to
+  settings.llm_inline_retry_max_attempts, then propagate.
+- Empty-response ValueErrors classify as Transient and are retried.
 - The removed parameters (empty_response_retry_limit, backoff_factor,
-  max_delay, second_try) no longer exist on the function signature.
+  max_delay, second_try) are no longer part of the function signature.
 
-We avoid spinning up a real Agent (which needs DB, llm_config, tools, etc.)
-and instead drive _get_ai_reply via a SimpleNamespace-style stub that
-satisfies the attributes the method touches. The stub's LLM client raises
-whatever we ask, so we can prove the loop's behavior end-to-end.
+The tests avoid constructing a real Agent (which requires DB, llm_config,
+tools, etc.) and instead drive _get_ai_reply via a SimpleNamespace stub
+that satisfies the attributes the method touches.
 """
 
 from __future__ import annotations
@@ -96,7 +95,7 @@ async def test_get_ai_reply_422_propagates_on_first_attempt(monkeypatch):
     monkeypatch.setattr("mirix.agent.agent.asyncio.sleep", sleep_mock)
 
     stub, llm_client = _build_stub_agent(
-        send_side_effect=LLMUnprocessableEntityError("LXS content rejected")
+        send_side_effect=LLMUnprocessableEntityError("content rejected")
     )
 
     with pytest.raises(LLMUnprocessableEntityError):

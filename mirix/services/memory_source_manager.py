@@ -94,8 +94,6 @@ class MemorySourceManager:
                 batch_hash=batch_hash,
                 filter_tags=filter_tags,
                 processing_complete=False,
-                status="pending",
-                delivery_attempts=0,
                 _created_by_id=actor.id,
                 _last_updated_by_id=actor.id,
                 created_at=now,
@@ -283,45 +281,9 @@ class MemorySourceManager:
                 has_more=has_more,
             )
 
-    _ALLOWED_STATUSES = {"pending", "processing", "completed", "failed"}
-
-    @enforce_types
-    async def set_status(
-        self,
-        memory_source_id: str,
-        status: str,
-        error_message: Optional[str] = None,
-    ) -> None:
-        """Write status (and optional error_message), dual-writing processing_complete.
-
-        While the legacy processing_complete column is still in use, this helper
-        keeps the two in sync: status='completed' sets processing_complete=True.
-        Callers should prefer this over flipping processing_complete directly.
-        """
-        if status not in self._ALLOWED_STATUSES:
-            raise ValueError(f"Invalid status {status!r}; expected one of {sorted(self._ALLOWED_STATUSES)}")
-        async with self.session_maker() as session:
-            record = await MemorySourceModel.read(db_session=session, identifier=memory_source_id)
-            record.status = status
-            if error_message is not None:
-                record.error_message = error_message
-            if status == "completed":
-                record.processing_complete = True
-            await record.update_with_redis(session)
-            logger.info(
-                "Set memory source %s status=%s%s",
-                memory_source_id,
-                status,
-                " (with error_message)" if error_message else "",
-            )
-
     @enforce_types
     async def mark_processing_complete(self, memory_source_id: str) -> None:
-        """Backward-compatible alias: mark a source completed.
-
-        Set processing_complete = True after all agents finish successfully.
-        Delegates to set_status('completed') so the new status column and the
-        legacy boolean stay in sync.
+        """Set processing_complete = True after all agents finish successfully.
 
         Uses read-then-update via ORM for consistent cache handling.
         Safe from lost updates because:
@@ -330,21 +292,11 @@ class MemorySourceManager:
         - SQLAlchemy only UPDATEs dirty columns, so this won't overwrite
           concurrent changes to other fields (e.g. summary)
         """
-        await self.set_status(memory_source_id, "completed")
-
-    @enforce_types
-    async def increment_delivery_attempts(self, memory_source_id: str) -> int:
-        """Increment delivery_attempts and return the new count.
-
-        Used by Layer 3 redelivery-cap logic. Single-column update; safe from
-        lost updates against concurrent writers touching other columns.
-        """
         async with self.session_maker() as session:
             record = await MemorySourceModel.read(db_session=session, identifier=memory_source_id)
-            record.delivery_attempts = (record.delivery_attempts or 0) + 1
-            new_count = record.delivery_attempts
+            record.processing_complete = True
             await record.update_with_redis(session)
-            return new_count
+            logger.info("Marked memory source %s as processing complete", memory_source_id)
 
     @enforce_types
     async def update_summary(self, memory_source_id: str, summary: str, summary_source: str) -> None:

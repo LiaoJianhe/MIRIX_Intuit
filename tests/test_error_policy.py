@@ -1,4 +1,4 @@
-"""Tests for mirix.queue.error_policy (VEPAGE-1091).
+"""Tests for mirix.queue.error_policy.
 
 Covers:
 - classify() across every Permanent and Transient class in the mapping table
@@ -31,7 +31,7 @@ from mirix.queue.error_policy import Bucket, Outcome, OutcomeKind, classify, pro
 @pytest.mark.parametrize(
     "exc_cls",
     [
-        LLMUnprocessableEntityError,  # 422 — the 422 fix
+        LLMUnprocessableEntityError,  # 422
         LLMBadRequestError,           # 400
         LLMAuthenticationError,       # 401
         LLMPermissionDeniedError,     # 403
@@ -85,14 +85,14 @@ async def test_process_with_policy_completed_path():
     assert calls["n"] == 1
 
 
-async def test_process_with_policy_permanent_path_writes_status_and_short_circuits():
+async def test_process_with_policy_permanent_path_invokes_callback_and_short_circuits():
     perm_calls: list[tuple[str, str, str]] = []
 
     async def on_perm(source_id, error_message, exc):
         perm_calls.append((source_id, error_message, type(exc).__name__))
 
     async def run_step():
-        raise LLMUnprocessableEntityError("LXS content rejected")
+        raise LLMUnprocessableEntityError("content rejected")
 
     out = await process_with_policy(
         run_step,
@@ -104,7 +104,7 @@ async def test_process_with_policy_permanent_path_writes_status_and_short_circui
     assert isinstance(out.cause, LLMUnprocessableEntityError)
     # Single attempt — Permanent does not retry.
     assert perm_calls == [
-        ("src-422", "LLMUnprocessableEntityError: LXS content rejected", "LLMUnprocessableEntityError")
+        ("src-422", "LLMUnprocessableEntityError: content rejected", "LLMUnprocessableEntityError")
     ]
 
 
