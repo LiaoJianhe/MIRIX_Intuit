@@ -7,7 +7,6 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
-import httpx
 import numpy as np
 import pytz
 
@@ -28,7 +27,7 @@ from mirix.constants import (
     REQ_HEARTBEAT_MESSAGE,
 )
 from mirix.embeddings import embedding_model
-from mirix.errors import ContextWindowExceededError, LLMError
+from mirix.errors import ContextWindowExceededError
 from mirix.queue.error_policy import Bucket, classify
 from mirix.functions.functions import get_function_from_module
 from mirix.helpers import ToolRulesSolver
