@@ -73,6 +73,7 @@ def test_classify_unknown_warns_once_per_class(caplog):
 # ---------- process_with_policy() ----------
 
 
+@pytest.mark.asyncio
 async def test_process_with_policy_completed_path():
     calls = {"n": 0}
 
@@ -85,6 +86,7 @@ async def test_process_with_policy_completed_path():
     assert calls["n"] == 1
 
 
+@pytest.mark.asyncio
 async def test_process_with_policy_permanent_path_invokes_callback_and_short_circuits():
     perm_calls: list[tuple[str, str, str]] = []
 
@@ -108,6 +110,7 @@ async def test_process_with_policy_permanent_path_invokes_callback_and_short_cir
     ]
 
 
+@pytest.mark.asyncio
 async def test_process_with_policy_permanent_callback_failure_is_swallowed():
     """If on_permanent raises, the Outcome is still PERMANENT_FAILURE.
 
@@ -126,6 +129,7 @@ async def test_process_with_policy_permanent_callback_failure_is_swallowed():
     assert out.bucket is Bucket.PERMANENT
 
 
+@pytest.mark.asyncio
 async def test_process_with_policy_transient_retry_then_success(monkeypatch):
     # Make sleep instant.
     monkeypatch.setattr(ep, "_backoff_seconds", lambda *_: 0.0)
@@ -142,6 +146,7 @@ async def test_process_with_policy_transient_retry_then_success(monkeypatch):
     assert attempts["n"] == 2
 
 
+@pytest.mark.asyncio
 async def test_process_with_policy_transient_exhausted(monkeypatch):
     monkeypatch.setattr(ep, "_backoff_seconds", lambda *_: 0.0)
     # Settings default: whole_step_retry_max_attempts=2 → 3 total attempts
@@ -162,6 +167,7 @@ async def test_process_with_policy_transient_exhausted(monkeypatch):
     assert attempts["n"] == expected_total
 
 
+@pytest.mark.asyncio
 async def test_process_with_policy_unknown_exception_treated_as_transient(monkeypatch):
     """Unknown exceptions walk the Transient path, not the Permanent one.
 
@@ -190,3 +196,32 @@ def test_outcome_is_frozen():
     out = Outcome(kind=OutcomeKind.COMPLETED)
     with pytest.raises(Exception):
         out.kind = OutcomeKind.PERMANENT_FAILURE  # type: ignore[misc]
+
+
+# ---------- classify() walks __cause__ ----------
+
+
+def test_classify_unwraps_cause_to_find_permanent():
+    """A Permanent error wrapped in another exception type must still classify
+    as Permanent. Defends against any code path that wraps exceptions for
+    diagnostic reasons (e.g. trigger_memory_update used to wrap in RuntimeError)."""
+    inner = LLMUnprocessableEntityError("content rejected")
+    try:
+        try:
+            raise inner
+        except LLMUnprocessableEntityError as e:
+            raise RuntimeError("wrapper for diagnostic context") from e
+    except RuntimeError as wrapped:
+        assert classify(wrapped) is Bucket.PERMANENT
+
+
+def test_classify_unwraps_cause_to_find_transient():
+    """Same property in the Transient direction."""
+    inner = LLMRateLimitError("429")
+    try:
+        try:
+            raise inner
+        except LLMRateLimitError as e:
+            raise RuntimeError("wrapper") from e
+    except RuntimeError as wrapped:
+        assert classify(wrapped) is Bucket.TRANSIENT

@@ -1,7 +1,7 @@
 import asyncio
 import re
 from copy import deepcopy
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, List, Optional, Union
 
 from mirix.agent import Agent
 
@@ -834,6 +834,48 @@ async def trigger_memory_update_with_instruction(
     return result.strip()
 
 
+def _decide_step_outcome_from_sub_agent_results(
+    memory_types: List[str],
+    results: List[Union[str, BaseException]],
+) -> List[str]:
+    """Reduce a sub-agent fan-out result list to either successes or a single raise.
+
+    On full success returns the list of response strings in fan-out order.
+    On any failure raises an exception whose type the error_policy classifier
+    will see correctly:
+
+    - If any failure is Permanent (per error_policy.classify), raise that one.
+      Retrying the whole step would re-fire the permanent failure
+      deterministically, so the step is Permanent regardless of any transient
+      siblings. Any successful siblings have already written their memories.
+    - Otherwise all failures are Transient; raise the first one so the
+      whole-step retry has a chance to succeed.
+
+    Crucially, the original exception is re-raised unwrapped. Wrapping it
+    in RuntimeError(...) here erases the LLM error type and causes the
+    upstream classifier to default to Transient, re-creating the 422 cascade.
+    Sub-agent identity for diagnostic context goes to logs, not to the
+    exception type.
+    """
+    exceptions = [(memory_types[i], r) for i, r in enumerate(results) if isinstance(r, Exception)]
+    if not exceptions:
+        return [r for r in results if isinstance(r, str)]
+
+    for name, exc in exceptions:
+        logger.warning("sub-agent %s failed: %s: %s", name, type(exc).__name__, exc)
+
+    from mirix.queue.error_policy import Bucket, classify
+
+    first_permanent = next(
+        (exc for _, exc in exceptions if classify(exc) is Bucket.PERMANENT),
+        None,
+    )
+    if first_permanent is not None:
+        raise first_permanent
+
+    raise exceptions[0][1]
+
+
 async def trigger_memory_update(self: "Agent", user_message: object, memory_types: List[str]) -> Optional[str]:
     """
     Choose which memory to update. This function will trigger another memory agent which is specifically in charge of handling the corresponding memory to update its memory. Trigger all necessary memory updates at once. Put the explanations in the `internal_monologue` field.
@@ -1067,19 +1109,12 @@ async def trigger_memory_update(self: "Agent", user_message: object, memory_type
         finally:
             clear_trace_context()
 
-    responses: dict[int, str] = {}
-
     if not memory_types:
         return ""
 
     tasks = [_run_single_memory_update(memory_type) for memory_type in memory_types]
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    for i, result in enumerate(results):
-        if isinstance(result, Exception):
-            raise RuntimeError(f"Failed to trigger memory update for '{memory_types[i]}'") from result
-        responses[i] = result
-
-    ordered_responses = [responses[i] for i in range(len(memory_types)) if i in responses]
+    ordered_responses = _decide_step_outcome_from_sub_agent_results(memory_types, list(results))
     return "".join(ordered_responses).strip()
 
 

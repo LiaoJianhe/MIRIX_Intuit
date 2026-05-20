@@ -88,6 +88,7 @@ def _build_stub_agent(send_side_effect):
 # ---------- the 422 fix ----------
 
 
+@pytest.mark.asyncio
 async def test_get_ai_reply_422_propagates_on_first_attempt(monkeypatch):
     """LLMUnprocessableEntityError must raise immediately — no retry, no sleep."""
     # Sleep should never be called on the Permanent path.
@@ -114,6 +115,7 @@ async def test_get_ai_reply_422_propagates_on_first_attempt(monkeypatch):
 # ---------- transient retry budget ----------
 
 
+@pytest.mark.asyncio
 async def test_get_ai_reply_transient_retries_to_budget_then_propagates(monkeypatch):
     """LLMRateLimitError should retry max_attempts times then re-raise."""
     monkeypatch.setattr("mirix.agent.agent.asyncio.sleep", AsyncMock())
@@ -135,6 +137,7 @@ async def test_get_ai_reply_transient_retries_to_budget_then_propagates(monkeypa
     assert llm_client.send_llm_request.await_count == expected_total
 
 
+@pytest.mark.asyncio
 async def test_get_ai_reply_transient_then_success(monkeypatch):
     """A 5xx that clears on retry yields the eventual successful response."""
     monkeypatch.setattr("mirix.agent.agent.asyncio.sleep", AsyncMock())
@@ -171,6 +174,7 @@ async def test_get_ai_reply_transient_then_success(monkeypatch):
 # ---------- empty-response validation classifies as Transient ----------
 
 
+@pytest.mark.asyncio
 async def test_get_ai_reply_empty_response_retries(monkeypatch):
     """An empty-choices response is a ValueError → Transient → retry.
 
@@ -206,6 +210,7 @@ async def test_get_ai_reply_empty_response_retries(monkeypatch):
     assert llm_client.send_llm_request.await_count == 2
 
 
+@pytest.mark.asyncio
 async def test_get_ai_reply_bad_finish_reason_retries(monkeypatch):
     """A finish_reason that isn't stop/function_call/tool_calls raises ValueError."""
     monkeypatch.setattr("mirix.agent.agent.asyncio.sleep", AsyncMock())

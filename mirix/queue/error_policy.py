@@ -77,14 +77,31 @@ _unknown_warned: set[type[BaseException]] = set()
 def classify(exc: BaseException) -> Bucket:
     """Map an exception to a Bucket.
 
+    Walks exc.__cause__ when the outer type is unmapped so that a Permanent
+    exception wrapped in another type (e.g. `raise RuntimeError(...) from
+    LLMUnprocessableEntityError`) still classifies as Permanent. Without this,
+    any code on the path between the LLM client and process_with_policy that
+    rewraps exceptions silently turns Permanent into Transient and re-creates
+    the 422 cascade.
+
     Unknown exception classes default to TRANSIENT: a wasted redelivery is
     preferable to silently swallowing a bug. The first occurrence of each
     unmapped class emits a warning so the explicit lists can be updated.
     """
-    if isinstance(exc, _PERMANENT_TYPES):
-        return Bucket.PERMANENT
-    if isinstance(exc, _TRANSIENT_TYPES):
-        return Bucket.TRANSIENT
+    # Walk the cause chain so wrapped permanent/transient exceptions are
+    # classified by their original type. Bounded to avoid pathological chains.
+    seen: set[int] = set()
+    current: Optional[BaseException] = exc
+    depth = 0
+    while current is not None and depth < 8 and id(current) not in seen:
+        if isinstance(current, _PERMANENT_TYPES):
+            return Bucket.PERMANENT
+        if isinstance(current, _TRANSIENT_TYPES):
+            return Bucket.TRANSIENT
+        seen.add(id(current))
+        current = current.__cause__
+        depth += 1
+
     exc_type = type(exc)
     if exc_type not in _unknown_warned:
         _unknown_warned.add(exc_type)

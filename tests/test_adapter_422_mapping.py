@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import httpx
 import openai
+import pytest
 
 from mirix.errors import LLMUnprocessableEntityError
 from mirix.queue.error_policy import Bucket, OutcomeKind, classify, process_with_policy
@@ -40,6 +41,7 @@ def _make_openai_422_exception() -> openai.UnprocessableEntityError:
     )
 
 
+@pytest.mark.asyncio
 async def test_openai_client_maps_422_to_llm_unprocessable_entity_error():
     """The OpenAI adapter's handle_llm_error must convert the SDK's
     UnprocessableEntityError into MIRIX's LLMUnprocessableEntityError.
@@ -67,6 +69,7 @@ async def test_openai_client_maps_422_to_llm_unprocessable_entity_error():
     )
 
 
+@pytest.mark.asyncio
 async def test_full_chain_openai_422_classifies_as_permanent_and_acks():
     """End-to-end: openai 422 -> adapter -> typed exception -> classifier -> PERMANENT.
 
