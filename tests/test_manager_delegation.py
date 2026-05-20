@@ -700,13 +700,17 @@ class TestOrganizationManagerDelegation:
     async def test_get_org_by_id_delegates_to_provider(self):
         row = _organization_row_dict()
         mock_provider = MagicMock()
-        mock_provider.read = AsyncMock(return_value=row)
+        mock_provider.find_using_named_query = AsyncMock(return_value=[row])
 
         with patch("mirix.database.cache_provider.get_cache_provider", return_value=None):
             with patch("mirix.database.relational_provider.get_relational_provider", return_value=mock_provider):
                 mgr = _org_mgr()
                 out = await mgr.get_organization_by_id("org-1")
-                mock_provider.read.assert_awaited_once_with("organizations", "org-1")
+                mock_provider.find_using_named_query.assert_awaited_once()
+                args, kwargs = mock_provider.find_using_named_query.call_args
+                assert args[0] == "organizations"
+                assert args[1] == "organization_manager.get_organization_by_id"
+                assert kwargs["params"] == {"id": "org-1"}
                 assert isinstance(out, PydanticOrganization)
                 assert out.id == "org-1"
                 assert out.name == "test-org"
@@ -714,6 +718,8 @@ class TestOrganizationManagerDelegation:
     async def test_create_organization_delegates(self):
         row = _organization_row_dict("org-new")
         mock_provider = MagicMock()
+        # _create_organization reads the row by id first; provide None to force create.
+        mock_provider.find_using_named_query = AsyncMock(return_value=[])
         mock_provider.read = AsyncMock(return_value=None)
         mock_provider.create = AsyncMock(return_value=row)
         pyd = PydanticOrganization(id="org-new", name="new-org")
@@ -730,12 +736,16 @@ class TestOrganizationManagerDelegation:
     async def test_list_organizations_delegates(self):
         row = _organization_row_dict()
         mock_provider = MagicMock()
-        mock_provider.list = AsyncMock(return_value=[row])
+        mock_provider.find_using_named_query = AsyncMock(return_value=[row])
 
         with patch("mirix.database.relational_provider.get_relational_provider", return_value=mock_provider):
             mgr = _org_mgr()
             out = await mgr.list_organizations(limit=25)
-            mock_provider.list.assert_awaited_once_with("organizations", limit=25)
+            mock_provider.find_using_named_query.assert_awaited_once()
+            args, kwargs = mock_provider.find_using_named_query.call_args
+            assert args[0] == "organizations"
+            assert args[1] == "organization_manager.list_organizations"
+            assert kwargs["params"]["limit"] == 25
             assert len(out) == 1
             assert out[0].id == "org-1"
 
@@ -745,13 +755,16 @@ class TestUserManagerDelegation:
     async def test_get_user_by_id_delegates_to_provider(self):
         row = _user_row_dict()
         mock_provider = MagicMock()
-        mock_provider.read = AsyncMock(return_value=row)
+        mock_provider.find_using_named_query = AsyncMock(return_value=[row])
 
         with patch("mirix.database.cache_provider.get_cache_provider", return_value=None):
             with patch("mirix.database.relational_provider.get_relational_provider", return_value=mock_provider):
                 mgr = _user_mgr()
                 out = await mgr.get_user_by_id("user-1")
-                mock_provider.read.assert_awaited_once_with("users", "user-1")
+                args, kwargs = mock_provider.find_using_named_query.call_args
+                assert args[0] == "users"
+                assert args[1] == "user_manager.get_user_by_id"
+                assert kwargs["params"] == {"id": "user-1"}
                 assert out.id == "user-1"
                 assert out.name == "test-user"
 
@@ -793,14 +806,18 @@ class TestToolManagerDelegation:
     async def test_get_tool_by_id_delegates_to_provider(self):
         row = _tool_row_dict()
         mock_provider = MagicMock()
-        mock_provider.read = AsyncMock(return_value=row)
+        mock_provider.find_using_named_query = AsyncMock(return_value=[row])
 
-        with patch("mirix.database.relational_provider.get_relational_provider", return_value=mock_provider):
-            mgr = _tool_mgr()
-            out = await mgr.get_tool_by_id("tool-c0ffee00", _mock_actor())
-            mock_provider.read.assert_awaited_once_with("tools", "tool-c0ffee00")
-            assert out.id == "tool-c0ffee00"
-            assert out.name == "test_tool"
+        with patch("mirix.database.cache_provider.get_cache_provider", return_value=None):
+            with patch("mirix.database.relational_provider.get_relational_provider", return_value=mock_provider):
+                mgr = _tool_mgr()
+                out = await mgr.get_tool_by_id("tool-c0ffee00", _mock_actor())
+                args, kwargs = mock_provider.find_using_named_query.call_args
+                assert args[0] == "tools"
+                assert args[1] == "tool_manager.get_tool_by_id"
+                assert kwargs["params"]["id"] == "tool-c0ffee00"
+                assert out.id == "tool-c0ffee00"
+                assert out.name == "test_tool"
 
     async def test_create_tool_delegates(self):
         row = _tool_row_dict("tool-deadb33f")
@@ -830,17 +847,16 @@ class TestToolManagerDelegation:
     async def test_list_tools_delegates(self):
         row = _tool_row_dict()
         mock_provider = MagicMock()
-        mock_provider.list = AsyncMock(return_value=[row])
+        mock_provider.find_using_named_query = AsyncMock(return_value=[row])
         actor = _mock_actor()
 
         with patch("mirix.database.relational_provider.get_relational_provider", return_value=mock_provider):
             mgr = _tool_mgr()
             out = await mgr.list_tools(actor, limit=30)
-            mock_provider.list.assert_awaited_once_with(
-                "tools",
-                organization_id=actor.organization_id,
-                limit=30,
-            )
+            args, kwargs = mock_provider.find_using_named_query.call_args
+            assert args[0] == "tools"
+            assert args[1] == "tool_manager.list_tools"
+            assert kwargs["params"] == {"organizationId": actor.organization_id, "limit": 30}
             assert len(out) == 1
             assert out[0].id == "tool-c0ffee00"
 
@@ -850,17 +866,22 @@ class TestAgentManagerDelegation:
     async def test_get_agent_by_id_delegates_to_provider(self):
         row = _agent_row_dict()
         mock_provider = MagicMock()
-        mock_provider.read = AsyncMock(return_value=row)
+        mock_provider.find_using_named_query = AsyncMock(return_value=[row])
 
         with patch("mirix.database.cache_provider.get_cache_provider", return_value=None):
             with patch("mirix.database.relational_provider.get_relational_provider", return_value=mock_provider):
                 mgr = _agent_mgr()
-                out = await mgr.get_agent_by_id("agent-1", _mock_actor())
-                mock_provider.read.assert_awaited_once_with(
-                    "agents",
-                    "agent-1",
-                    include_relationships=["tools"],
-                )
+                actor = _mock_actor()
+                out = await mgr.get_agent_by_id("agent-1", actor)
+                args, kwargs = mock_provider.find_using_named_query.call_args
+                assert args[0] == "agents"
+                assert args[1] == "agent_manager.get_agent_by_id"
+                assert kwargs["params"] == {
+                    "id": "agent-1",
+                    "organizationId": actor.organization_id,
+                    "createdById": actor.id,
+                }
+                assert kwargs["include_relationships"] == ["tools"]
                 assert out.id == "agent-1"
                 assert out.name == "test-agent"
                 assert out.created_by_id == "client-1"
@@ -882,7 +903,7 @@ class TestAgentManagerDelegation:
         """GAP J: read-through cache should be populated after IPS read."""
         row = _agent_row_dict()
         mock_provider = MagicMock()
-        mock_provider.read = AsyncMock(return_value=row)
+        mock_provider.find_using_named_query = AsyncMock(return_value=[row])
 
         mock_cache = MagicMock()
         mock_cache.get_hash = AsyncMock(return_value=None)
@@ -992,14 +1013,14 @@ class TestEpisodicListByOrgDelegation:
 
 
 # ---------------------------------------------------------------------------
-# GAP E: list_episodic_memory_around_timestamp delegates to IPS relational
+# GAP E: list_episodic_memory_around_timestamp uses named query
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 class TestEpisodicAroundTimestampDelegation:
-    async def test_delegates_to_relational_provider(self):
+    async def test_delegates_to_named_query(self):
         row = _episodic_row_dict()
         mock_provider = MagicMock()
-        mock_provider.list = AsyncMock(return_value=[row])
+        mock_provider.find_using_named_query = AsyncMock(return_value=[row])
 
         agent_state = MagicMock(spec=AgentState)
         agent_state.embedding_config = MagicMock()
@@ -1015,11 +1036,42 @@ class TestEpisodicAroundTimestampDelegation:
                 end_time=end,
                 user=_mock_user(),
             )
-            mock_provider.list.assert_awaited_once()
-            call_kwargs = mock_provider.list.await_args
-            assert call_kwargs[0][0] == "episodic_memory"
+            mock_provider.find_using_named_query.assert_awaited_once()
+            call_args = mock_provider.find_using_named_query.await_args
+            assert call_args[0][0] == "episodic_memory"
+            assert call_args[0][1] == "episodic_memory_manager.list_by_occurred_at_range"
+            params = call_args[1]["params"]
+            assert params["userId"] == "user-1"
+            assert params["since"] == start.isoformat()
+            assert params["until"] == end.isoformat()
             assert len(results) == 1
             assert results[0].id == "ep-123"
+
+    async def test_delegates_with_open_ended_range(self):
+        """Open-ended range (distant past/future) passes None for since/until params."""
+        mock_provider = MagicMock()
+        mock_provider.find_using_named_query = AsyncMock(return_value=[])
+
+        agent_state = MagicMock(spec=AgentState)
+        agent_state.embedding_config = MagicMock()
+
+        # Use sentinel datetimes that represent "no start" / "no end"
+        distant_past = datetime(1970, 1, 1, tzinfo=timezone.utc)
+        distant_future = datetime(2999, 12, 31, tzinfo=timezone.utc)
+
+        with patch("mirix.database.relational_provider.get_relational_provider", return_value=mock_provider):
+            mgr = _episodic_mgr()
+            results = await mgr.list_episodic_memory_around_timestamp(
+                agent_state=agent_state,
+                start_time=distant_past,
+                end_time=distant_future,
+                user=_mock_user(),
+            )
+            call_args = mock_provider.find_using_named_query.await_args
+            params = call_args[1]["params"]
+            assert params["since"] == distant_past.isoformat()
+            assert params["until"] == distant_future.isoformat()
+            assert results == []
 
 
 # ---------------------------------------------------------------------------
@@ -1030,7 +1082,7 @@ class TestToolManagerCacheDelegation:
     async def test_get_tool_by_id_populates_cache_on_ips_path(self):
         row = _tool_row_dict()
         mock_provider = MagicMock()
-        mock_provider.read = AsyncMock(return_value=row)
+        mock_provider.find_using_named_query = AsyncMock(return_value=[row])
 
         mock_cache = MagicMock()
         mock_cache.get_hash = AsyncMock(return_value=None)
@@ -1051,11 +1103,222 @@ class TestToolManagerCacheDelegation:
         mock_cache.TOOL_PREFIX = "tool:"
 
         mock_provider = MagicMock()
-        mock_provider.read = AsyncMock()
+        mock_provider.find_using_named_query = AsyncMock()
 
         with patch("mirix.database.cache_provider.get_cache_provider", return_value=mock_cache):
             with patch("mirix.database.relational_provider.get_relational_provider", return_value=mock_provider):
                 mgr = _tool_mgr()
                 out = await mgr.get_tool_by_id("tool-c0ffee00", _mock_actor())
                 assert out.id == "tool-c0ffee00"
-                mock_provider.read.assert_not_awaited()
+                mock_provider.find_using_named_query.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Memory table cascade deletes use named queries in client_manager / user_manager
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+class TestClientManagerCascadeNamedQuery:
+    """delete_client_by_id and delete_memories_by_client_id use find_using_named_query."""
+
+    def _client_mgr(self):
+        from mirix.services.client_manager import ClientManager
+        m = ClientManager.__new__(ClientManager)
+        m.session_maker = MagicMock()
+        return m
+
+    async def test_delete_client_by_id_uses_named_query_for_memory_tables(self):
+        mock_provider = MagicMock()
+        mock_provider.find_using_named_query = AsyncMock(return_value=[])
+        mock_provider.bulk_delete = AsyncMock(return_value={"success": 0, "failed": 0})
+        mock_provider.mutate_using_named_query = AsyncMock(return_value=0)
+        mock_provider.delete = AsyncMock(return_value=True)
+
+        _MEMORY_TABLES = {"episodic_memory", "semantic_memory", "procedural_memory",
+                          "resource_memory", "knowledge_vault", "raw_memory", "block"}
+
+        with patch("mirix.database.relational_provider.get_relational_provider", return_value=mock_provider):
+            mgr = self._client_mgr()
+            await mgr.delete_client_by_id("client-1")
+
+        nq_calls = mock_provider.find_using_named_query.await_args_list
+        # Filter to only memory-table named query calls (exclude agents/tools engine-table calls)
+        memory_nq_calls = [c for c in nq_calls if c[0][0] in _MEMORY_TABLES]
+        tables_queried = [c[0][0] for c in memory_nq_calls]
+        query_names = [c[0][1] for c in memory_nq_calls]
+
+        assert "episodic_memory" in tables_queried
+        assert "raw_memory" in tables_queried
+        assert "block" in tables_queried
+        assert "messages" not in tables_queried  # messages uses mutate_using_named_query
+        for name in query_names:
+            assert name.startswith("client_manager.list_ids_")
+
+    async def test_delete_memories_by_client_id_includes_raw_memory(self):
+        mock_provider = MagicMock()
+        mock_provider.find_using_named_query = AsyncMock(return_value=[{"id": "m-1"}])
+        mock_provider.bulk_delete = AsyncMock(return_value={"success": 1, "failed": 0})
+        mock_provider.mutate_using_named_query = AsyncMock(return_value=0)
+
+        with patch("mirix.database.relational_provider.get_relational_provider", return_value=mock_provider):
+            mgr = self._client_mgr()
+            await mgr.delete_memories_by_client_id("client-1")
+
+        nq_calls = mock_provider.find_using_named_query.await_args_list
+        tables_queried = [c[0][0] for c in nq_calls]
+        assert "raw_memory" in tables_queried
+
+    async def test_messages_soft_deleted_via_mutate(self):
+        mock_provider = MagicMock()
+        mock_provider.find_using_named_query = AsyncMock(return_value=[])
+        mock_provider.bulk_delete = AsyncMock(return_value={"success": 0, "failed": 0})
+        mock_provider.mutate_using_named_query = AsyncMock(return_value=0)
+        mock_provider.delete = AsyncMock(return_value=True)
+
+        with patch("mirix.database.relational_provider.get_relational_provider", return_value=mock_provider):
+            mgr = self._client_mgr()
+            await mgr.delete_client_by_id("client-1")
+
+        mutate_calls = mock_provider.mutate_using_named_query.await_args_list
+        mutate_tables = [c[0][0] for c in mutate_calls]
+        assert "messages" in mutate_tables
+
+
+@pytest.mark.asyncio
+class TestUserManagerCascadeNamedQuery:
+    """delete_user_by_id and delete_memories_by_user_id use find_using_named_query."""
+
+    def _user_mgr(self):
+        m = UserManager.__new__(UserManager)
+        m.session_maker = MagicMock()
+        return m
+
+    async def test_delete_user_by_id_uses_named_query_for_memory_tables(self):
+        mock_provider = MagicMock()
+        mock_provider.find_using_named_query = AsyncMock(return_value=[])
+        mock_provider.bulk_delete = AsyncMock(return_value={"success": 0, "failed": 0})
+        mock_provider.mutate_using_named_query = AsyncMock(return_value=0)
+        mock_provider.delete = AsyncMock(return_value=True)
+
+        mock_cache = MagicMock()
+        mock_cache.delete = AsyncMock()
+        mock_cache.USER_PREFIX = "user:"
+
+        with patch("mirix.database.cache_provider.get_cache_provider", return_value=mock_cache):
+            with patch("mirix.database.relational_provider.get_relational_provider", return_value=mock_provider):
+                mgr = self._user_mgr()
+                await mgr.delete_user_by_id("user-1")
+
+        nq_calls = mock_provider.find_using_named_query.await_args_list
+        tables_queried = [c[0][0] for c in nq_calls]
+        query_names = [c[0][1] for c in nq_calls]
+
+        assert "raw_memory" in tables_queried
+        assert "episodic_memory" in tables_queried
+        assert "messages" not in tables_queried
+        for name in query_names:
+            assert name.startswith("user_manager.list_ids_")
+
+    async def test_messages_mutated_via_named_query_in_delete_user(self):
+        mock_provider = MagicMock()
+        mock_provider.find_using_named_query = AsyncMock(return_value=[])
+        mock_provider.bulk_delete = AsyncMock(return_value={"success": 0, "failed": 0})
+        mock_provider.mutate_using_named_query = AsyncMock(return_value=0)
+        mock_provider.delete = AsyncMock(return_value=True)
+
+        mock_cache = MagicMock()
+        mock_cache.delete = AsyncMock()
+        mock_cache.USER_PREFIX = "user:"
+
+        with patch("mirix.database.cache_provider.get_cache_provider", return_value=mock_cache):
+            with patch("mirix.database.relational_provider.get_relational_provider", return_value=mock_provider):
+                mgr = self._user_mgr()
+                await mgr.delete_user_by_id("user-1")
+
+        mutate_calls = mock_provider.mutate_using_named_query.await_args_list
+        mutate_tables = [c[0][0] for c in mutate_calls]
+        assert "messages" in mutate_tables
+
+
+# ---------------------------------------------------------------------------
+# find_most_recently_updated uses named query for registered tables
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+class TestFindMostRecentlyUpdatedNamedQuery:
+    """find_most_recently_updated prefers named query for semantic/knowledge_vault."""
+
+    async def test_semantic_uses_named_query(self):
+        from mirix.services.memory_manager_helpers import find_most_recently_updated
+
+        expected = {"id": "s-1", "name": "foo", "summary": "bar"}
+        mock_provider = AsyncMock()
+        mock_provider.find_using_named_query = AsyncMock(return_value=[expected])
+
+        result = await find_most_recently_updated(
+            mock_provider, "semantic_memory", user_id="user-1", organization_id="org-1"
+        )
+
+        assert result == expected
+        mock_provider.find_using_named_query.assert_awaited_once()
+        args = mock_provider.find_using_named_query.await_args[0]
+        assert args[0] == "semantic_memory"
+        assert args[1] == "memory_manager_helpers.get_most_recently_updated_semantic_memory"
+        kw = mock_provider.find_using_named_query.await_args[1]
+        assert kw["params"] == {"userId": "user-1", "organizationId": "org-1"}
+        assert kw["page_size"] == 1
+
+    async def test_knowledge_vault_uses_named_query(self):
+        from mirix.services.memory_manager_helpers import find_most_recently_updated
+
+        mock_provider = AsyncMock()
+        mock_provider.find_using_named_query = AsyncMock(return_value=[])
+
+        result = await find_most_recently_updated(
+            mock_provider, "knowledge_vault", user_id="u", organization_id="o"
+        )
+
+        assert result is None
+        args = mock_provider.find_using_named_query.await_args[0]
+        assert args[1] == "memory_manager_helpers.get_most_recently_updated_knowledge_vault"
+
+    async def test_falls_back_to_list_for_other_tables(self):
+        from mirix.services.memory_manager_helpers import find_most_recently_updated
+
+        mock_provider = AsyncMock()
+        mock_provider.list = AsyncMock(return_value=[{"id": "e-1"}])
+
+        result = await find_most_recently_updated(
+            mock_provider, "episodic_memory", user_id="u", organization_id="o"
+        )
+
+        assert result == {"id": "e-1"}
+        mock_provider.list.assert_awaited()
+        mock_provider.find_using_named_query.assert_not_awaited()
+
+    async def test_falls_back_to_list_when_no_org_id(self):
+        """Named query not used when organization_id is missing."""
+        from mirix.services.memory_manager_helpers import find_most_recently_updated
+
+        mock_provider = AsyncMock()
+        mock_provider.list = AsyncMock(return_value=[])
+
+        await find_most_recently_updated(
+            mock_provider, "semantic_memory", user_id="u", organization_id=None
+        )
+
+        mock_provider.list.assert_awaited()
+        mock_provider.find_using_named_query.assert_not_awaited()
+
+    async def test_falls_back_to_list_when_client_id_provided(self):
+        """Named query not used when client_id adds extra filter complexity."""
+        from mirix.services.memory_manager_helpers import find_most_recently_updated
+
+        mock_provider = AsyncMock()
+        mock_provider.list = AsyncMock(return_value=[])
+
+        await find_most_recently_updated(
+            mock_provider, "semantic_memory",
+            user_id="u", organization_id="o", client_id="c-1"
+        )
+
+        mock_provider.list.assert_awaited()
+        mock_provider.find_using_named_query.assert_not_awaited()

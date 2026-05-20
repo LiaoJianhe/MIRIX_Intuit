@@ -148,7 +148,12 @@ class EpisodicMemoryManager:
 
         provider = get_relational_provider()
         if provider:
-            result = await provider.read("episodic_memory", episodic_memory_id)
+            from mirix.services.memory_manager_helpers import actor_from_user
+
+            actor = actor_from_user(user)
+            result = await provider.read(
+                "episodic_memory", episodic_memory_id, actor=actor
+            )
             if result is None:
                 raise NoResultFound(f"Episodic memory {episodic_memory_id} not found")
             return PydanticEpisodicEvent(**result)
@@ -225,6 +230,23 @@ class EpisodicMemoryManager:
         Returns:
             Most recent event or None if no events exist
         """
+        # IPS provider delegation (B2 generic helper).
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            from mirix.services.memory_manager_helpers import (
+                find_most_recently_updated,
+            )
+
+            row = await find_most_recently_updated(
+                provider,
+                "episodic_memory",
+                user_id=user.id,
+                organization_id=user.organization_id,
+            )
+            return PydanticEpisodicEvent(**row) if row else None
+
         async with self.session_maker() as session:
             # Use proper PostgreSQL JSON text extraction and casting for ordering
             from sqlalchemy import DateTime, cast, text
@@ -238,7 +260,7 @@ class EpisodicMemoryManager:
             result = await session.execute(query.limit(1))
             episodic_memory = result.scalar_one_or_none()
 
-            return [episodic_memory.to_pydantic()] if episodic_memory else None
+            return episodic_memory.to_pydantic() if episodic_memory else None
 
     @enforce_types
     async def create_episodic_memory(
@@ -282,7 +304,7 @@ class EpisodicMemoryManager:
             data_dict["client_id"] = client_id
             data_dict["user_id"] = user_id
             data_dict.setdefault("organization_id", actor.organization_id)
-            result = await provider.create("episodic_memory", data_dict)
+            result = await provider.create("episodic_memory", data_dict, actor=actor)
             return PydanticEpisodicEvent(**result)
 
         # Ensure ID is set before model_dump
@@ -351,7 +373,15 @@ class EpisodicMemoryManager:
 
         provider = get_relational_provider()
         if provider:
-            await provider.delete("episodic_memory", id)
+            await provider.delete("episodic_memory", id, actor=actor)
+            try:
+                from mirix.services.memory_manager_helpers import invalidate_memory_cache
+
+                await invalidate_memory_cache("episodic_memory", [id])
+            except Exception as exc:
+                logger.warning(
+                    "Cache invalidation skipped for episodic_memory %s: %s", id, exc
+                )
             return
 
         async with self.session_maker() as session:
@@ -385,17 +415,13 @@ class EpisodicMemoryManager:
 
         provider = get_relational_provider()
         if provider:
-            records = await provider.list(
+            count = await provider.bulk_delete_with_events(
                 "episodic_memory",
-                filter_tags=None,
-                limit=5000,
-                _created_by_id=actor.id,
+                filters={"_created_by_id": actor.id},
+                soft=False,
+                actor=actor,
             )
-            ids = [r.get("id") for r in records if r.get("id")]
-            if not ids:
-                return 0
-            result = await provider.bulk_delete("episodic_memory", ids, soft=False)
-            return int(result.get("success", 0) or 0)
+            return int(count)
 
         async with self.session_maker() as session:
             # Get IDs for Redis cleanup (only fetch IDs, not full objects)
@@ -438,17 +464,13 @@ class EpisodicMemoryManager:
 
         provider = get_relational_provider()
         if provider:
-            records = await provider.list(
+            count = await provider.bulk_delete_with_events(
                 "episodic_memory",
-                filter_tags=None,
-                limit=5000,
-                _created_by_id=actor.id,
+                filters={"_created_by_id": actor.id},
+                soft=True,
+                actor=actor,
             )
-            ids = [r.get("id") for r in records if r.get("id")]
-            if not ids:
-                return 0
-            result = await provider.bulk_delete("episodic_memory", ids, soft=True)
-            return int(result.get("success", 0) or 0)
+            return int(count)
 
         async with self.session_maker() as session:
             result = await session.execute(
@@ -501,17 +523,12 @@ class EpisodicMemoryManager:
 
         provider = get_relational_provider()
         if provider:
-            records = await provider.list(
+            count = await provider.bulk_delete_with_events(
                 "episodic_memory",
-                user_id=user_id,
-                filter_tags=None,
-                limit=5000,
+                filters={"user_id": user_id},
+                soft=True,
             )
-            ids = [r.get("id") for r in records if r.get("id")]
-            if not ids:
-                return 0
-            result = await provider.bulk_delete("episodic_memory", ids, soft=True)
-            return int(result.get("success", 0) or 0)
+            return int(count)
 
         async with self.session_maker() as session:
             result = await session.execute(
@@ -576,17 +593,12 @@ class EpisodicMemoryManager:
 
         provider = get_relational_provider()
         if provider:
-            records = await provider.list(
+            count = await provider.bulk_delete_with_events(
                 "episodic_memory",
-                user_id=user_id,
-                filter_tags=None,
-                limit=5000,
+                filters={"user_id": user_id},
+                soft=False,
             )
-            ids = [r.get("id") for r in records if r.get("id")]
-            if not ids:
-                return 0
-            result = await provider.bulk_delete("episodic_memory", ids, soft=False)
-            return int(result.get("success", 0) or 0)
+            return int(count)
 
         async with self.session_maker() as session:
             result = await session.execute(select(EpisodicEvent.id).where(EpisodicEvent.user_id == user_id))
@@ -664,7 +676,7 @@ class EpisodicMemoryManager:
                         "operation": "created",
                     },
                 }
-                result = await provider.create("episodic_memory", data_dict)
+                result = await provider.create("episodic_memory", data_dict, actor=actor)
                 return PydanticEpisodicEvent(**result)
 
             # Conditionally calculate embeddings based on BUILD_EMBEDDINGS_FOR_MEMORY flag
@@ -734,21 +746,27 @@ class EpisodicMemoryManager:
 
         provider = get_relational_provider()
         if provider:
-            records = await provider.list(
+            records = await provider.find_using_named_query(
                 "episodic_memory",
-                user_id=user.id,
-                time_range={
-                    "occurred_at__gte": start_time.isoformat() if start_time else None,
-                    "occurred_at__lte": end_time.isoformat() if end_time else None,
+                "episodic_memory_manager.list_by_occurred_at_range",
+                params={
+                    "userId": user.id,
+                    "since": start_time.isoformat() if start_time else None,
+                    "until": end_time.isoformat() if end_time else None,
                 },
-                limit=200,
+                page_size=1000,
             )
             return [PydanticEpisodicEvent(**r) for r in records]
 
         async with self.session_maker() as session:
-            query = select(EpisodicEvent).where(
-                EpisodicEvent.occurred_at.between(start_time, end_time),
-                EpisodicEvent.user_id == user.id,
+            query = (
+                select(EpisodicEvent)
+                .where(
+                    EpisodicEvent.occurred_at.between(start_time, end_time),
+                    EpisodicEvent.user_id == user.id,
+                    ~EpisodicEvent.is_deleted,
+                )
+                .limit(1000)
             )
 
             result = await session.execute(query)
@@ -791,7 +809,11 @@ class EpisodicMemoryManager:
                 )
 
         async with self.session_maker() as session:
-            query = select(func.count(EpisodicEvent.id)).where(EpisodicEvent.user_id == user.id)
+            query = select(func.count(EpisodicEvent.id)).where(
+                EpisodicEvent.user_id == user.id,
+                EpisodicEvent.organization_id == user.organization_id,
+                ~EpisodicEvent.is_deleted,
+            )
             result = await session.execute(query)
             return result.scalar_one()
 
@@ -888,7 +910,7 @@ class EpisodicMemoryManager:
                 from mirix.services.hybrid_search_helper import hybrid_search
 
                 relational_provider = get_relational_provider()
-                results = await hybrid_search(
+                results, _next_cursor = await hybrid_search(
                     table="episodic_memory",
                     search_provider=search_provider,
                     relational_provider=relational_provider,
@@ -1027,6 +1049,7 @@ class EpisodicMemoryManager:
                     select(EpisodicEvent)
                     .where(EpisodicEvent.user_id == user.id)
                     .where(EpisodicEvent.organization_id == organization_id)
+                    .where(~EpisodicEvent.is_deleted)
                     .order_by(EpisodicEvent.occurred_at.desc())
                 )
 
@@ -1490,7 +1513,7 @@ class EpisodicMemoryManager:
 
         provider = get_relational_provider()
         if provider:
-            existing = await provider.read("episodic_memory", event_id)
+            existing = await provider.read("episodic_memory", event_id, actor=actor)
             if not existing:
                 raise ValueError(f"Episodic episodic_memory record with id {event_id} not found.")
 
@@ -1513,7 +1536,19 @@ class EpisodicMemoryManager:
             if agent_state is not None:
                 update_data["embedding_config"] = agent_state.embedding_config
 
-            result = await provider.update("episodic_memory", event_id, update_data)
+            result = await provider.update(
+                "episodic_memory", event_id, update_data, actor=actor
+            )
+            try:
+                from mirix.services.memory_manager_helpers import invalidate_memory_cache
+
+                await invalidate_memory_cache("episodic_memory", [event_id])
+            except Exception as exc:
+                logger.warning(
+                    "Cache invalidation skipped for episodic_memory %s: %s",
+                    event_id,
+                    exc,
+                )
             return PydanticEpisodicEvent(**result)
 
         async with self.session_maker() as session:
@@ -1681,7 +1716,7 @@ class EpisodicMemoryManager:
                 from mirix.database.relational_provider import get_relational_provider
                 from mirix.services.hybrid_search_helper import hybrid_search
 
-                results = await hybrid_search(
+                results, _next_cursor = await hybrid_search(
                     table="episodic_memory",
                     search_provider=search_provider,
                     relational_provider=get_relational_provider(),
@@ -1804,7 +1839,10 @@ class EpisodicMemoryManager:
         async with self.session_maker() as session:
             # Base query filtering by organization_id instead of user_id
             # Return full EpisodicEvent objects, not individual columns
-            base_query = select(EpisodicEvent).where(EpisodicEvent.organization_id == organization_id)
+            base_query = select(EpisodicEvent).where(
+                EpisodicEvent.organization_id == organization_id,
+                ~EpisodicEvent.is_deleted,
+            )
 
             from mirix.database.filter_tags_query import apply_filter_tags_sqlalchemy
 

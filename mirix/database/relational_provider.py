@@ -44,6 +44,20 @@ Expected methods (duck typing, all async):
         table: str, entities: list[dict],
         event_contexts: Optional[Dict[str, Any]] = None,
     ) -> dict
+    async find_using_named_query(
+        table: str, query_name: str, *,
+        params: Optional[Dict[str, Any]] = None,
+        hash_params: Optional[Dict[str, Any]] = None,
+        page_size: int = 50, page_num: int = 0,
+        page_type=None,
+        result_set_entity_class: Optional[type] = None,
+    ) -> list
+    async mutate_using_named_query(
+        table: str, query_name: str, *,
+        params: Optional[Dict[str, Any]] = None,
+        hash_params: Optional[Dict[str, Any]] = None,
+        event_context: Any = None,
+    ) -> int
 
 Interface design notes:
     - ``list`` includes organization_id, user_id, filter_tags, scopes, sort,

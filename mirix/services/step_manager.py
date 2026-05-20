@@ -61,12 +61,17 @@ class StepManager:
 
         provider = get_relational_provider()
         if provider:
-            result = await provider.read("steps", step_id)
-            if result is None:
+            rows = await provider.find_using_named_query(
+                "steps",
+                "step_manager.get_step_by_id",
+                params={"id": step_id},
+                page_size=1,
+            )
+            if not rows:
                 from mirix.orm.errors import NoResultFound
 
                 raise NoResultFound(f"Step {step_id} not found")
-            return PydanticStep(**result)
+            return PydanticStep(**rows[0])
         async with self.session_maker() as session:
             step = await StepModel.read(db_session=session, identifier=step_id)
             return step.to_pydantic()

@@ -2275,13 +2275,41 @@ async def retrieve_memories_by_keywords(
             end_date.isoformat() if end_date else None,
         )
 
-    # Get timezone from user record (if exists)
-    user = None  # Initialize before try so references below work even if lookup fails
+    # Get timezone from user record. If the user does not exist, return empty
+    # memory containers — downstream managers require a non-None PydanticUser
+    # (enforced via @enforce_types).
+    from mirix.orm.errors import NoResultFound
+
     try:
         user = await server.user_manager.get_user_by_id(user_id)
         timezone_str = user.timezone
-    except:
-        timezone_str = "UTC"
+    except NoResultFound:
+        logger.info(
+            "User %s not found during retrieve_memories_by_keywords; returning empty memories",
+            user_id,
+        )
+        return {
+            "episodic": {"total_count": 0, "recent": [], "relevant": []},
+            "semantic": {"total_count": 0, "items": []},
+            "resource": {"total_count": 0, "items": []},
+            "procedural": {"total_count": 0, "items": []},
+            "knowledge_vault": {"total_count": 0, "items": []},
+            "core": {"total_count": 0, "scopes": {}},
+        }
+    except Exception as e:
+        logger.warning(
+            "Unexpected error fetching user %s; returning empty memories: %s",
+            user_id,
+            e,
+        )
+        return {
+            "episodic": {"total_count": 0, "recent": [], "relevant": []},
+            "semantic": {"total_count": 0, "items": []},
+            "resource": {"total_count": 0, "items": []},
+            "procedural": {"total_count": 0, "items": []},
+            "knowledge_vault": {"total_count": 0, "items": []},
+            "core": {"total_count": 0, "scopes": {}},
+        }
     memories = {}
 
     # Get episodic memories (recent + relevant) with optional temporal filtering
@@ -2973,13 +3001,38 @@ async def search_memory(
 
     agent_state = all_agents[0]
 
-    # Get timezone from user record (if exists)
-    user = None  # Initialize before try so closures below can reference it even on failure
+    # Get timezone from user record. If the user does not exist, return empty
+    # results gracefully — searching memories for a non-existent user yields
+    # no matches, and downstream managers require a non-None PydanticUser
+    # (enforced via @enforce_types).
+    from mirix.orm.errors import NoResultFound
+
     try:
         user = await server.user_manager.get_user_by_id(user_id)
         timezone_str = user.timezone
-    except:
-        timezone_str = "UTC"
+    except NoResultFound:
+        logger.info(
+            "User %s not found during search_memory; returning empty results",
+            user_id,
+        )
+        return {
+            "success": True,
+            "query": query,
+            "results": [],
+            "count": 0,
+        }
+    except Exception as e:
+        logger.warning(
+            "Unexpected error fetching user %s; returning empty results: %s",
+            user_id,
+            e,
+        )
+        return {
+            "success": True,
+            "query": query,
+            "results": [],
+            "count": 0,
+        }
 
     # Parse filter_tags from JSON string to dict
     parsed_filter_tags = None

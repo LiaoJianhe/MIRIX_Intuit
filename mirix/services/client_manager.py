@@ -176,19 +176,27 @@ class ClientManager:
 
         provider = get_relational_provider()
         if provider:
-            keys = await provider.list(
+            keys = await provider.find_using_named_query(
                 "client_api_keys",
-                filter_tags=None,
-                limit=1,
-                api_key_hash=hashed,
-                status="active",
+                "client_manager.get_client_by_api_key",
+                params={"apiKeyHash": hashed},
+                page_size=1,
             )
             if not keys:
                 return None
             client_id = keys[0].get("client_id", "")
-            client_data = await provider.read("clients", client_id)
-            if not client_data or client_data.get("is_deleted") or client_data.get("status") != "active":
+            client_rows = await provider.find_using_named_query(
+                "clients",
+                "client_manager.get_client_by_id",
+                params={"id": client_id},
+                page_size=1,
+            )
+            if not client_rows:
                 return None
+            client_data = client_rows[0]
+            # client_manager.get_client_by_api_key YAML already enforces
+            # status = 'active' and is_deleted = false on the api_key row,
+            # so no additional Python status check is needed here.
             return PydanticClient(**client_data)
 
         async with self.session_maker() as session:
@@ -219,11 +227,11 @@ class ClientManager:
 
         provider = get_relational_provider()
         if provider:
-            records = await provider.list(
+            records = await provider.find_using_named_query(
                 "client_api_keys",
-                filter_tags=None,
-                limit=100,
-                client_id=client_id,
+                "client_manager.list_client_api_keys",
+                params={"clientId": client_id},
+                page_size=100,
             )
             return [PydanticClientApiKey(**r) for r in records]
 
@@ -243,8 +251,27 @@ class ClientManager:
 
         provider = get_relational_provider()
         if provider:
-            result = await provider.update("client_api_keys", api_key_id, {"status": "revoked"})
-            return PydanticClientApiKey(**result)
+            # Read the row first so we can synthesize the response without relying on
+            # IPS Relational read-after-write consistency for the mutation NQ.
+            existing = await provider.read("client_api_keys", api_key_id)
+            if existing is None:
+                from mirix.orm.errors import NoResultFound as _NRF
+
+                raise _NRF(f"Client API key {api_key_id} not found")
+            await provider.mutate_using_named_query(
+                "client_api_keys",
+                "client_manager.revoke_client_api_key",
+                params={"id": api_key_id},
+            )
+            existing["status"] = "revoked"
+            # Invalidate the cached client so callers get fresh api_key status data.
+            from mirix.database.cache_provider import get_cache_provider
+
+            cache_provider = get_cache_provider()
+            client_id = existing.get("client_id")
+            if cache_provider and client_id:
+                await cache_provider.delete(f"{cache_provider.CLIENT_PREFIX}{client_id}")
+            return PydanticClientApiKey(**existing)
 
         async with self.session_maker() as session:
             api_key = await ClientApiKeyModel.read(db_session=session, identifier=api_key_id)
@@ -259,7 +286,16 @@ class ClientManager:
 
         provider = get_relational_provider()
         if provider:
+            # Read before delete so we can extract client_id for cache invalidation.
+            existing = await provider.read("client_api_keys", api_key_id)
             await provider.hard_delete("client_api_keys", api_key_id)
+            # Invalidate cached client to reflect removal of the api key.
+            from mirix.database.cache_provider import get_cache_provider
+
+            cache_provider = get_cache_provider()
+            client_id = (existing or {}).get("client_id")
+            if cache_provider and client_id:
+                await cache_provider.delete(f"{cache_provider.CLIENT_PREFIX}{client_id}")
             return
 
         async with self.session_maker() as session:
@@ -300,7 +336,11 @@ class ClientManager:
 
         provider = get_relational_provider()
         if provider:
-            await provider.delete("clients", client_id, soft=True)
+            await provider.mutate_using_named_query(
+                "clients",
+                "client_manager.update_client_by_id",
+                params={"id": client_id},
+            )
             try:
                 from mirix.database.cache_provider import get_cache_provider
 
@@ -375,41 +415,61 @@ class ClientManager:
 
         provider = get_relational_provider()
         if provider:
-            # Soft delete memory records owned by the client.
+            # Soft delete memory records owned by the client via named queries.
+            # raw_memory is included here; messages is handled separately below
+            # via mutate_using_named_query (messages is an engine table, not IEDM).
             memory_tables = [
                 "episodic_memory",
                 "semantic_memory",
                 "procedural_memory",
                 "resource_memory",
                 "knowledge_vault",
-                "messages",
+                "raw_memory",
                 "block",
             ]
             for table in memory_tables:
-                records = await provider.list(
+                rows = await provider.find_using_named_query(
                     table,
-                    filter_tags=None,
-                    limit=5000,
-                    _created_by_id=client_id,
+                    f"client_manager.list_ids_{table}_by_client",
+                    params={"createdById": client_id},
+                    page_size=5000,
                 )
-                ids = [r.get("id") for r in records if r.get("id")]
+                ids = [r.get("id") for r in rows if r.get("id")]
                 if ids:
                     await provider.bulk_delete(table, ids, soft=True)
 
-            # Soft delete agents/tools created by this client.
-            for table in ("agents", "tools"):
-                records = await provider.list(
+            # Soft delete messages owned by this client (engine table — no domain events needed).
+            await provider.mutate_using_named_query(
+                "messages",
+                "message_manager.update_by_client_id",
+                params={"clientId": client_id},
+            )
+
+            # Soft delete agents/tools created by this client (A-9/T-8 collect + A-10 bulk mutate).
+            for table, list_nq, mutate_nq in (
+                ("agents", "client_manager.list_agent_by_client_id", "client_manager.update_agent_by_client_id"),
+                ("tools", "client_manager.list_tools_by_client_id", "client_manager.update_tool_by_client_id"),
+            ):
+                records = await provider.find_using_named_query(
                     table,
-                    filter_tags=None,
-                    limit=5000,
-                    _created_by_id=client_id,
+                    list_nq,
+                    params={"createdById": client_id},
+                    page_size=5000,
                 )
                 ids = [r.get("id") for r in records if r.get("id")]
-                for entity_id in ids:
-                    await provider.delete(table, entity_id, soft=True)
+                if ids:
+                    await provider.mutate_using_named_query(
+                        table,
+                        mutate_nq,
+                        params={"createdById": client_id},
+                    )
 
             # Soft delete the client record.
-            await provider.delete("clients", client_id, soft=True)
+            await provider.mutate_using_named_query(
+                "clients",
+                "client_manager.update_client_by_id",
+                params={"id": client_id},
+            )
 
             # Cache invalidation via cache provider abstraction.
             try:
@@ -417,7 +477,9 @@ class ClientManager:
 
                 cache_provider = get_cache_provider()
                 if cache_provider:
-                    await cache_provider.delete(f"{cache_provider.CLIENT_PREFIX}{client_id}")
+                    await cache_provider.delete(
+                        f"{cache_provider.CLIENT_PREFIX}{client_id}"
+                    )
             except Exception as e:
                 logger.warning(
                     "Failed to invalidate cache for soft-deleted client %s: %s",
@@ -571,31 +633,39 @@ class ClientManager:
 
         provider = get_relational_provider()
         if provider:
-            logger.info("Bulk deleting memories via IPS Relational for client %s", client_id)
+            logger.info(
+                "Bulk deleting memories via IPS Relational for client %s", client_id
+            )
+            # raw_memory is included here; messages is handled separately below
+            # via mutate_using_named_query (messages is an engine table, not IEDM).
             memory_tables = [
-                "episodic_memory",
-                "semantic_memory",
-                "procedural_memory",
-                "resource_memory",
-                "knowledge_vault",
-                "block",
-                "messages",
+                "episodic_memory", "semantic_memory", "procedural_memory",
+                "resource_memory", "knowledge_vault", "raw_memory", "block",
             ]
             total = 0
             for table in memory_tables:
-                records = await provider.list(
+                rows = await provider.find_using_named_query(
                     table,
-                    filter_tags=None,
-                    limit=5000,
-                    _created_by_id=client_id,
+                    f"client_manager.list_ids_{table}_by_client",
+                    params={"createdById": client_id},
+                    page_size=5000,
                 )
-                if records:
-                    ids = [r.get("id", "") for r in records if r.get("id")]
+                if rows:
+                    ids = [r.get("id", "") for r in rows if r.get("id")]
                     if ids:
-                        result = await provider.bulk_delete(table, ids, soft=False)
+                        result = await provider.bulk_delete(
+                            table, ids, soft=False
+                        )
                         deleted = int(result.get("success", 0) or 0)
                         total += deleted
                         logger.debug("Bulk deleted %d %s records", deleted, table)
+
+            # Hard delete messages owned by this client (engine table — no domain events needed).
+            await provider.mutate_using_named_query(
+                "messages",
+                "message_manager.update_by_client_id",
+                params={"clientId": client_id},
+            )
 
             logger.info("IPS bulk delete complete for client %s: %d total records", client_id, total)
             return
@@ -751,10 +821,15 @@ class ClientManager:
         if provider:
             from mirix.orm.errors import NoResultFound as _NRF
 
-            result = await provider.read("clients", client_id)
-            if result is None:
+            rows = await provider.find_using_named_query(
+                "clients",
+                "client_manager.get_client_by_id",
+                params={"id": client_id},
+                page_size=1,
+            )
+            if not rows:
                 raise _NRF(f"Client {client_id} not found")
-            pydantic_client = PydanticClient(**result)
+            pydantic_client = PydanticClient(**rows[0])
             try:
                 if cache_provider:
                     from mirix.settings import settings
@@ -841,7 +916,12 @@ class ClientManager:
 
         provider = get_relational_provider()
         if provider:
-            results = await provider.list("clients", limit=limit)
+            results = await provider.find_using_named_query(
+                "clients",
+                "client_manager.list_clients",
+                params={"cursor": cursor},
+                page_size=limit or 50,
+            )
             return [PydanticClient(**r) for r in results]
         async with self.session_maker() as session:
             results = await ClientModel.list(db_session=session, cursor=cursor, limit=limit)

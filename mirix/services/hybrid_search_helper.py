@@ -44,7 +44,7 @@ async def hybrid_search(
     cursor: Optional[str] = None,
     time_range: Optional[Dict[str, Any]] = None,
     **kwargs: Any,
-) -> List[Dict]:
+) -> Tuple[List[Dict], Optional[str]]:
     """
     Hybrid search: IPS Search results + IPS Relational recent-window merge.
 
@@ -54,6 +54,12 @@ async def hybrid_search(
     3. Merge and deduplicate using timestamp-based precedence.
     4. Sort by timestamp descending, apply limit.
 
+    Returns a ``(results, next_cursor)`` tuple. ``next_cursor`` is the cursor
+    returned by ``search_provider.search()`` and lets callers paginate the
+    underlying IPS Search query. The recent-window relational records are not
+    paginated separately; they are intentionally bounded by the hybrid
+    time-window cutoff and the per-call ``limit``.
+
     Both steps must succeed; if either raises, the exception propagates
     (fail-closed — no partial results).
     """
@@ -61,7 +67,7 @@ async def hybrid_search(
     window_seconds = get_hybrid_window_seconds()
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
 
-    search_results, _cursor = await search_provider.search(
+    search_results, next_cursor = await search_provider.search(
         table,
         query_text=query_text,
         query_embedding=query_embedding,
@@ -96,7 +102,7 @@ async def hybrid_search(
     )
 
     merged = _merge_and_deduplicate(search_results, recent_records, effective_limit)
-    return merged
+    return merged, next_cursor
 
 
 async def hybrid_count(

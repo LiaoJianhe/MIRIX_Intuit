@@ -105,10 +105,15 @@ class ToolManager:
 
         provider = get_relational_provider()
         if provider:
-            result = await provider.read("tools", tool_id)
-            if result is None:
+            rows = await provider.find_using_named_query(
+                "tools",
+                "tool_manager.get_tool_by_id",
+                params={"id": tool_id, "organizationId": actor.organization_id},
+                page_size=1,
+            )
+            if not rows:
                 raise NoResultFound(f"Tool {tool_id} not found")
-            tool = PydanticTool(**result)
+            tool = PydanticTool(**rows[0])
 
             if cache_provider:
                 try:
@@ -140,11 +145,11 @@ class ToolManager:
 
             provider = get_relational_provider()
             if provider:
-                results = await provider.list(
+                results = await provider.find_using_named_query(
                     "tools",
-                    organization_id=actor.organization_id,
-                    limit=1,
-                    name=tool_name,
+                    "tool_manager.get_tool_by_name",
+                    params={"name": tool_name, "organizationId": actor.organization_id},
+                    page_size=1,
                 )
                 return PydanticTool(**results[0]) if results else None
             async with self.session_maker() as session:
@@ -165,10 +170,11 @@ class ToolManager:
 
         provider = get_relational_provider()
         if provider:
-            results = await provider.list(
+            results = await provider.find_using_named_query(
                 "tools",
-                organization_id=actor.organization_id,
-                limit=limit,
+                "tool_manager.list_tools",
+                params={"organizationId": actor.organization_id, "cursor": cursor},
+                page_size=limit or 50,
             )
             return [PydanticTool(**r) for r in results]
 
@@ -215,6 +221,13 @@ class ToolManager:
         provider = get_relational_provider()
         if provider:
             await provider.hard_delete("tools", tool_id)
+            # Invalidate tool cache to prevent stale reads after deletion.
+            from mirix.database.cache_provider import get_cache_provider
+
+            cache_provider = get_cache_provider()
+            if cache_provider:
+                tool_cache_key = f"{cache_provider.TOOL_PREFIX}{tool_id}"
+                await cache_provider.delete(tool_cache_key)
             return
 
         async with self.session_maker() as session:

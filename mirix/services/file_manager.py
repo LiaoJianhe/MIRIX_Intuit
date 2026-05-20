@@ -39,12 +39,17 @@ class FileManager:
 
         provider = get_relational_provider()
         if provider:
-            result = await provider.read("files", file_id)
-            if result is None:
+            rows = await provider.find_using_named_query(
+                "files",
+                "file_manager.get_file_metadata_by_id",
+                params={"id": file_id},
+                page_size=1,
+            )
+            if not rows:
                 from mirix.orm.errors import NoResultFound
 
                 raise NoResultFound(f"File {file_id} not found")
-            return PydanticFileMetadata(**result)
+            return PydanticFileMetadata(**rows[0])
         async with self.session_maker() as session:
             file_metadata = await FileMetadataModel.read(db_session=session, identifier=file_id)
             return file_metadata.to_pydantic()
@@ -61,10 +66,11 @@ class FileManager:
 
         provider = get_relational_provider()
         if provider:
-            results = await provider.list(
+            results = await provider.find_using_named_query(
                 "files",
-                organization_id=organization_id,
-                limit=limit,
+                "file_manager.list_file_metadata_by_org",
+                params={"organizationId": organization_id, "cursor": cursor},
+                page_size=limit or 50,
             )
             return [PydanticFileMetadata(**r) for r in results]
         async with self.session_maker() as session:
@@ -115,7 +121,12 @@ class FileManager:
 
         provider = get_relational_provider()
         if provider:
-            results = await provider.list("files", limit=limit)
+            results = await provider.find_using_named_query(
+                "files",
+                "file_manager.list_all_file_metadata",
+                params={"cursor": cursor},
+                page_size=limit or 50,
+            )
             return [PydanticFileMetadata(**r) for r in results]
         async with self.session_maker() as session:
             results = await FileMetadataModel.list(db_session=session, cursor=cursor, limit=limit)
@@ -169,6 +180,21 @@ class FileManager:
         self, file_name: str, organization_id: Optional[str] = None
     ) -> List[PydanticFileMetadata]:
         """Search files by name pattern."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider is not None:
+            rows = await provider.find_using_named_query(
+                "files",
+                "file_manager.search_files_by_name",
+                params={
+                    "fileName": f"%{file_name}%",
+                    "organizationId": organization_id,
+                },
+                page_size=500,
+            )
+            return [PydanticFileMetadata(**r) for r in rows]
+
         async with self.session_maker() as session:
             stmt = select(FileMetadataModel).where(
                 func.lower(FileMetadataModel.file_name).contains(func.lower(file_name))
@@ -184,6 +210,18 @@ class FileManager:
         self, file_type: str, organization_id: Optional[str] = None
     ) -> List[PydanticFileMetadata]:
         """Get files by file type."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider is not None:
+            rows = await provider.find_using_named_query(
+                "files",
+                "file_manager.get_files_by_type",
+                params={"fileType": file_type, "organizationId": organization_id},
+                page_size=500,
+            )
+            return [PydanticFileMetadata(**r) for r in rows]
+
         async with self.session_maker() as session:
             stmt = select(FileMetadataModel).where(FileMetadataModel.file_type == file_type)
             if organization_id:
@@ -195,6 +233,18 @@ class FileManager:
     @enforce_types
     async def check_file_exists(self, file_path: str, organization_id: Optional[str] = None) -> bool:
         """Check if a file with the given path exists in the database."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider is not None:
+            rows = await provider.find_using_named_query(
+                "files",
+                "file_manager.check_file_exists",
+                params={"filePath": file_path, "organizationId": organization_id},
+                page_size=1,
+            )
+            return bool(rows)
+
         async with self.session_maker() as session:
             try:
                 stmt = select(FileMetadataModel).where(FileMetadataModel.file_path == file_path)
@@ -208,6 +258,28 @@ class FileManager:
     @enforce_types
     async def get_file_stats(self, organization_id: Optional[str] = None) -> dict:
         """Get file statistics for an organization or globally."""
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider is not None:
+            from common.ipsr.named_query_results import FileStatsResult
+
+            rows = await provider.find_using_named_query(
+                "files",
+                "file_manager.get_file_stats",
+                params={"organizationId": organization_id},
+                result_set_entity_class=FileStatsResult,
+                page_size=1,
+            )
+            if not rows:
+                return {"total_files": 0, "total_size": 0, "unique_types": 0}
+            r = rows[0]
+            return {
+                "total_files": int(r.get("total_files") or 0),
+                "total_size": int(r.get("total_size") or 0),
+                "unique_types": int(r.get("unique_types") or 0),
+            }
+
         async with self.session_maker() as session:
             stmt = select(
                 func.count(FileMetadataModel.id).label("total_files"),

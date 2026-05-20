@@ -426,7 +426,12 @@ class SemanticMemoryManager:
 
         provider = get_relational_provider()
         if provider:
-            result = await provider.read("semantic_memory", semantic_memory_id)
+            from mirix.services.memory_manager_helpers import actor_from_user
+
+            actor = actor_from_user(user)
+            result = await provider.read(
+                "semantic_memory", semantic_memory_id, actor=actor
+            )
             if result is None:
                 raise NoResultFound(f"Semantic memory item with id {semantic_memory_id} not found.")
             return PydanticSemanticMemoryItem(**result)
@@ -490,6 +495,23 @@ class SemanticMemoryManager:
         Filter by user_id from actor.
         Returns None if no items exist.
         """
+        # IPS provider delegation (B2 generic helper).
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            from mirix.services.memory_manager_helpers import (
+                find_most_recently_updated,
+            )
+
+            row = await find_most_recently_updated(
+                provider,
+                "semantic_memory",
+                user_id=user.id,
+                organization_id=user.organization_id,
+            )
+            return PydanticSemanticMemoryItem(**row) if row else None
+
         async with self.session_maker() as session:
             # Use proper PostgreSQL JSON text extraction and casting for ordering
             from sqlalchemy import DateTime, cast, text
@@ -504,7 +526,7 @@ class SemanticMemoryManager:
             result = await session.execute(query.limit(1))
             item = result.scalar_one_or_none()
 
-            return [item.to_pydantic()] if item else None
+            return item.to_pydantic() if item else None
 
     @enforce_types
     async def create_item(
@@ -532,6 +554,13 @@ class SemanticMemoryManager:
         # IPS provider delegation (create)
         from mirix.database.relational_provider import get_relational_provider
 
+        # Validate required fields up front so both branches reject identically.
+        # (Moved out of the PG-only path so IPS branch enforces the same contract.)
+        if not item_data.summary:
+            raise ValueError("Required field 'summary' missing from semantic memory data")
+        if not item_data.name:
+            raise ValueError("Required field 'name' missing from semantic memory data")
+
         provider = get_relational_provider()
         if provider:
             data_dict = item_data.model_dump()
@@ -541,7 +570,7 @@ class SemanticMemoryManager:
             created = data_dict.get("created_at")
             if isinstance(created, datetime) and created.tzinfo is not None:
                 data_dict["created_at"] = created.astimezone(timezone.utc).replace(tzinfo=None)
-            result = await provider.create("semantic_memory", data_dict)
+            result = await provider.create("semantic_memory", data_dict, actor=actor)
             return PydanticSemanticMemoryItem(**result)
 
         # Ensure ID is set before model_dump
@@ -549,12 +578,6 @@ class SemanticMemoryManager:
             item_data.id = await generate_unique_short_id_async(self.session_maker, SemanticMemoryItem, "sem")
 
         data_dict = item_data.model_dump()
-
-        # Validate required fields
-        required_fields = ["summary", "name"]
-        for field in required_fields:
-            if field not in data_dict or not data_dict[field]:
-                raise ValueError(f"Required field '{field}' missing from semantic memory data")
 
         # Set client_id and user_id on the memory
         data_dict["client_id"] = client_id
@@ -587,7 +610,19 @@ class SemanticMemoryManager:
         if provider:
             update_data = item_update.model_dump(exclude_unset=True)
             update_data.pop("id", None)
-            result = await provider.update("semantic_memory", item_update.id, update_data)
+            result = await provider.update(
+                "semantic_memory", item_update.id, update_data, actor=actor
+            )
+            try:
+                from mirix.services.memory_manager_helpers import invalidate_memory_cache
+
+                await invalidate_memory_cache("semantic_memory", [item_update.id])
+            except Exception as exc:
+                logger.warning(
+                    "Cache invalidation skipped for semantic_memory %s: %s",
+                    item_update.id,
+                    exc,
+                )
             return PydanticSemanticMemoryItem(**result)
 
         async with self.session_maker() as session:
@@ -607,10 +642,21 @@ class SemanticMemoryManager:
     async def create_many_items(
         self,
         items: List[PydanticSemanticMemoryItem],
-        user: PydanticUser,
+        actor: PydanticClient,
+        client_id: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> List[PydanticSemanticMemoryItem]:
-        """Create multiple semantic memory items."""
-        return [await self.create_item(i, user) for i in items]
+        """Create multiple semantic memory items.
+
+        Signature mirrors :meth:`create_item` (was previously taking a user,
+        which produced confused call sites that had to inline-build a
+        ``PydanticClient``). Now both single- and many-create entry points
+        accept the same ``actor`` arg and optional ``client_id`` / ``user_id``.
+        """
+        return [
+            await self.create_item(i, actor, client_id=client_id, user_id=user_id)
+            for i in items
+        ]
 
     async def get_total_number_of_items(self, user: PydanticUser) -> int:
         """Get the total number of items in the semantic memory for the user."""
@@ -632,6 +678,13 @@ class SemanticMemoryManager:
             from mirix.services.hybrid_search_helper import hybrid_count
 
             relational_provider = get_relational_provider()
+            # NOTE: ``hybrid_count`` (IPS Search + IPS Relational recent-window)
+            # and the SQL ``select(count(*))`` PG fallback are not expected to
+            # return identical values. IPS Search lags behind the source-of-
+            # truth (Relational) within the hybrid time window, so this count
+            # represents "search-visible plus recently-written rows" rather
+            # than an exact row count. Callers that need an exact count must
+            # use the relational provider's ``size`` API instead.
             return await hybrid_count(
                 table="semantic_memory",
                 search_provider=search_provider,
@@ -728,7 +781,7 @@ class SemanticMemoryManager:
             from mirix.services.hybrid_search_helper import hybrid_search
 
             relational_provider = get_relational_provider()
-            results = await hybrid_search(
+            results, _next_cursor = await hybrid_search(
                 table="semantic_memory",
                 search_provider=search_provider,
                 relational_provider=relational_provider,
@@ -1096,7 +1149,7 @@ class SemanticMemoryManager:
                         "operation": "created",
                     },
                 }
-                result = await provider.create("semantic_memory", data_dict)
+                result = await provider.create("semantic_memory", data_dict, actor=actor)
                 return PydanticSemanticMemoryItem(**result)
 
             # Conditionally calculate embeddings based on BUILD_EMBEDDINGS_FOR_MEMORY flag
@@ -1147,7 +1200,17 @@ class SemanticMemoryManager:
 
         provider = get_relational_provider()
         if provider:
-            await provider.delete("semantic_memory", semantic_memory_id)
+            await provider.delete("semantic_memory", semantic_memory_id, actor=actor)
+            try:
+                from mirix.services.memory_manager_helpers import invalidate_memory_cache
+
+                await invalidate_memory_cache("semantic_memory", [semantic_memory_id])
+            except Exception as exc:
+                logger.warning(
+                    "Cache invalidation skipped for semantic_memory %s: %s",
+                    semantic_memory_id,
+                    exc,
+                )
             return
 
         async with self.session_maker() as session:
@@ -1181,17 +1244,13 @@ class SemanticMemoryManager:
 
         provider = get_relational_provider()
         if provider:
-            records = await provider.list(
+            count = await provider.bulk_delete_with_events(
                 "semantic_memory",
-                filter_tags=None,
-                limit=5000,
-                _created_by_id=actor.id,
+                filters={"_created_by_id": actor.id},
+                soft=False,
+                actor=actor,
             )
-            ids = [r.get("id") for r in records if r.get("id")]
-            if not ids:
-                return 0
-            result = await provider.bulk_delete("semantic_memory", ids, soft=False)
-            return int(result.get("success", 0) or 0)
+            return int(count)
 
         async with self.session_maker() as session:
             # Get IDs for Redis cleanup (only fetch IDs, not full objects)
@@ -1237,17 +1296,13 @@ class SemanticMemoryManager:
 
         provider = get_relational_provider()
         if provider:
-            records = await provider.list(
+            count = await provider.bulk_delete_with_events(
                 "semantic_memory",
-                filter_tags=None,
-                limit=5000,
-                _created_by_id=actor.id,
+                filters={"_created_by_id": actor.id},
+                soft=True,
+                actor=actor,
             )
-            ids = [r.get("id") for r in records if r.get("id")]
-            if not ids:
-                return 0
-            result = await provider.bulk_delete("semantic_memory", ids, soft=True)
-            return int(result.get("success", 0) or 0)
+            return int(count)
 
         async with self.session_maker() as session:
             # Query all non-deleted records for this client (use actor.id)
@@ -1300,17 +1355,12 @@ class SemanticMemoryManager:
 
         provider = get_relational_provider()
         if provider:
-            records = await provider.list(
+            count = await provider.bulk_delete_with_events(
                 "semantic_memory",
-                user_id=user_id,
-                filter_tags=None,
-                limit=5000,
+                filters={"user_id": user_id},
+                soft=True,
             )
-            ids = [r.get("id") for r in records if r.get("id")]
-            if not ids:
-                return 0
-            result = await provider.bulk_delete("semantic_memory", ids, soft=True)
-            return int(result.get("success", 0) or 0)
+            return int(count)
 
         async with self.session_maker() as session:
             # Query all non-deleted records for this user
@@ -1364,17 +1414,12 @@ class SemanticMemoryManager:
 
         provider = get_relational_provider()
         if provider:
-            records = await provider.list(
+            count = await provider.bulk_delete_with_events(
                 "semantic_memory",
-                user_id=user_id,
-                filter_tags=None,
-                limit=5000,
+                filters={"user_id": user_id},
+                soft=False,
             )
-            ids = [r.get("id") for r in records if r.get("id")]
-            if not ids:
-                return 0
-            result = await provider.bulk_delete("semantic_memory", ids, soft=False)
-            return int(result.get("success", 0) or 0)
+            return int(count)
 
         async with self.session_maker() as session:
             # Get IDs for Redis cleanup (only fetch IDs, not full objects)
@@ -1448,7 +1493,7 @@ class SemanticMemoryManager:
             from mirix.services.hybrid_search_helper import hybrid_search
 
             relational_provider = get_relational_provider()
-            results = await hybrid_search(
+            results, _next_cursor = await hybrid_search(
                 table="semantic_memory",
                 search_provider=search_provider,
                 relational_provider=relational_provider,
