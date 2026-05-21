@@ -12,10 +12,13 @@ knowledge_vault):
   outage never blocks the underlying provider write.
 - :func:`find_most_recently_updated`: provider-agnostic helper that returns
   the most-recently-updated row for a memory table given a set of filters.
-  For tables with a registered named query (semantic_memory, knowledge_vault),
+  For all 7 memory tables (block, raw_memory, episodic_memory,
+  semantic_memory, procedural_memory, resource_memory, knowledge_vault) it
   uses ``find_using_named_query`` with ``ORDER BY COALESCE(ipsrupdatedon,
-  ipsrcreatedon) DESC`` and ``page_size=1``. Falls back to
-  ``provider.list(..., sort="updated_at", limit=1)`` for other tables.
+  ipsrcreatedon) DESC`` and ``page_size=1`` whenever ``user_id`` and
+  ``organization_id`` are provided. Falls back to
+  ``provider.list(..., sort="updated_at", limit=1)`` for client-scoped or
+  extra-filter call shapes that the named query doesn't cover.
 - :func:`actor_from_user`: build a duck-typed actor object from a
   ``PydanticUser`` so memory-manager call sites that have only a user
   (no client) can still feed the actor-aware provider methods.
@@ -93,16 +96,19 @@ async def invalidate_memory_cache(table: str, ids: Iterable[str]) -> None:
         try:
             await cache_provider.delete(cache_key)
         except Exception as exc:
-            logger.warning(
-                "Failed to invalidate cache for %s/%s: %s", table, entity_id, exc
-            )
+            logger.warning("Failed to invalidate cache for %s/%s: %s", table, entity_id, exc)
 
 
 # Tables with a dedicated named query that returns the single most-recently-updated
 # row ordered by COALESCE(ipsrupdatedon, ipsrcreatedon) DESC. Only applicable when
 # user_id and organization_id are both provided (the common call pattern).
 _MOST_RECENTLY_UPDATED_QUERIES: Dict[str, str] = {
+    "block": "memory_manager_helpers.get_most_recently_updated_block",
+    "raw_memory": "memory_manager_helpers.get_most_recently_updated_raw_memory",
+    "episodic_memory": "memory_manager_helpers.get_most_recently_updated_episodic_memory",
     "semantic_memory": "memory_manager_helpers.get_most_recently_updated_semantic_memory",
+    "procedural_memory": "memory_manager_helpers.get_most_recently_updated_procedural_memory",
+    "resource_memory": "memory_manager_helpers.get_most_recently_updated_resource_memory",
     "knowledge_vault": "memory_manager_helpers.get_most_recently_updated_knowledge_vault",
 }
 
@@ -118,14 +124,17 @@ async def find_most_recently_updated(
 ) -> Optional[Dict[str, Any]]:
     """Return the most-recently-updated row for ``table`` matching the filters.
 
-    For tables registered in ``_MOST_RECENTLY_UPDATED_QUERIES`` (semantic_memory,
-    knowledge_vault), uses a named query with server-side ordering so a single
-    round-trip returns the correct row. Only active when ``user_id`` and
-    ``organization_id`` are both provided; falls back to the ``provider.list``
-    path otherwise.
+    For all memory tables registered in ``_MOST_RECENTLY_UPDATED_QUERIES``
+    (block, raw_memory, episodic_memory, semantic_memory, procedural_memory,
+    resource_memory, knowledge_vault) this uses a named query with
+    server-side ordering so a single round-trip returns the correct row.
+    Only active when ``user_id`` and ``organization_id`` are both provided
+    and no ``client_id``/``extra_filters`` are supplied; falls back to the
+    ``provider.list`` path otherwise.
 
-    For other tables, uses ``provider.list(... sort="updated_at", limit=1)``
-    and falls back to ``sort="created_at"`` when no row has an ``updated_at``.
+    For other tables (or unsupported call shapes), uses
+    ``provider.list(... sort="updated_at", limit=1)`` and falls back to
+    ``sort="created_at"`` when no row has an ``updated_at``.
 
     Returns ``None`` when no matching row exists.
     """
@@ -203,9 +212,7 @@ def actor_from_user(
     user_id = getattr(user, "id", None)
     organization_id = getattr(user, "organization_id", None)
     if user_id is None or organization_id is None:
-        raise ValueError(
-            "actor_from_user requires user to expose 'id' and 'organization_id'"
-        )
+        raise ValueError("actor_from_user requires user to expose 'id' and 'organization_id'")
     return _ActorView(
         id=client_id or user_id,
         organization_id=organization_id,
