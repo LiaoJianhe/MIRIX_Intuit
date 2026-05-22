@@ -27,7 +27,6 @@ The queue should be initialized when the REST API starts (in lifespan event).
 """
 
 import logging
-from typing import Optional
 
 from mirix.queue.manager import get_manager
 from mirix.queue.message_pb2 import QueueMessage
@@ -76,14 +75,8 @@ async def process_external_message(raw_message: bytes) -> None:
     """
     Process a message consumed by an external system (e.g., Numaflow, custom Kafka consumer).
 
-    This is the primary high-level API for integrating with external Kafka consumers or event
-    processing systems. It handles all internal details of deserialization and processing.
-
-    Args:
-        raw_message: Raw message bytes from Kafka or event bus (JSON or protobuf format)
-
-    Raises:
-        ValueError: If message parsing fails
+    On a Permanent classification this marks the source processing_complete and returns
+    normally (consumer acks). Transient exhaustion re-raises so the consumer redelivers.
     """
     if not _manager.is_initialized:
         logger.info("Queue not initialized, auto-initializing with server for external message processing")
@@ -101,18 +94,55 @@ async def process_external_message(raw_message: bytes) -> None:
     worker = workers[0]
 
     from mirix.queue.config import KAFKA_SERIALIZATION_FORMAT
+    from mirix.queue.error_policy import OutcomeKind, process_with_policy
     from mirix.queue.queue_util import deserialize_queue_message
+    from mirix.services.memory_source_manager import MemorySourceManager
 
     queue_message = deserialize_queue_message(raw_message, format=KAFKA_SERIALIZATION_FORMAT)
 
+    memory_source_id = (
+        queue_message.memory_source_id
+        if queue_message.HasField("memory_source_id")
+        else None
+    )
+
     logger.debug(
-        "Processing external message (%s format): agent_id=%s, user_id=%s",
+        "Processing external message (%s format): agent_id=%s, user_id=%s, memory_source_id=%s",
         KAFKA_SERIALIZATION_FORMAT,
         queue_message.agent_id,
         queue_message.user_id if queue_message.HasField("user_id") else "None",
+        memory_source_id,
     )
 
-    await worker.process_external_message(queue_message)
+    async def _run_step() -> None:
+        await worker.process_external_message(queue_message)
+
+    async def _mark_permanent(source_id: str, _error_message: str, exc: BaseException) -> None:
+        # Mark processing_complete so redeliveries hit the existing short-circuit in
+        # agent.step and don't re-run the LLM pipeline against the same poison input.
+        try:
+            await MemorySourceManager().mark_processing_complete(source_id)
+            logger.info(
+                "Marked memory_source=%s processing_complete on permanent failure (%s)",
+                source_id,
+                type(exc).__name__,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to mark memory_source=%s processing_complete on permanent failure",
+                source_id,
+            )
+
+    outcome = await process_with_policy(
+        _run_step,
+        memory_source_id=memory_source_id,
+        on_permanent=_mark_permanent if memory_source_id else None,
+    )
+
+    if outcome.kind is OutcomeKind.TRANSIENT_EXHAUSTED:
+        assert outcome.cause is not None
+        raise outcome.cause
+    # COMPLETED and PERMANENT_FAILURE both return normally so the consumer acks.
 
 
 __all__ = ["initialize_queue", "save", "process_external_message", "QueueMessage"]

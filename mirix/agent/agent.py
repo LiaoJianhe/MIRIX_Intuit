@@ -7,7 +7,6 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
-import httpx
 import numpy as np
 import pytz
 
@@ -28,7 +27,8 @@ from mirix.constants import (
     REQ_HEARTBEAT_MESSAGE,
 )
 from mirix.embeddings import embedding_model
-from mirix.errors import ContextWindowExceededError, LLMError
+from mirix.errors import ContextWindowExceededError
+from mirix.queue.error_policy import Bucket, classify
 from mirix.functions.functions import get_function_from_module
 from mirix.helpers import ToolRulesSolver
 from mirix.helpers.message_helpers import prepare_input_message_create
@@ -632,31 +632,23 @@ class Agent(BaseAgent):
         function_call: Optional[str] = None,
         first_message: bool = False,
         stream: bool = False,  # TODO move to config?
-        empty_response_retry_limit: Optional[int] = None,  # Uses settings.llm_retry_limit if None
-        backoff_factor: Optional[float] = None,  # Uses settings.llm_retry_backoff_factor if None
-        max_delay: Optional[float] = None,  # Uses settings.llm_retry_max_delay if None
         step_count: Optional[int] = None,
         last_function_failed: bool = False,
         get_input_data_for_debugging: bool = False,
         existing_file_uris: Optional[List[str]] = None,
-        second_try: bool = False,
         llm_client: Optional[LLMClient] = None,
     ) -> ChatCompletionResponse:
-        """Get response from LLM API with robust retry mechanism.
+        """Call the LLM once, with a bounded retry for Transient errors only.
 
-        Retry settings can be configured via environment variables:
-        - MIRIX_LLM_RETRY_LIMIT: Max retry attempts (default: 3)
-        - MIRIX_LLM_RETRY_BACKOFF_FACTOR: Exponential backoff multiplier (default: 0.5)
-        - MIRIX_LLM_RETRY_MAX_DELAY: Max delay between retries in seconds (default: 10.0)
+        Transient errors (rate limits, 5xx, connection errors) are retried a
+        few times with short exponential backoff. Permanent errors (422, 400,
+        401, 403) propagate on the first occurrence so the caller's policy
+        wrapper can classify and decide what to do.
+
+        Budget settings (mirix/settings.py):
+            llm_inline_retry_max_attempts, llm_inline_retry_base_seconds,
+            llm_inline_retry_max_delay.
         """
-        # Apply defaults from settings if not explicitly provided
-        if empty_response_retry_limit is None:
-            empty_response_retry_limit = settings.llm_retry_limit
-        if backoff_factor is None:
-            backoff_factor = settings.llm_retry_backoff_factor
-        if max_delay is None:
-            max_delay = settings.llm_retry_max_delay
-
         log_telemetry(self.logger, "_get_ai_reply start")
         allowed_tool_names = self.tool_rules_solver.get_allowed_tool_names(
             last_function_response=self.last_function_response
@@ -698,7 +690,11 @@ class Agent(BaseAgent):
             llm_config=self.agent_state.llm_config,
         )
 
-        for attempt in range(1, empty_response_retry_limit + 1):
+        max_attempts = max(1, settings.llm_inline_retry_max_attempts)
+        base = settings.llm_inline_retry_base_seconds
+        cap = settings.llm_inline_retry_max_delay
+        # Total tries = 1 initial + max_attempts retries.
+        for attempt in range(max_attempts + 1):
             try:
                 log_telemetry(self.logger, "_get_ai_reply create start")
 
@@ -723,7 +719,6 @@ class Agent(BaseAgent):
                         messages=message_sequence,
                         user_id=self.agent_state.created_by_id,
                         functions=allowed_functions,
-                        # functions_python=self.functions_python, do we need this?
                         function_call=function_call,
                         first_message=first_message,
                         force_tool_call=force_tool_call,
@@ -733,7 +728,9 @@ class Agent(BaseAgent):
                     )
                 log_telemetry(self.logger, "_get_ai_reply create finish")
 
-                # These bottom two are retryable
+                # Validate the response shape. These ValueErrors are caught
+                # below and classified as Transient (provider quirks worth
+                # retrying), not Permanent.
                 if len(response.choices) == 0 or response.choices[0] is None:
                     raise ValueError(f"API call returned an empty message: {response}")
 
@@ -746,147 +743,48 @@ class Agent(BaseAgent):
                     "function_call",
                     "tool_calls",
                 ]:
-                    if response.choices[0].finish_reason == "length":
-                        if attempt >= empty_response_retry_limit:
-                            raise RuntimeError(
-                                "Retries exhausted and no valid response received. Final error: maximum context length exceeded or generated content is too long"
-                            )
-                        else:
-                            delay = min(backoff_factor * (2 ** (attempt - 1)), max_delay)
-                            printv(
-                                f"[Mirix.Agent.{self.agent_state.name}] WARNING: Attempt {attempt} failed: {response.choices[0].finish_reason}. Retrying in {delay} seconds..."
-                            )
-                            await asyncio.sleep(delay)
-                            continue
-                    else:
-                        raise ValueError(f"Bad finish reason from API: {response.choices[0].finish_reason}")
+                    # "length" historically retried; treat the same way via ValueError
+                    # so the unified classifier handles it.
+                    raise ValueError(
+                        f"Bad finish reason from API: {response.choices[0].finish_reason}"
+                    )
+
                 log_telemetry(self.logger, "_handle_ai_response finish")
+                return response
 
-            except ValueError as ve:
-                # Some upstream libraries raise ValueError() with an empty message, which
-                # makes retry logs unhelpful. Always include type + repr for visibility.
-                ve_desc = f"{type(ve).__name__}: {ve!r}"
-                if attempt >= empty_response_retry_limit:
-                    printv(f"[Mirix.Agent.{self.agent_state.name}] ERROR: Retry limit reached. Final error: {ve_desc}")
-                    log_telemetry(self.logger, "_handle_ai_response finish ValueError")
-                    # Log traceback once at the final attempt for actionable debugging.
-                    self.logger.exception(
-                        "[Mirix.Agent.%s] Retry limit reached (ValueError).",
+            except Exception as exc:
+                bucket = classify(exc)
+                if bucket is Bucket.PERMANENT:
+                    # Permanent errors are not retryable. Propagate to the caller
+                    # immediately so the outer policy wrapper can classify and
+                    # decide whether to ack or surface the failure.
+                    log_telemetry(self.logger, "_get_ai_reply permanent")
+                    self.logger.info(
+                        "[Mirix.Agent.%s] _get_ai_reply: permanent error (%s) — propagating immediately",
                         self.agent_state.name,
+                        type(exc).__name__,
                     )
-                    raise Exception(f"Retries exhausted and no valid response received. Final error: {ve_desc}")
-                else:
-                    delay = min(backoff_factor * (2 ** (attempt - 1)), max_delay)
-                    printv(
-                        f"[Mirix.Agent.{self.agent_state.name}] WARNING: Attempt {attempt} failed: {ve_desc}. Retrying in {delay} seconds..."
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-
-            except KeyError as ke:
-                # Gemini api sometimes can yield empty response
-                # This is a retryable error
-                ke_desc = f"{type(ke).__name__}: {ke!r}"
-                if attempt >= empty_response_retry_limit:
-                    printv(f"[Mirix.Agent.{self.agent_state.name}] ERROR: Retry limit reached. Final error: {ke_desc}")
-                    log_telemetry(self.logger, "_handle_ai_response finish KeyError")
-                    self.logger.exception(
-                        "[Mirix.Agent.%s] Retry limit reached (KeyError).",
+                    raise
+                if attempt >= max_attempts:
+                    # Budget exhausted on a Transient. Let the outer layer decide.
+                    log_telemetry(self.logger, "_get_ai_reply transient exhausted")
+                    self.logger.warning(
+                        "[Mirix.Agent.%s] _get_ai_reply: transient retries exhausted after %d attempts: %s",
                         self.agent_state.name,
+                        max_attempts + 1,
+                        f"{type(exc).__name__}: {exc!r}",
                     )
-                    raise Exception(f"Retries exhausted and no valid response received. Final error: {ke_desc}")
-                else:
-                    delay = min(backoff_factor * (2 ** (attempt - 1)), max_delay)
-                    printv(
-                        f"[Mirix.Agent.{self.agent_state.name}] WARNING: Attempt {attempt} failed: {ke_desc}. Retrying in {delay} seconds..."
-                    )
-                    await asyncio.sleep(delay)
-                    continue
+                    raise
+                delay = min(base * (2**attempt), cap)
+                printv(
+                    f"[Mirix.Agent.{self.agent_state.name}] WARNING: Attempt {attempt + 1} failed: "
+                    f"{type(exc).__name__}: {exc!r}. Retrying in {delay} seconds..."
+                )
+                await asyncio.sleep(delay)
+                continue
 
-            except LLMError as llm_error:
-                llm_error_desc = f"{type(llm_error).__name__}: {llm_error!r}"
-                if attempt >= empty_response_retry_limit:
-                    printv(
-                        f"[Mirix.Agent.{self.agent_state.name}] ERROR: Retry limit reached. Final error: {llm_error_desc}"
-                    )
-                    log_telemetry(self.logger, "_handle_ai_response finish LLMError")
-                    log_telemetry(self.logger, "_get_ai_reply_last_message_hacking start")
-                    self.logger.exception(
-                        "[Mirix.Agent.%s] Retry limit reached (LLMError).",
-                        self.agent_state.name,
-                    )
-                    if second_try:
-                        raise Exception(
-                            f"Retries exhausted and no valid response received. Final error: {llm_error_desc}"
-                        )
-                    return await self._get_ai_reply(
-                        [message_sequence[-1]],
-                        function_call,
-                        first_message,
-                        stream,
-                        empty_response_retry_limit,
-                        backoff_factor,
-                        max_delay,
-                        step_count,
-                        last_function_failed,
-                        get_input_data_for_debugging,
-                        second_try=True,
-                        llm_client=active_llm_client,
-                    )
-
-                else:
-                    delay = min(backoff_factor * (2 ** (attempt - 1)), max_delay)
-                    printv(
-                        f"[Mirix.Agent.{self.agent_state.name}] WARNING: Attempt {attempt} failed: {llm_error_desc}. Retrying in {delay} seconds..."
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-
-            except AssertionError as ae:
-                tb_str = traceback.format_exc()
-                ae_desc = f"{type(ae).__name__}: {ae!r}\nTraceback:\n{tb_str}"
-                if attempt >= empty_response_retry_limit:
-                    printv(f"[Mirix.Agent.{self.agent_state.name}] ERROR: Retry limit reached. Final error: {ae_desc}")
-                    self.logger.exception(
-                        "[Mirix.Agent.%s] Retry limit reached (AssertionError).",
-                        self.agent_state.name,
-                    )
-                    raise Exception(f"Retries exhausted and no valid response received. Final error: {ae_desc}")
-                else:
-                    delay = min(backoff_factor * (2 ** (attempt - 1)), max_delay)
-                    printv(
-                        f"[Mirix.Agent.{self.agent_state.name}] WARNING: Attempt {attempt} failed: {ae_desc}. Retrying in {delay} seconds..."
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-
-            except httpx.HTTPStatusError as he:
-                he_desc = f"{type(he).__name__}: {he!r}"
-                if attempt >= empty_response_retry_limit:
-                    printv(f"[Mirix.Agent.{self.agent_state.name}] ERROR: Retry limit reached. Final error: {he_desc}")
-                    self.logger.exception(
-                        "[Mirix.Agent.%s] Retry limit reached (HTTPError).",
-                        self.agent_state.name,
-                    )
-                    raise Exception(f"Retries exhausted and no valid response received. Final error: {he_desc}")
-                else:
-                    delay = min(backoff_factor * (2 ** (attempt - 1)), max_delay)
-                    printv(
-                        f"[Mirix.Agent.{self.agent_state.name}] WARNING: Attempt {attempt} failed: {he_desc}. Retrying in {delay} seconds..."
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-
-            except Exception as e:
-                log_telemetry(self.logger, "_handle_ai_response finish generic Exception")
-                # For non-retryable errors, exit immediately
-                log_telemetry(self.logger, "_handle_ai_response finish generic Exception")
-                raise e
-
-            # return the response
-            return response
-
-        log_telemetry(self.logger, "_handle_ai_response finish catch-all exception")
+        # Unreachable: the loop either returns or raises. Defensive only.
+        log_telemetry(self.logger, "_get_ai_reply unreachable")
         raise Exception("Retries exhausted and no valid response received.")
 
     async def _handle_ai_response(
