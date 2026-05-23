@@ -1280,19 +1280,50 @@ class TestFindMostRecentlyUpdatedNamedQuery:
         args = mock_provider.find_using_named_query.await_args[0]
         assert args[1] == "memory_manager_helpers.get_most_recently_updated_knowledge_vault"
 
-    async def test_falls_back_to_list_for_other_tables(self):
+    @pytest.mark.parametrize(
+        "table,expected_query",
+        [
+            (
+                "block",
+                "memory_manager_helpers.get_most_recently_updated_block",
+            ),
+            (
+                "raw_memory",
+                "memory_manager_helpers.get_most_recently_updated_raw_memory",
+            ),
+            (
+                "episodic_memory",
+                "memory_manager_helpers.get_most_recently_updated_episodic_memory",
+            ),
+            (
+                "procedural_memory",
+                "memory_manager_helpers.get_most_recently_updated_procedural_memory",
+            ),
+            (
+                "resource_memory",
+                "memory_manager_helpers.get_most_recently_updated_resource_memory",
+            ),
+        ],
+    )
+    async def test_all_memory_tables_use_named_query(self, table, expected_query):
+        """Every memory table now resolves to its dedicated named query."""
         from mirix.services.memory_manager_helpers import find_most_recently_updated
 
         mock_provider = AsyncMock()
-        mock_provider.list = AsyncMock(return_value=[{"id": "e-1"}])
-
-        result = await find_most_recently_updated(
-            mock_provider, "episodic_memory", user_id="u", organization_id="o"
+        mock_provider.find_using_named_query = AsyncMock(
+            return_value=[{"id": f"{table}-1"}]
         )
 
-        assert result == {"id": "e-1"}
-        mock_provider.list.assert_awaited()
-        mock_provider.find_using_named_query.assert_not_awaited()
+        result = await find_most_recently_updated(
+            mock_provider, table, user_id="u", organization_id="o"
+        )
+
+        assert result == {"id": f"{table}-1"}
+        mock_provider.find_using_named_query.assert_awaited_once()
+        args = mock_provider.find_using_named_query.await_args[0]
+        assert args[0] == table
+        assert args[1] == expected_query
+        mock_provider.list.assert_not_awaited()
 
     async def test_falls_back_to_list_when_no_org_id(self):
         """Named query not used when organization_id is missing."""
