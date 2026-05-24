@@ -22,11 +22,15 @@ class MemoryCitationManager:
 
         self.session_maker = db_context
 
-    def _exists_cache_key(self, memory_source_id: str, memory_type: str, memory_id: str) -> str:
+    def _exists_cache_key(
+        self, memory_source_id: str, memory_type: str, memory_id: str
+    ) -> str:
         """Cache key for the check_exists lookup (hot-path query for citation-level dedup)."""
         return f"citation_exists:{memory_source_id}:{memory_type}:{memory_id}"
 
-    async def _cache_exists(self, memory_source_id: str, memory_type: str, memory_id: str) -> None:
+    async def _cache_exists(
+        self, memory_source_id: str, memory_type: str, memory_id: str
+    ) -> None:
         """Cache a positive exists result. Never raises."""
         try:
             from mirix.database.cache_provider import get_cache_provider
@@ -35,7 +39,9 @@ class MemoryCitationManager:
             cache_provider = get_cache_provider()
             if cache_provider:
                 key = self._exists_cache_key(memory_source_id, memory_type, memory_id)
-                await cache_provider.set_json(key, {"exists": True}, ttl=settings.redis_ttl_default)
+                await cache_provider.set_json(
+                    key, {"exists": True}, ttl=settings.redis_ttl_default
+                )
         except Exception as e:
             logger.warning("Cache write failed for citation exists check: %s", e)
 
@@ -106,7 +112,11 @@ class MemoryCitationManager:
                     memory_id,
                     memory_source_id,
                 )
-                pydantic_values = {k: v for k, v in values.items() if k != "is_deleted" and not k.startswith("_")}
+                pydantic_values = {
+                    k: v
+                    for k, v in values.items()
+                    if k != "is_deleted" and not k.startswith("_")
+                }
                 return PydanticMemoryCitation(**pydantic_values)
             except Exception as e:
                 if is_conflict(e):
@@ -167,7 +177,11 @@ class MemoryCitationManager:
                 memory_id,
                 memory_source_id,
             )
-            pydantic_values = {k: v for k, v in values.items() if k != "is_deleted" and not k.startswith("_")}
+            pydantic_values = {
+                k: v
+                for k, v in values.items()
+                if k != "is_deleted" and not k.startswith("_")
+            }
             return PydanticMemoryCitation(**pydantic_values)
         return None
 
@@ -206,11 +220,16 @@ class MemoryCitationManager:
 
                 cache_provider = get_cache_provider()
                 if cache_provider:
-                    key = self._exists_cache_key(memory_source_id, memory_type, memory_id)
+                    key = self._exists_cache_key(
+                        memory_source_id, memory_type, memory_id
+                    )
                     cached_data = await cache_provider.get_json(key)
                     if cached_data:
                         logger.debug(
-                            "Cache HIT for citation exists: %s/%s/%s", memory_source_id, memory_type, memory_id
+                            "Cache HIT for citation exists: %s/%s/%s",
+                            memory_source_id,
+                            memory_type,
+                            memory_id,
                         )
                         return True
             except Exception as e:
@@ -254,7 +273,7 @@ class MemoryCitationManager:
             records = await provider.list(
                 "memory_citations",
                 filter_tags=None,
-                limit=5000,
+                limit=1500,
                 memory_type=memory_type,
                 memory_id=memory_id,
             )
@@ -262,7 +281,11 @@ class MemoryCitationManager:
             if not occurreds:
                 return None
             max_iso = max(occurreds)
-            return datetime.fromisoformat(max_iso.replace("Z", "+00:00")) if isinstance(max_iso, str) else max_iso
+            return (
+                datetime.fromisoformat(max_iso.replace("Z", "+00:00"))
+                if isinstance(max_iso, str)
+                else max_iso
+            )
 
         async with self.session_maker() as session:
             result = await session.execute(
@@ -288,13 +311,16 @@ class MemoryCitationManager:
             records = await provider.list(
                 "memory_citations",
                 filter_tags=None,
-                limit=5000,
+                limit=1500,
                 memory_type=memory_type,
                 memory_id=memory_id,
             )
             # Order by occurred_at desc, nulls last
             records.sort(
-                key=lambda r: (r.get("occurred_at") is None, r.get("occurred_at") or ""),
+                key=lambda r: (
+                    r.get("occurred_at") is None,
+                    r.get("occurred_at") or "",
+                ),
                 reverse=False,
             )
             records.sort(
@@ -350,7 +376,9 @@ class MemoryCitationManager:
 
         provider = get_relational_provider()
         if provider:
-            grouped: Dict[Tuple[str, str], List[PydanticMemoryCitation]] = defaultdict(list)
+            grouped: Dict[Tuple[str, str], List[PydanticMemoryCitation]] = defaultdict(
+                list
+            )
             for memory_type, memory_id in memory_keys:
                 records = await provider.list(
                     "memory_citations",
@@ -359,12 +387,16 @@ class MemoryCitationManager:
                     memory_type=memory_type,
                     memory_id=memory_id,
                 )
-                grouped[(memory_type, memory_id)].extend(PydanticMemoryCitation(**r) for r in records)
+                grouped[(memory_type, memory_id)].extend(
+                    PydanticMemoryCitation(**r) for r in records
+                )
             return dict(grouped)
 
         async with self.session_maker() as session:
             stmt = select(MemoryCitationModel).where(
-                tuple_(MemoryCitationModel.memory_type, MemoryCitationModel.memory_id).in_(memory_keys),
+                tuple_(
+                    MemoryCitationModel.memory_type, MemoryCitationModel.memory_id
+                ).in_(memory_keys),
                 ~MemoryCitationModel.is_deleted,
             )
             result = await session.execute(stmt)

@@ -807,7 +807,21 @@ class AgentManager:
             if agent_update.tool_ids is not None:
                 update_data["tools"] = agent_update.tool_ids
 
-            result = await provider.update("agents", agent_id, update_data)
+            await provider.update("agents", agent_id, update_data)
+            # provider.update returns the scalar columns only — the M2M ``tools``
+            # relationship isn't materialised on that response, so building
+            # PydanticAgentState directly off it fails with ``tools Field
+            # required`` (the schema declares ``tools: List[Tool]`` as required).
+            # Re-read with ``include_relationships=["tools"]`` to get a fully
+            # hydrated agent dict. Matches the pattern used by ``list_agents``
+            # against the relational provider.
+            result = await provider.read(
+                "agents", agent_id, include_relationships=["tools"]
+            )
+            if result is None:
+                raise ValueError(
+                    f"Agent {agent_id} disappeared between update and read-back"
+                )
             agent_state = PydanticAgentState(**result)
 
             # Invalidate cache if available

@@ -138,7 +138,9 @@ class MemorySourceManager:
                     lookup_kwargs["batch_hash"] = batch_hash
                 else:
                     raise
-                records = await provider.list("memory_sources", filter_tags=None, limit=1, **lookup_kwargs)
+                records = await provider.list(
+                    "memory_sources", filter_tags=None, limit=1, **lookup_kwargs
+                )
                 if records:
                     return PydanticMemorySource(**records[0])
                 raise
@@ -175,7 +177,9 @@ class MemorySourceManager:
         return await self.get_by_id(memory_source_id, use_cache=use_cache)
 
     @enforce_types
-    async def get_by_id(self, memory_source_id: str, use_cache: bool = True) -> Optional[PydanticMemorySource]:
+    async def get_by_id(
+        self, memory_source_id: str, use_cache: bool = True
+    ) -> Optional[PydanticMemorySource]:
         """Fetch a memory source by ID with cache-aside pattern."""
         # Relational provider delegation (read by ID) — provider is source of truth, skip cache
         from mirix.database.relational_provider import get_relational_provider
@@ -194,16 +198,22 @@ class MemorySourceManager:
 
                 cache_provider = get_cache_provider()
                 if cache_provider:
-                    cache_key = f"{cache_provider.MEMORY_SOURCE_PREFIX}{memory_source_id}"
+                    cache_key = (
+                        f"{cache_provider.MEMORY_SOURCE_PREFIX}{memory_source_id}"
+                    )
                     cached_data = await cache_provider.get_json(cache_key)
                     if cached_data:
                         logger.debug("Cache HIT for memory source %s", memory_source_id)
                         # Strip Redis-internal fields (_ts suffixes) that pydantic rejects
                         known_fields = PydanticMemorySource.model_fields
-                        clean = {k: v for k, v in cached_data.items() if k in known_fields}
+                        clean = {
+                            k: v for k, v in cached_data.items() if k in known_fields
+                        }
                         return PydanticMemorySource(**clean)
             except Exception as e:
-                logger.warning("Cache read failed for memory source %s: %s", memory_source_id, e)
+                logger.warning(
+                    "Cache read failed for memory source %s: %s", memory_source_id, e
+                )
 
         # Fall back to DB
         async with self.session_maker() as session:
@@ -226,12 +236,20 @@ class MemorySourceManager:
 
                 cache_provider = get_cache_provider()
                 if cache_provider:
-                    cache_key = f"{cache_provider.MEMORY_SOURCE_PREFIX}{memory_source_id}"
+                    cache_key = (
+                        f"{cache_provider.MEMORY_SOURCE_PREFIX}{memory_source_id}"
+                    )
                     data = pydantic_source.model_dump(mode="json")
-                    await cache_provider.set_json(cache_key, data, ttl=settings.redis_ttl_default)
-                    logger.debug("Populated cache for memory source %s", memory_source_id)
+                    await cache_provider.set_json(
+                        cache_key, data, ttl=settings.redis_ttl_default
+                    )
+                    logger.debug(
+                        "Populated cache for memory source %s", memory_source_id
+                    )
             except Exception as e:
-                logger.warning("Cache write failed for memory source %s: %s", memory_source_id, e)
+                logger.warning(
+                    "Cache write failed for memory source %s: %s", memory_source_id, e
+                )
 
         return pydantic_source
 
@@ -263,14 +281,18 @@ class MemorySourceManager:
             records = await provider.list(
                 "memory_sources",
                 filter_tags={"scope": scopes} if scopes else None,
-                limit=5000,
+                limit=1500,
                 **list_kwargs,
             )
             # Sort ascending by (occurred_at, created_at)
-            records.sort(key=lambda r: (r.get("occurred_at") or "", r.get("created_at") or ""))
+            records.sort(
+                key=lambda r: (r.get("occurred_at") or "", r.get("created_at") or "")
+            )
             # Apply cursor (skip until we pass cursor row by id)
             if cursor:
-                idx = next((i for i, r in enumerate(records) if r.get("id") == cursor), None)
+                idx = next(
+                    (i for i, r in enumerate(records) if r.get("id") == cursor), None
+                )
                 if idx is not None:
                     records = records[idx + 1 :]
             has_more = len(records) > limit
@@ -291,17 +313,24 @@ class MemorySourceManager:
                     MemorySourceModel.external_thread_id == external_thread_id,
                     ~MemorySourceModel.is_deleted,
                 )
-                .order_by(MemorySourceModel.occurred_at.asc(), MemorySourceModel.created_at.asc())
+                .order_by(
+                    MemorySourceModel.occurred_at.asc(),
+                    MemorySourceModel.created_at.asc(),
+                )
             )
 
             # Scope-based access control (same pattern as memory tables)
-            query = apply_filter_tags_sqlalchemy(query, MemorySourceModel, None, scopes=scopes)
+            query = apply_filter_tags_sqlalchemy(
+                query, MemorySourceModel, None, scopes=scopes
+            )
 
             if user_id:
                 query = query.where(MemorySourceModel.user_id == user_id)
 
             if cursor:
-                cursor_result = await session.execute(select(MemorySourceModel).where(MemorySourceModel.id == cursor))
+                cursor_result = await session.execute(
+                    select(MemorySourceModel).where(MemorySourceModel.id == cursor)
+                )
                 cursor_obj = cursor_result.scalar_one_or_none()
                 if cursor_obj:
                     # Use created_at for stable ordering when occurred_at may be null
@@ -364,7 +393,8 @@ class MemorySourceManager:
             records = await provider.list(
                 "memory_sources",
                 filter_tags={"scope": [scope]} if scope else None,
-                limit=5000,
+                # IPSR caps page_size at 1500 server-side; honor that.
+                limit=1500,
                 **list_kwargs,
             )
             # Descending order: nulls last on occurred_at, then created_at desc
@@ -376,7 +406,9 @@ class MemorySourceManager:
                 reverse=True,
             )
             if cursor:
-                idx = next((i for i, r in enumerate(records) if r.get("id") == cursor), None)
+                idx = next(
+                    (i for i, r in enumerate(records) if r.get("id") == cursor), None
+                )
                 if idx is not None:
                     records = records[idx + 1 :]
             has_more = len(records) > limit
@@ -403,14 +435,18 @@ class MemorySourceManager:
             if client_id:
                 query = query.where(MemorySourceModel.client_id == client_id)
             if scope:
-                query = query.where(MemorySourceModel.filter_tags["scope"].astext == scope)
+                query = query.where(
+                    MemorySourceModel.filter_tags["scope"].astext == scope
+                )
             if since:
                 query = query.where(MemorySourceModel.occurred_at >= since)
             if until:
                 query = query.where(MemorySourceModel.occurred_at <= until)
 
             if cursor:
-                cursor_result = await session.execute(select(MemorySourceModel).where(MemorySourceModel.id == cursor))
+                cursor_result = await session.execute(
+                    select(MemorySourceModel).where(MemorySourceModel.id == cursor)
+                )
                 cursor_obj = cursor_result.scalar_one_or_none()
                 if cursor_obj:
                     ref = cursor_obj.occurred_at or cursor_obj.created_at
@@ -452,18 +488,28 @@ class MemorySourceManager:
 
         provider = get_relational_provider()
         if provider:
-            await provider.update("memory_sources", memory_source_id, {"processing_complete": True})
-            logger.info("Marked memory source %s as processing complete", memory_source_id)
+            await provider.update(
+                "memory_sources", memory_source_id, {"processing_complete": True}
+            )
+            logger.info(
+                "Marked memory source %s as processing complete", memory_source_id
+            )
             return
 
         async with self.session_maker() as session:
-            record = await MemorySourceModel.read(db_session=session, identifier=memory_source_id)
+            record = await MemorySourceModel.read(
+                db_session=session, identifier=memory_source_id
+            )
             record.processing_complete = True
             await record.update_with_redis(session)
-            logger.info("Marked memory source %s as processing complete", memory_source_id)
+            logger.info(
+                "Marked memory source %s as processing complete", memory_source_id
+            )
 
     @enforce_types
-    async def update_summary(self, memory_source_id: str, summary: str, summary_source: str) -> None:
+    async def update_summary(
+        self, memory_source_id: str, summary: str, summary_source: str
+    ) -> None:
         """Write a summary to an existing memory source.
 
         Used after processing completes to store a generated summary.
@@ -479,12 +525,22 @@ class MemorySourceManager:
                 memory_source_id,
                 {"summary": summary, "summary_source": summary_source},
             )
-            logger.info("Updated summary for memory source %s (source=%s)", memory_source_id, summary_source)
+            logger.info(
+                "Updated summary for memory source %s (source=%s)",
+                memory_source_id,
+                summary_source,
+            )
             return
 
         async with self.session_maker() as session:
-            record = await MemorySourceModel.read(db_session=session, identifier=memory_source_id)
+            record = await MemorySourceModel.read(
+                db_session=session, identifier=memory_source_id
+            )
             record.summary = summary
             record.summary_source = summary_source
             await record.update_with_redis(session)
-            logger.info("Updated summary for memory source %s (source=%s)", memory_source_id, summary_source)
+            logger.info(
+                "Updated summary for memory source %s (source=%s)",
+                memory_source_id,
+                summary_source,
+            )
