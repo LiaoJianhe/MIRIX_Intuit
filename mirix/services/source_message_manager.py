@@ -306,11 +306,17 @@ class SourceMessageManager:
 
         provider = get_relational_provider()
         if provider:
-            records = await provider.list(
+            # VEPAGE-1107: route through named query. The generic
+            # ``provider.list`` against source_messages was failing with
+            # ``Unable to Construct Filter Query`` (relationship logical
+            # name resolution) and the response also dropped the FK
+            # column needed for PydanticSourceMessage construction. The
+            # NQ projects ``memorysource_id`` explicitly via SELECT *.
+            records = await provider.find_using_named_query(
                 "source_messages",
-                filter_tags=None,
-                limit=1500,
-                memory_source_id=memory_source_id,
+                "source_message_manager.get_messages_by_source_id",
+                params={"memorySourceId": memory_source_id},
+                page_size=1500,
             )
             records.sort(key=lambda r: r.get("sequence_num") or 0)
             if cursor:

@@ -14,6 +14,39 @@ from mirix.utils import enforce_types
 logger = get_logger(__name__)
 
 
+def _pydantic_citation_from_row(row: Dict) -> PydanticMemoryCitation:
+    """Defensive constructor for PydanticMemoryCitation from a provider row.
+
+    Provider rows can arrive in two shapes depending on whether the call
+    went through a named query (which projects ``memorysource_id`` as a flat
+    column and gets flattened by ``from_entity`` to ``memory_source_id``)
+    or the legacy generic filter-query path (which does NOT populate the
+    ``memorySource`` MANY_TO_ONE relationship and therefore leaves
+    ``memory_source_id`` absent from the row).
+
+    VEPAGE-1107 routes the hot read paths through named queries to make
+    this Just Work. This helper provides a defensive fallback: if a row
+    is missing ``memory_source_id`` (e.g., because the NQ hasn't deployed
+    yet, or because some other code path is still using the generic
+    provider.list), we log a warning and synthesize an empty string
+    rather than crashing the whole search response.
+    """
+    if "memory_source_id" not in row or row.get("memory_source_id") is None:
+        logger.warning(
+            "MemoryCitation row missing memory_source_id (id=%s, "
+            "memory_type=%s, memory_id=%s). This indicates a code path "
+            "still using the generic provider.list against memory_citations "
+            "instead of the named-query path. Synthesizing empty string so "
+            "the search response doesn't crash.",
+            row.get("id"),
+            row.get("memory_type"),
+            row.get("memory_id"),
+        )
+        row = dict(row)
+        row["memory_source_id"] = ""
+    return PydanticMemoryCitation(**row)
+
+
 class MemoryCitationManager:
     """Manager for memory citation persistence with INSERT ON CONFLICT DO NOTHING semantics."""
 
@@ -202,15 +235,18 @@ class MemoryCitationManager:
 
         provider = get_relational_provider()
         if provider:
-            records = await provider.list(
+            # VEPAGE-1107: route through named query so the response shape
+            # matches the Pydantic model (memory_source_id flat column).
+            records = await provider.find_using_named_query(
                 "memory_citations",
-                filter_tags=None,
-                limit=1,
-                memory_source_id=memory_source_id,
-                memory_type=memory_type,
-                memory_id=memory_id,
+                "memory_citation_manager.find_existing_citation",
+                params={
+                    "memorySourceId": memory_source_id,
+                    "memoryType": memory_type,
+                    "memoryId": memory_id,
+                },
+                page_size=1,
             )
-            # provider.list already excludes soft-deleted rows server-side
             return bool(records)
 
         # Try cache first
@@ -270,14 +306,21 @@ class MemoryCitationManager:
 
         provider = get_relational_provider()
         if provider:
-            records = await provider.list(
+            # VEPAGE-1107: use a dedicated MAX(occurredAt) named query to
+            # avoid pulling the full citation set client-side. Returns a
+            # single scalar row keyed ``max_occurred_at``.
+            records = await provider.find_using_named_query(
                 "memory_citations",
-                filter_tags=None,
-                limit=1500,
-                memory_type=memory_type,
-                memory_id=memory_id,
+                "memory_citation_manager.max_occurred_at_for_memory",
+                params={
+                    "memoryType": memory_type,
+                    "memoryId": memory_id,
+                },
+                page_size=1,
             )
-            occurreds = [r.get("occurred_at") for r in records if r.get("occurred_at")]
+            occurreds = [
+                r.get("max_occurred_at") for r in records if r.get("max_occurred_at")
+            ]
             if not occurreds:
                 return None
             max_iso = max(occurreds)
@@ -308,12 +351,16 @@ class MemoryCitationManager:
 
         provider = get_relational_provider()
         if provider:
-            records = await provider.list(
+            # VEPAGE-1107: NQ projects memorysource_id so Pydantic
+            # construction works.
+            records = await provider.find_using_named_query(
                 "memory_citations",
-                filter_tags=None,
-                limit=1500,
-                memory_type=memory_type,
-                memory_id=memory_id,
+                "memory_citation_manager.get_citations_for_memory",
+                params={
+                    "memoryType": memory_type,
+                    "memoryId": memory_id,
+                },
+                page_size=1500,
             )
             # Order by occurred_at desc, nulls last
             records.sort(
@@ -327,7 +374,7 @@ class MemoryCitationManager:
                 key=lambda r: r.get("occurred_at") or "",
                 reverse=True,
             )
-            return [PydanticMemoryCitation(**r) for r in records]
+            return [_pydantic_citation_from_row(r) for r in records]
 
         async with self.session_maker() as session:
             stmt = (
@@ -372,6 +419,16 @@ class MemoryCitationManager:
         # Relational provider delegation — provider.list doesn't support tuple-IN filters,
         # so loop per (memory_type, memory_id) and group. Search hits are typically
         # 10-50 per query, so per-memory call volume is acceptable.
+        #
+        # VEPAGE-1107: route through ``memory_citation_manager.get_citations_for_memory``
+        # named query instead of the generic ``provider.list``. The adhoc
+        # filter-query endpoint does NOT populate the ``memorySource`` MANY_TO_ONE
+        # relationship on returned entities, which causes
+        # ``PydanticMemoryCitation(**r)`` to fail with ``memory_source_id Field
+        # required`` and ultimately empties the entire search result. The named
+        # query's ``SELECT *`` projects ``memorysource_id`` as a flat column, which
+        # the SDK ``loads_entity`` helper auto-wraps as ``EntityRef(id=...)`` and
+        # the provider's ``from_entity`` flattens back to ``memory_source_id``.
         from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
@@ -380,15 +437,17 @@ class MemoryCitationManager:
                 list
             )
             for memory_type, memory_id in memory_keys:
-                records = await provider.list(
+                records = await provider.find_using_named_query(
                     "memory_citations",
-                    filter_tags=None,
-                    limit=1000,
-                    memory_type=memory_type,
-                    memory_id=memory_id,
+                    "memory_citation_manager.get_citations_for_memory",
+                    params={
+                        "memoryType": memory_type,
+                        "memoryId": memory_id,
+                    },
+                    page_size=1000,
                 )
                 grouped[(memory_type, memory_id)].extend(
-                    PydanticMemoryCitation(**r) for r in records
+                    _pydantic_citation_from_row(r) for r in records
                 )
             return dict(grouped)
 
