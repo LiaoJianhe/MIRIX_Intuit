@@ -46,7 +46,11 @@ from mirix.schemas.block import BlockUpdate
 from mirix.schemas.client import Client
 from mirix.schemas.embedding_config import EmbeddingConfig
 from mirix.schemas.enums import MessageRole, ToolType
+from mirix.schemas.knowledge_vault import KnowledgeVaultItem as PydanticKnowledgeVaultItem
 from mirix.schemas.memory import Memory
+from mirix.schemas.procedural_memory import ProceduralMemoryItem as PydanticProceduralMemoryItem
+from mirix.schemas.resource_memory import ResourceMemoryItem as PydanticResourceMemoryItem
+from mirix.schemas.semantic_memory import SemanticMemoryItem as PydanticSemanticMemoryItem
 from mirix.schemas.message import Message, MessageCreate
 from mirix.schemas.mirix_message_content import CloudFileContent, FileContent, ImageContent, TextContent
 from mirix.schemas.openai.chat_completion_response import ChatCompletionResponse
@@ -1968,6 +1972,44 @@ class Agent(BaseAgent):
         else:
             logger.warning("LLM returned empty summary for source %s", self.memory_source_id)
 
+    async def _fetch_recent_indexing_lag_window(
+        self,
+        table: str,
+        pydantic_cls: Any,
+    ) -> List[Any]:
+        """Fetch rows written in the recent indexing-lag window for an owning sub-agent's dedup decision.
+
+        Uses ``fetch_and_dedup_candidates`` to issue the Search and Relational
+        DB provider calls in parallel; we discard the ranked Search bucket here
+        because the prompt builder already obtains it via the manager
+        ``list_*`` call (which preserves ``@update_timezone`` and the manager's
+        post-processing). Returns the ``recent`` (5s indexing-lag) bucket as
+        a list of Pydantic instances, capped at ``MAX_RETRIEVAL_LIMIT_IN_SYSTEM``.
+
+        Returns ``[]`` when either provider is unregistered (PG-only path):
+        in that mode reads come from the canonical SQL store, so the
+        indexing-lag distinction does not exist.
+        """
+        from mirix.database.relational_provider import get_relational_provider
+        from mirix.database.search_provider import get_search_provider
+        from mirix.services.hybrid_search_helper import fetch_and_dedup_candidates
+
+        sp = get_search_provider()
+        rp = get_relational_provider()
+        if not (sp and rp):
+            return []
+
+        candidates = await fetch_and_dedup_candidates(
+            table=table,
+            search_provider=sp,
+            relational_provider=rp,
+            user_id=self.user.id,
+            organization_id=self.user.organization_id,
+            limit=1,
+            recent_cap=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
+        )
+        return [pydantic_cls(**r) for r in candidates.recent]
+
     async def build_system_prompt_with_memories(
         self,
         raw_system: str,
@@ -2030,42 +2072,47 @@ class Agent(BaseAgent):
             core_memory = current_persisted_memory.compile()
             retrieved_memories["core"] = core_memory
 
+        is_owning_kv_agent = self.agent_state.is_type(
+            AgentType.knowledge_vault_memory_agent, AgentType.reflexion_agent
+        )
         if (
             self.agent_state.is_type(AgentType.knowledge_vault_memory_agent)
             or "knowledge_vault" not in retrieved_memories
         ):
-            if self.agent_state.is_type(AgentType.knowledge_vault_memory_agent, AgentType.reflexion_agent):
-                current_knowledge_vault = await self.knowledge_vault_manager.list_knowledge(
-                    agent_state=self.agent_state,
-                    user=self.user,
-                    embedded_text=embedded_text,
-                    query=key_words,
-                    search_field="caption",
-                    search_method=search_method,
-                    limit=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
-                    timezone_str=timezone_str,
+            current_knowledge_vault = await self.knowledge_vault_manager.list_knowledge(
+                agent_state=self.agent_state,
+                user=self.user,
+                embedded_text=embedded_text,
+                query=key_words,
+                search_field="caption",
+                search_method=search_method,
+                limit=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
+                timezone_str=timezone_str,
+                sensitivity=None if is_owning_kv_agent else ["low", "medium"],
+            )
+            recent_knowledge_vault = (
+                await self._fetch_recent_indexing_lag_window(
+                    table="knowledge_vault",
+                    pydantic_cls=PydanticKnowledgeVaultItem,
                 )
-            else:
-                current_knowledge_vault = await self.knowledge_vault_manager.list_knowledge(
-                    agent_state=self.agent_state,
-                    user=self.user,
-                    embedded_text=embedded_text,
-                    query=key_words,
-                    search_field="caption",
-                    search_method=search_method,
-                    limit=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
-                    timezone_str=timezone_str,
-                    sensitivity=["low", "medium"],
-                )
+                if is_owning_kv_agent
+                else []
+            )
 
             knowledge_vault_memory = ""
             if len(current_knowledge_vault) > 0:
                 for idx, knowledge_vault_item in enumerate(current_knowledge_vault):
                     knowledge_vault_memory += f"[{idx}] Knowledge Vault Item ID: {knowledge_vault_item.id}; Caption: {knowledge_vault_item.caption}\n"
+            recent_knowledge_vault_text = ""
+            if len(recent_knowledge_vault) > 0:
+                for idx, knowledge_vault_item in enumerate(recent_knowledge_vault):
+                    recent_knowledge_vault_text += f"[Knowledge Vault Item ID: {knowledge_vault_item.id}] Caption: {knowledge_vault_item.caption}\n"
             retrieved_memories["knowledge_vault"] = {
                 "total_number_of_items": await self.knowledge_vault_manager.get_total_number_of_items(user=self.user),
                 "current_count": len(current_knowledge_vault),
                 "text": knowledge_vault_memory,
+                "recent_count": len(recent_knowledge_vault),
+                "recent_text": recent_knowledge_vault_text.strip(),
             }
 
         # Retrieve episodic memory
@@ -2127,6 +2174,14 @@ class Agent(BaseAgent):
                 limit=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
                 timezone_str=timezone_str,
             )
+            recent_resource_memory_items = (
+                await self._fetch_recent_indexing_lag_window(
+                    table="resource_memory",
+                    pydantic_cls=PydanticResourceMemoryItem,
+                )
+                if is_owning_agent
+                else []
+            )
             resource_memory = ""
             if len(current_resource_memory) > 0:
                 for idx, resource in enumerate(current_resource_memory):
@@ -2134,11 +2189,17 @@ class Agent(BaseAgent):
                         resource_memory += f"[Resource ID: {resource.id}] Resource Title: {resource.title}; Resource Summary: {resource.summary} Resource Type: {resource.resource_type}\n"
                     else:
                         resource_memory += f"[{idx}] Resource Title: {resource.title}; Resource Summary: {resource.summary} Resource Type: {resource.resource_type}\n"
+            recent_resource_memory_text = ""
+            if len(recent_resource_memory_items) > 0:
+                for resource in recent_resource_memory_items:
+                    recent_resource_memory_text += f"[Resource ID: {resource.id}] Resource Title: {resource.title}; Resource Summary: {resource.summary} Resource Type: {resource.resource_type}\n"
             resource_memory = resource_memory.strip()
             retrieved_memories["resource"] = {
                 "total_number_of_items": await self.resource_memory_manager.get_total_number_of_items(user=self.user),
                 "current_count": len(current_resource_memory),
                 "text": resource_memory,
+                "recent_count": len(recent_resource_memory_items),
+                "recent_text": recent_resource_memory_text.strip(),
             }
 
         # Retrieve procedural memory
@@ -2155,6 +2216,14 @@ class Agent(BaseAgent):
                 limit=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
                 timezone_str=timezone_str,
             )
+            recent_procedural_memory_items = (
+                await self._fetch_recent_indexing_lag_window(
+                    table="procedural_memory",
+                    pydantic_cls=PydanticProceduralMemoryItem,
+                )
+                if is_owning_agent
+                else []
+            )
             procedural_memory = ""
             if len(current_procedural_memory) > 0:
                 for idx, procedure in enumerate(current_procedural_memory):
@@ -2164,11 +2233,19 @@ class Agent(BaseAgent):
                         procedural_memory += (
                             f"[{idx}] Entry Type: {procedure.entry_type}; Summary: {procedure.summary}\n"
                         )
+            recent_procedural_memory_text = ""
+            if len(recent_procedural_memory_items) > 0:
+                for procedure in recent_procedural_memory_items:
+                    recent_procedural_memory_text += (
+                        f"[Procedure ID: {procedure.id}] Entry Type: {procedure.entry_type}; Summary: {procedure.summary}\n"
+                    )
             procedural_memory = procedural_memory.strip()
             retrieved_memories["procedural"] = {
                 "total_number_of_items": await self.procedural_memory_manager.get_total_number_of_items(user=self.user),
                 "current_count": len(current_procedural_memory),
                 "text": procedural_memory,
+                "recent_count": len(recent_procedural_memory_items),
+                "recent_text": recent_procedural_memory_text.strip(),
             }
 
         # Retrieve semantic memory
@@ -2185,6 +2262,14 @@ class Agent(BaseAgent):
                 limit=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
                 timezone_str=timezone_str,
             )
+            recent_semantic_memory_items = (
+                await self._fetch_recent_indexing_lag_window(
+                    table="semantic_memory",
+                    pydantic_cls=PydanticSemanticMemoryItem,
+                )
+                if is_owning_agent
+                else []
+            )
             semantic_memory = ""
             if len(current_semantic_memory) > 0:
                 for idx, semantic_memory_item in enumerate(current_semantic_memory):
@@ -2194,12 +2279,20 @@ class Agent(BaseAgent):
                         semantic_memory += (
                             f"[{idx}] Name: {semantic_memory_item.name}; Summary: {semantic_memory_item.summary}\n"
                         )
+            recent_semantic_memory_text = ""
+            if len(recent_semantic_memory_items) > 0:
+                for semantic_memory_item in recent_semantic_memory_items:
+                    recent_semantic_memory_text += (
+                        f"[Semantic Memory ID: {semantic_memory_item.id}] Name: {semantic_memory_item.name}; Summary: {semantic_memory_item.summary}\n"
+                    )
 
             semantic_memory = semantic_memory.strip()
             retrieved_memories["semantic"] = {
                 "total_number_of_items": await self.semantic_memory_manager.get_total_number_of_items(user=self.user),
                 "current_count": len(current_semantic_memory),
                 "text": semantic_memory,
+                "recent_count": len(recent_semantic_memory_items),
+                "recent_text": recent_semantic_memory_text.strip(),
             }
 
         # Build the complete system prompt
@@ -2260,7 +2353,6 @@ These keywords have been used to retrieve relevant memories from the database.
                 + "\n</episodic_memory>\n"
             )
 
-        # Add knowledge vault with counts
         knowledge_vault_total = knowledge_vault["total_number_of_items"] if knowledge_vault else 0
         knowledge_vault_text = knowledge_vault["text"] if knowledge_vault else ""
         knowledge_vault_count = knowledge_vault["current_count"] if knowledge_vault else 0
@@ -2269,8 +2361,8 @@ These keywords have been used to retrieve relevant memories from the database.
             + (knowledge_vault_text if knowledge_vault_text else "Empty")
             + "\n</knowledge_vault>\n"
         )
+        system_prompt += self._render_recent_window_block("knowledge_vault", knowledge_vault)
 
-        # Add semantic memory with counts
         semantic_total = semantic_memory["total_number_of_items"] if semantic_memory else 0
         semantic_text = semantic_memory["text"] if semantic_memory else ""
         semantic_count = semantic_memory["current_count"] if semantic_memory else 0
@@ -2279,8 +2371,8 @@ These keywords have been used to retrieve relevant memories from the database.
             + (semantic_text if semantic_text else "Empty")
             + "\n</semantic_memory>\n"
         )
+        system_prompt += self._render_recent_window_block("semantic_memory", semantic_memory)
 
-        # Add resource memory with counts
         resource_total = resource_memory["total_number_of_items"] if resource_memory else 0
         resource_text = resource_memory["text"] if resource_memory else ""
         resource_count = resource_memory["current_count"] if resource_memory else 0
@@ -2289,8 +2381,8 @@ These keywords have been used to retrieve relevant memories from the database.
             + (resource_text if resource_text else "Empty")
             + "\n</resource_memory>\n"
         )
+        system_prompt += self._render_recent_window_block("resource_memory", resource_memory)
 
-        # Add procedural memory with counts
         procedural_total = procedural_memory["total_number_of_items"] if procedural_memory else 0
         procedural_text = procedural_memory["text"] if procedural_memory else ""
         procedural_count = procedural_memory["current_count"] if procedural_memory else 0
@@ -2299,8 +2391,30 @@ These keywords have been used to retrieve relevant memories from the database.
             + (procedural_text if procedural_text else "Empty")
             + "\n</procedural_memory>"
         )
+        system_prompt += self._render_recent_window_block("procedural_memory", procedural_memory)
 
         return system_prompt
+
+    @staticmethod
+    def _render_recent_window_block(tag: str, memory_bucket: Optional[dict]) -> str:
+        """Render the labeled ``recent`` (5s indexing-lag) bucket for the
+        dedup-deciding owning sub-agent. Returns empty string when the bucket
+        is absent (non-owning agent) or empty (no rows written in the recent
+        window). The block is rendered as a separate ``<{tag}>`` section with
+        a "Recently Written" header so the LLM can reason about just-written
+        rows separately from the ranked relevance results.
+        """
+        if not memory_bucket:
+            return ""
+        recent_text = memory_bucket.get("recent_text", "")
+        recent_count = memory_bucket.get("recent_count", 0)
+        if not recent_text or recent_count == 0:
+            return ""
+        return (
+            f"\n<{tag}> Recently Written ({recent_count} rows in the last few seconds, "
+            "may not be indexed yet — review for duplicates before creating new entries):\n"
+            f"{recent_text}\n</{tag}>\n"
+        )
 
     async def extract_memory_for_system_prompt(self, message: str) -> str:
         """

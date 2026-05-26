@@ -27,7 +27,7 @@ class OrganizationManager:
 
     @enforce_types
     async def get_organization_by_id(self, org_id: str) -> Optional[PydanticOrganization]:
-        """Fetch an organization by ID (with cache - Redis or IPS Cache)."""
+        """Fetch an organization by ID (with cache - Redis or Cache provider)."""
         from mirix.log import get_logger
 
         logger = get_logger(__name__)

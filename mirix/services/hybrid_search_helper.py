@@ -1,29 +1,77 @@
 """
-Hybrid search helper for engine_operation paths.
+Save-flow helper: labeled-bucket candidate fetcher for owning sub-agents.
 
-Combines IPS Search results with IPS Relational recent-window records for
-the hybrid read strategy. Used only when ``call_origin == engine_operation``
-(queue workers, build_system_prompt_with_memories, etc.).
+When a sub-agent is about to decide create-vs-update for a memory type, it
+needs to see (a) the most relevant existing memories ranked by the Search
+provider and (b) any rows that were just written and may not be indexed yet
+in the Search provider. Merging the two and presenting a single ranked list
+hides the distinction the LLM needs to make a good dedup judgment, so this
+helper returns them as labeled buckets instead.
 
-For ``call_origin == client_api`` paths, managers delegate directly to
-``search_provider.search()`` (Search-only) without calling this helper.
+Used from ``Agent.build_system_prompt_with_memories`` for each
+``is_owning_agent`` branch. Read paths (manager ``list_*`` / ``search_*`` /
+``count_*``) do not call this helper; they delegate directly to
+``search_provider.search()``.
 
-Fail-closed: if either Search or Relational step raises, the exception
-propagates — no partial results from a single backend.
+Fail-closed: if either the Search call or the Relational call raises, the
+exception propagates. We deliberately do not return partial results from a
+single backend.
+
+The recent-window duration is configured once at ECMS startup via
+``set_hybrid_window_seconds`` (called from
+``common.ips_provider_setup.register_ips_providers``).
 """
 
+import asyncio
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
-from mirix.database.call_context import get_hybrid_window_seconds
 from mirix.log import get_logger
 
 logger = get_logger(__name__)
 
-HYBRID_COUNT_RECENT_LIMIT = 500
+_hybrid_window_seconds: int = 5
+
+DEFAULT_RECENT_CAP = 500
 
 
-async def hybrid_search(
+def set_hybrid_window_seconds(seconds: int) -> None:
+    """Set the recent-window duration used by ``fetch_and_dedup_candidates``.
+
+    Called once at ECMS startup from
+    ``common.ips_provider_setup.register_ips_providers`` after reading
+    ``config.ips_hybrid_read_window_seconds``. MIRIX reads this value via
+    ``get_hybrid_window_seconds()`` without importing ECMS ``SvcSettings``.
+    """
+    global _hybrid_window_seconds
+    _hybrid_window_seconds = seconds
+
+
+def get_hybrid_window_seconds() -> int:
+    """Get the configured recent-window duration in seconds."""
+    return _hybrid_window_seconds
+
+
+@dataclass(frozen=True)
+class DedupCandidates:
+    """Two labeled candidate buckets for the dedup-deciding sub-agent.
+
+    Attributes:
+        relevant: Ranked results from the Search provider, in Search-provider
+            order, truncated to ``limit``. Used by the LLM to find the closest
+            existing memory for the incoming content.
+        recent: Rows written within the recent window from the Relational
+            provider, capped at ``recent_cap``. No ranking is applied; these
+            are the candidates the Search provider may not have indexed yet.
+            Used by the LLM to detect near-duplicate writes that just landed.
+    """
+
+    relevant: List[Dict[str, Any]] = field(default_factory=list)
+    recent: List[Dict[str, Any]] = field(default_factory=list)
+
+
+async def fetch_and_dedup_candidates(
     table: str,
     search_provider: Any,
     relational_provider: Any,
@@ -37,6 +85,7 @@ async def hybrid_search(
     filter_tags: Optional[Dict[str, Any]] = None,
     scopes: Optional[List[str]] = None,
     limit: Optional[int] = None,
+    recent_cap: int = DEFAULT_RECENT_CAP,
     start_date: Any = None,
     end_date: Any = None,
     similarity_threshold: Optional[float] = None,
@@ -44,30 +93,44 @@ async def hybrid_search(
     cursor: Optional[str] = None,
     time_range: Optional[Dict[str, Any]] = None,
     **kwargs: Any,
-) -> Tuple[List[Dict], Optional[str]]:
-    """
-    Hybrid search: IPS Search results + IPS Relational recent-window merge.
+) -> DedupCandidates:
+    """Fetch the relevant + recent buckets for a save-flow dedup decision.
 
-    1. Query IPS Search for the main result set.
-    2. Query IPS Relational for records updated/created within the hybrid
-       window (to capture recently written data not yet indexed).
-    3. Merge and deduplicate using timestamp-based precedence.
-    4. Sort by timestamp descending, apply limit.
+    Both calls run in parallel via ``asyncio.gather`` so the save path takes
+    one round-trip wall-clock rather than two.
 
-    Returns a ``(results, next_cursor)`` tuple. ``next_cursor`` is the cursor
-    returned by ``search_provider.search()`` and lets callers paginate the
-    underlying IPS Search query. The recent-window relational records are not
-    paginated separately; they are intentionally bounded by the hybrid
-    time-window cutoff and the per-call ``limit``.
+    Args:
+        table: Logical table name (e.g. ``"semantic_memory"``, ``"block"``).
+        search_provider: Registered Search provider instance.
+        relational_provider: Registered Relational DB provider instance.
+        query_text: Optional text query for the Search call.
+        query_embedding: Optional precomputed embedding for the Search call.
+        search_method: ``"embedding"`` / ``"bm25"`` / ``"string_match"`` etc.
+        search_field: Field name to search against on the Search side.
+        user_id: User scope for both calls. None for org-wide queries.
+        organization_id: Organization scope.
+        filter_tags: Tag filter dict applied to both backends.
+        scopes: Optional scope list for filter_tags.scope.
+        limit: Max results in the ``relevant`` bucket. Defaults to 50.
+        recent_cap: Max rows in the ``recent`` bucket. Defaults to 500.
+            The cap exists to protect prompt size against a pathological
+            burst of writes in the recent window.
+        start_date, end_date, similarity_threshold, sort, cursor, time_range,
+            **kwargs: Passed through to ``search_provider.search``.
 
-    Both steps must succeed; if either raises, the exception propagates
-    (fail-closed — no partial results).
+    Returns:
+        ``DedupCandidates(relevant, recent)``. Caller decides ordering and
+        formatting when rendering these into the prompt.
+
+    Raises:
+        Any exception raised by either provider call. Fail-closed.
     """
     effective_limit = limit or 50
+
     window_seconds = get_hybrid_window_seconds()
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
 
-    search_results, next_cursor = await search_provider.search(
+    search_coro = search_provider.search(
         table,
         query_text=query_text,
         query_embedding=query_embedding,
@@ -87,7 +150,7 @@ async def hybrid_search(
         **kwargs,
     )
 
-    recent_records = await relational_provider.list(
+    recent_coro = relational_provider.list(
         table,
         user_id=user_id,
         organization_id=organization_id,
@@ -98,103 +161,14 @@ async def hybrid_search(
             "created_at__gte": cutoff.isoformat(),
         },
         time_range_or_null_updated=True,
-        limit=effective_limit,
+        limit=recent_cap,
     )
 
-    merged = _merge_and_deduplicate(search_results, recent_records, effective_limit)
-    return merged, next_cursor
-
-
-async def hybrid_count(
-    table: str,
-    search_provider: Any,
-    relational_provider: Any,
-    *,
-    user_id: Optional[str] = None,
-    organization_id: Optional[str] = None,
-    filter_tags: Optional[Dict[str, Any]] = None,
-    scopes: Optional[List[str]] = None,
-) -> int:
-    """
-    Hybrid count: IPS Search count + IPS Relational recent-window extras.
-
-    Returns the search count plus relational records in the hybrid window
-    that are NOT yet in search. Both steps must succeed (fail-closed).
-    """
-    search_count = await search_provider.count(
-        table,
-        user_id=user_id,
-        organization_id=organization_id,
-        filter_tags=filter_tags,
-        scopes=scopes,
+    (search_results, _next_cursor), recent_records = await asyncio.gather(
+        search_coro, recent_coro
     )
 
-    window_seconds = get_hybrid_window_seconds()
-    cutoff = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
-
-    recent_records = await relational_provider.list(
-        table,
-        user_id=user_id,
-        organization_id=organization_id,
-        filter_tags=filter_tags,
-        scopes=scopes,
-        time_range={
-            "updated_at__gte": cutoff.isoformat(),
-            "created_at__gte": cutoff.isoformat(),
-        },
-        time_range_or_null_updated=True,
-        limit=HYBRID_COUNT_RECENT_LIMIT,
+    return DedupCandidates(
+        relevant=list(search_results),
+        recent=list(recent_records),
     )
-
-    extra_count = 0
-    for record in recent_records:
-        record_id = record.get("id")
-        if record_id:
-            in_search = await search_provider.get_by_id(
-                table, record_id, user_id=user_id
-            )
-            if not in_search:
-                extra_count += 1
-
-    return search_count + extra_count
-
-
-def _record_timestamp(record: Dict) -> str:
-    """Return the best timestamp for ordering/precedence comparison."""
-    return record.get("updated_at") or record.get("created_at") or ""
-
-
-def _merge_and_deduplicate(
-    search_results: List[Dict],
-    recent_records: List[Dict],
-    limit: int,
-) -> List[Dict]:
-    """
-    Merge search results with relational recent-window records.
-
-    For records appearing in both sets (same id), keep the version with
-    the more recent updated_at; if null or equal, compare created_at.
-    Then sort by timestamp descending and cap at limit.
-    """
-    by_id: Dict[str, Dict] = {}
-
-    for record in search_results:
-        record_id = record.get("id")
-        if record_id:
-            by_id[record_id] = record
-
-    for record in recent_records:
-        record_id = record.get("id")
-        if not record_id:
-            continue
-        existing = by_id.get(record_id)
-        if existing is None:
-            by_id[record_id] = record
-        else:
-            if _record_timestamp(record) >= _record_timestamp(existing):
-                by_id[record_id] = record
-
-    merged = list(by_id.values())
-    merged.sort(key=_record_timestamp, reverse=True)
-
-    return merged[:limit]

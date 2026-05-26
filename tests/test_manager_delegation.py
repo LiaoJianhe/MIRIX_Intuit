@@ -1,5 +1,5 @@
 """
-Tests that memory managers delegate reads/writes to IPS relational and search providers
+Tests that memory managers delegate reads/writes to relational and search providers
 when registered, and use the ORM/cache path when providers are absent.
 
 Run:
@@ -27,7 +27,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mirix.database.call_context import CALL_ORIGIN_CLIENT_API, CALL_ORIGIN_ENGINE
 from mirix.orm.errors import NoResultFound
 from mirix.schemas.agent import AgentState, AgentType
 from mirix.schemas.block import Block, BlockUpdate
@@ -351,77 +350,43 @@ class TestEpisodicMemoryManagerDelegation:
             assert mock_provider.create.await_args[0][0] == "episodic_memory"
 
     @pytest.mark.asyncio
-    async def test_list_episodic_memory_delegates_search_client_api(self):
+    async def test_list_episodic_memory_delegates_to_search_provider(self):
+        """After the labeled-bucket refactor, the manager surface is
+        Search-only — no contextvar branching, no hybrid_search call. The
+        recent (5s indexing-lag) bucket is fetched separately from the
+        save-flow prompt builder via fetch_and_dedup_candidates."""
         row = _episodic_row_dict()
         mock_search = MagicMock()
         mock_search.search = AsyncMock(return_value=([row], None))
 
         with patch("mirix.database.search_provider.get_search_provider", return_value=mock_search):
-            with patch("mirix.database.call_context.get_call_origin", return_value=CALL_ORIGIN_CLIENT_API):
-                mgr = _episodic_mgr()
-                out = await mgr.list_episodic_memory(
-                    _minimal_agent_state(),
-                    _mock_user(),
-                    query="q",
-                    search_method="bm25",
-                    limit=10,
-                )
-                mock_search.search.assert_awaited_once()
-                assert mock_search.search.await_args[0][0] == "episodic_memory"
-                assert len(out) == 1
-                assert out[0].id == "ep-123"
+            mgr = _episodic_mgr()
+            out = await mgr.list_episodic_memory(
+                _minimal_agent_state(),
+                _mock_user(),
+                query="q",
+                search_method="bm25",
+                limit=10,
+            )
+            mock_search.search.assert_awaited_once()
+            assert mock_search.search.await_args[0][0] == "episodic_memory"
+            assert len(out) == 1
+            assert out[0].id == "ep-123"
 
     @pytest.mark.asyncio
-    async def test_list_episodic_memory_delegates_hybrid_engine_origin(self):
-        row = _episodic_row_dict()
-        mock_search = MagicMock()
-
-        with patch("mirix.database.search_provider.get_search_provider", return_value=mock_search):
-            with patch("mirix.database.call_context.get_call_origin", return_value=CALL_ORIGIN_ENGINE):
-                with patch(
-                    "mirix.services.hybrid_search_helper.hybrid_search",
-                    new_callable=AsyncMock,
-                    return_value=[row],
-                ):
-                    mgr = _episodic_mgr()
-                    out = await mgr.list_episodic_memory(
-                        _minimal_agent_state(),
-                        _mock_user(),
-                        query="q",
-                        limit=5,
-                    )
-                    assert len(out) == 1
-
-    @pytest.mark.asyncio
-    async def test_get_total_number_delegates_count_client_api(self):
+    async def test_get_total_number_delegates_to_search_count(self):
         mock_search = MagicMock()
         mock_search.count = AsyncMock(return_value=42)
 
         with patch("mirix.database.search_provider.get_search_provider", return_value=mock_search):
-            with patch("mirix.database.call_context.get_call_origin", return_value=CALL_ORIGIN_CLIENT_API):
-                mgr = _episodic_mgr()
-                n = await mgr.get_total_number_of_items(_mock_user())
-                mock_search.count.assert_awaited_once_with(
-                    "episodic_memory",
-                    user_id="user-1",
-                    organization_id="org-1",
-                )
-                assert n == 42
-
-    @pytest.mark.asyncio
-    async def test_get_total_number_delegates_hybrid_count_engine(self):
-        mock_search = MagicMock()
-
-        with patch("mirix.database.search_provider.get_search_provider", return_value=mock_search):
-            with patch("mirix.database.call_context.get_call_origin", return_value=CALL_ORIGIN_ENGINE):
-                with patch(
-                    "mirix.services.hybrid_search_helper.hybrid_count",
-                    new_callable=AsyncMock,
-                    return_value=99,
-                ):
-                    mgr = _episodic_mgr()
-                    n = await mgr.get_total_number_of_items(_mock_user())
-                    assert n == 99
+            mgr = _episodic_mgr()
+            n = await mgr.get_total_number_of_items(_mock_user())
+            mock_search.count.assert_awaited_once_with(
+                "episodic_memory",
+                user_id="user-1",
+                organization_id="org-1",
+            )
+            assert n == 42
 
 
 class TestSemanticMemoryManagerDelegation:
@@ -506,70 +471,38 @@ class TestSemanticMemoryManagerDelegation:
             mock_provider.delete.assert_awaited_once_with("semantic_memory", "sem-123")
 
     @pytest.mark.asyncio
-    async def test_list_semantic_items_search_client_api(self):
+    async def test_list_semantic_items_delegates_to_search_provider(self):
         row = _semantic_row_dict()
         mock_search = MagicMock()
         mock_search.search = AsyncMock(return_value=([row], None))
 
         with patch("mirix.database.search_provider.get_search_provider", return_value=mock_search):
-            with patch("mirix.database.call_context.get_call_origin", return_value=CALL_ORIGIN_CLIENT_API):
-                mgr = _semantic_mgr()
-                out = await mgr.list_semantic_items(
-                    _minimal_agent_state(),
-                    _mock_user(),
-                    query="q",
-                    limit=3,
-                )
-                mock_search.search.assert_awaited_once()
-                args, kwargs = mock_search.search.await_args
-                assert args[0] == "semantic_memory"
-                assert len(out) == 1
+            mgr = _semantic_mgr()
+            out = await mgr.list_semantic_items(
+                _minimal_agent_state(),
+                _mock_user(),
+                query="q",
+                limit=3,
+            )
+            mock_search.search.assert_awaited_once()
+            args, _kwargs = mock_search.search.await_args
+            assert args[0] == "semantic_memory"
+            assert len(out) == 1
 
     @pytest.mark.asyncio
-    async def test_list_semantic_items_hybrid_engine(self):
-        row = _semantic_row_dict()
-        mock_search = MagicMock()
-
-        with patch("mirix.database.search_provider.get_search_provider", return_value=mock_search):
-            with patch("mirix.database.call_context.get_call_origin", return_value=CALL_ORIGIN_ENGINE):
-                with patch(
-                    "mirix.services.hybrid_search_helper.hybrid_search",
-                    new_callable=AsyncMock,
-                    return_value=[row],
-                ):
-                    mgr = _semantic_mgr()
-                    out = await mgr.list_semantic_items(_minimal_agent_state(), _mock_user())
-                    assert len(out) == 1
-
-    @pytest.mark.asyncio
-    async def test_get_total_number_count_client_api(self):
+    async def test_get_total_number_delegates_to_search_count(self):
         mock_search = MagicMock()
         mock_search.count = AsyncMock(return_value=7)
 
         with patch("mirix.database.search_provider.get_search_provider", return_value=mock_search):
-            with patch("mirix.database.call_context.get_call_origin", return_value=CALL_ORIGIN_CLIENT_API):
-                mgr = _semantic_mgr()
-                n = await mgr.get_total_number_of_items(_mock_user())
-                mock_search.count.assert_awaited_once_with(
-                    "semantic_memory",
-                    user_id="user-1",
-                    organization_id="org-1",
-                )
-                assert n == 7
-
-    @pytest.mark.asyncio
-    async def test_get_total_number_hybrid_count_engine(self):
-        mock_search = MagicMock()
-
-        with patch("mirix.database.search_provider.get_search_provider", return_value=mock_search):
-            with patch("mirix.database.call_context.get_call_origin", return_value=CALL_ORIGIN_ENGINE):
-                with patch(
-                    "mirix.services.hybrid_search_helper.hybrid_count",
-                    new_callable=AsyncMock,
-                    return_value=11,
-                ):
-                    mgr = _semantic_mgr()
-                    assert await mgr.get_total_number_of_items(_mock_user()) == 11
+            mgr = _semantic_mgr()
+            n = await mgr.get_total_number_of_items(_mock_user())
+            mock_search.count.assert_awaited_once_with(
+                "semantic_memory",
+                user_id="user-1",
+                organization_id="org-1",
+            )
+            assert n == 7
 
 
 class TestBlockManagerDelegation:
@@ -656,43 +589,22 @@ class TestBlockManagerDelegation:
                 assert out.id == "block-c0ffee00"
 
     @pytest.mark.asyncio
-    async def test_get_blocks_search_client_api(self):
+    async def test_get_blocks_delegates_to_search_provider(self):
         row = _block_row_dict()
         mock_search = MagicMock()
         mock_search.search = AsyncMock(return_value=([row], None))
 
         with patch("mirix.database.search_provider.get_search_provider", return_value=mock_search):
-            with patch("mirix.database.call_context.get_call_origin", return_value=CALL_ORIGIN_CLIENT_API):
-                mgr = _block_mgr()
-                out = await mgr.get_blocks(
-                    user=_mock_user(),
-                    any_scopes=["scope-a"],
-                    auto_create_from_default=False,
-                )
-                mock_search.search.assert_awaited_once()
-                args, _kwargs = mock_search.search.await_args
-                assert args[0] == "block"
-                assert len(out) == 1
-
-    @pytest.mark.asyncio
-    async def test_get_blocks_hybrid_engine_origin(self):
-        row = _block_row_dict()
-        mock_search = MagicMock()
-
-        with patch("mirix.database.search_provider.get_search_provider", return_value=mock_search):
-            with patch("mirix.database.call_context.get_call_origin", return_value=CALL_ORIGIN_ENGINE):
-                with patch(
-                    "mirix.services.hybrid_search_helper.hybrid_search",
-                    new_callable=AsyncMock,
-                    return_value=[row],
-                ):
-                    mgr = _block_mgr()
-                    out = await mgr.get_blocks(
-                        user=_mock_user(),
-                        any_scopes=["scope-a"],
-                        auto_create_from_default=False,
-                    )
-                    assert len(out) == 1
+            mgr = _block_mgr()
+            out = await mgr.get_blocks(
+                user=_mock_user(),
+                any_scopes=["scope-a"],
+                auto_create_from_default=False,
+            )
+            mock_search.search.assert_awaited_once()
+            args, _kwargs = mock_search.search.await_args
+            assert args[0] == "block"
+            assert len(out) == 1
 
 
 @pytest.mark.asyncio
@@ -899,8 +811,8 @@ class TestAgentManagerDelegation:
                 mock_provider.read.assert_awaited_once_with("agents", "agent-1")
                 mock_provider.hard_delete.assert_awaited_once_with("agents", "agent-1")
 
-    async def test_get_agent_by_id_populates_cache_on_ips_path(self):
-        """GAP J: read-through cache should be populated after IPS read."""
+    async def test_get_agent_by_id_populates_cache_on_provider_path(self):
+        """GAP J: read-through cache should be populated after provider read."""
         row = _agent_row_dict()
         mock_provider = MagicMock()
         mock_provider.find_using_named_query = AsyncMock(return_value=[row])
@@ -920,7 +832,7 @@ class TestAgentManagerDelegation:
 
 
 # ---------------------------------------------------------------------------
-# GAP C: update_event delegates to IPS relational + skips embedding
+# GAP C: update_event delegates to relational provider + skips embedding
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 class TestEpisodicUpdateEventDelegation:
@@ -968,7 +880,7 @@ class TestEpisodicUpdateEventDelegation:
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 class TestEpisodicListByOrgDelegation:
-    async def test_list_by_org_uses_search_provider_client_api(self):
+    async def test_list_by_org_delegates_to_search_provider(self):
         row = _episodic_row_dict()
         mock_search = MagicMock()
         mock_search.search = AsyncMock(return_value=([row], None))
@@ -977,39 +889,15 @@ class TestEpisodicListByOrgDelegation:
         agent_state.embedding_config = MagicMock()
 
         with patch("mirix.database.search_provider.get_search_provider", return_value=mock_search):
-            with patch("mirix.database.call_context.get_call_origin", return_value=CALL_ORIGIN_CLIENT_API):
-                mgr = _episodic_mgr()
-                results = await mgr.list_episodic_memory_by_org(
-                    agent_state=agent_state,
-                    organization_id="org-1",
-                    query="test",
-                )
-                mock_search.search.assert_awaited_once()
-                assert len(results) == 1
-                assert results[0].id == "ep-123"
-
-    async def test_list_by_org_uses_hybrid_for_engine(self):
-        row = _episodic_row_dict()
-        mock_search = MagicMock()
-
-        agent_state = MagicMock(spec=AgentState)
-        agent_state.embedding_config = MagicMock()
-
-        with patch("mirix.database.search_provider.get_search_provider", return_value=mock_search):
-            with patch("mirix.database.call_context.get_call_origin", return_value=CALL_ORIGIN_ENGINE):
-                with patch("mirix.database.relational_provider.get_relational_provider", return_value=MagicMock()):
-                    with patch(
-                        "mirix.services.hybrid_search_helper.hybrid_search",
-                        new_callable=AsyncMock,
-                        return_value=[row],
-                    ) as mock_hybrid:
-                        mgr = _episodic_mgr()
-                        results = await mgr.list_episodic_memory_by_org(
-                            agent_state=agent_state,
-                            organization_id="org-1",
-                        )
-                        mock_hybrid.assert_awaited_once()
-                        assert len(results) == 1
+            mgr = _episodic_mgr()
+            results = await mgr.list_episodic_memory_by_org(
+                agent_state=agent_state,
+                organization_id="org-1",
+                query="test",
+            )
+            mock_search.search.assert_awaited_once()
+            assert len(results) == 1
+            assert results[0].id == "ep-123"
 
 
 # ---------------------------------------------------------------------------
@@ -1075,11 +963,11 @@ class TestEpisodicAroundTimestampDelegation:
 
 
 # ---------------------------------------------------------------------------
-# GAP J: tool_manager read-through cache on IPS path
+# GAP J: tool_manager read-through cache on provider path
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 class TestToolManagerCacheDelegation:
-    async def test_get_tool_by_id_populates_cache_on_ips_path(self):
+    async def test_get_tool_by_id_populates_cache_on_provider_path(self):
         row = _tool_row_dict()
         mock_provider = MagicMock()
         mock_provider.find_using_named_query = AsyncMock(return_value=[row])

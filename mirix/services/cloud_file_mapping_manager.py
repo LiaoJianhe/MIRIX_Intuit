@@ -198,7 +198,7 @@ class CloudFileMappingManager:
 
         provider = get_relational_provider()
         if provider is not None:
-            # Step 1: resolve the IPS entity ID via a lookup NQ
+            # Step 1: resolve the provider entity ID via a lookup NQ
             rows = None
             if cloud_file_id is not None:
                 rows = await provider.find_using_named_query(

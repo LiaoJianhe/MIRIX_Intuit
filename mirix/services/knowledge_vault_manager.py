@@ -418,7 +418,7 @@ class KnowledgeVaultManager:
     async def get_item_by_id(
         self, knowledge_vault_item_id: str, user: PydanticUser, timezone_str: str
     ) -> Optional[PydanticKnowledgeVaultItem]:
-        """Fetch a knowledge vault item by ID (with cache - Redis or IPS Cache)."""
+        """Fetch a knowledge vault item by ID (with cache - Redis or Cache provider)."""
         from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
@@ -691,23 +691,8 @@ class KnowledgeVaultManager:
 
         search_provider = get_search_provider()
         if search_provider:
-            from mirix.database.call_context import CALL_ORIGIN_CLIENT_API, get_call_origin
-            from mirix.database.relational_provider import get_relational_provider
-
-            call_origin = get_call_origin()
-            if call_origin == CALL_ORIGIN_CLIENT_API:
-                return await search_provider.count(
-                    "knowledge_vault",
-                    user_id=user.id,
-                    organization_id=user.organization_id,
-                )
-            from mirix.services.hybrid_search_helper import hybrid_count
-
-            relational_provider = get_relational_provider()
-            return await hybrid_count(
-                table="knowledge_vault",
-                search_provider=search_provider,
-                relational_provider=relational_provider,
+            return await search_provider.count(
+                "knowledge_vault",
                 user_id=user.id,
                 organization_id=user.organization_id,
             )
@@ -780,33 +765,8 @@ class KnowledgeVaultManager:
 
         search_provider = get_search_provider()
         if search_provider:
-            from mirix.database.call_context import CALL_ORIGIN_CLIENT_API, get_call_origin
-            from mirix.database.relational_provider import get_relational_provider
-
-            call_origin = get_call_origin()
-            if call_origin == CALL_ORIGIN_CLIENT_API:
-                results, _cursor = await search_provider.search(
-                    "knowledge_vault",
-                    query_text=query,
-                    query_embedding=embedded_text,
-                    search_method=search_method,
-                    search_field=search_field,
-                    user_id=user.id,
-                    organization_id=organization_id,
-                    filter_tags=filter_tags,
-                    scopes=scopes,
-                    limit=limit,
-                    similarity_threshold=similarity_threshold,
-                    sensitivity=sensitivity,
-                )
-                return [PydanticKnowledgeVaultItem(**r) for r in results]
-            from mirix.services.hybrid_search_helper import hybrid_search
-
-            relational_provider = get_relational_provider()
-            results, _next_cursor = await hybrid_search(
-                table="knowledge_vault",
-                search_provider=search_provider,
-                relational_provider=relational_provider,
+            results, _cursor = await search_provider.search(
+                "knowledge_vault",
                 query_text=query,
                 query_embedding=embedded_text,
                 search_method=search_method,
@@ -1382,33 +1342,8 @@ class KnowledgeVaultManager:
 
         search_provider = get_search_provider()
         if search_provider:
-            from mirix.database.call_context import CALL_ORIGIN_CLIENT_API, get_call_origin
-            from mirix.database.relational_provider import get_relational_provider
-
-            call_origin = get_call_origin()
-            if call_origin == CALL_ORIGIN_CLIENT_API:
-                results, _cursor = await search_provider.search(
-                    "knowledge_vault",
-                    query_text=query,
-                    query_embedding=embedded_text,
-                    search_method=search_method,
-                    search_field=search_field,
-                    user_id=None,
-                    organization_id=organization_id,
-                    filter_tags=filter_tags,
-                    scopes=scopes,
-                    limit=limit,
-                    similarity_threshold=similarity_threshold,
-                    sensitivity=sensitivity,
-                )
-                return [PydanticKnowledgeVaultItem(**r) for r in results]
-            from mirix.services.hybrid_search_helper import hybrid_search
-
-            relational_provider = get_relational_provider()
-            results, _next_cursor = await hybrid_search(
-                table="knowledge_vault",
-                search_provider=search_provider,
-                relational_provider=relational_provider,
+            results, _cursor = await search_provider.search(
+                "knowledge_vault",
                 query_text=query,
                 query_embedding=embedded_text,
                 search_method=search_method,

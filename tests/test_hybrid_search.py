@@ -9,12 +9,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from mirix.database.call_context import set_hybrid_window_seconds
 from mirix.services.hybrid_search_helper import (
-    HYBRID_COUNT_RECENT_LIMIT,
-    _merge_and_deduplicate,
-    hybrid_count,
-    hybrid_search,
+    DEFAULT_RECENT_CAP,
+    DedupCandidates,
+    fetch_and_dedup_candidates,
+    get_hybrid_window_seconds,
+    set_hybrid_window_seconds,
 )
 
 
@@ -25,8 +25,16 @@ def hybrid_window_five_seconds():
 
 
 @pytest.mark.asyncio
-class TestHybridSearch:
-    async def test_merges_search_and_relational_recent_window(self):
+class TestFetchAndDedupCandidates:
+    """The save-flow helper returns labeled buckets without merging.
+
+    The dedup judgment is left to the calling sub-agent's LLM, which sees
+    ``relevant`` (Search-provider ranked) and ``recent`` (Relational
+    just-written) separately so it can reason about each bucket on its own
+    terms.
+    """
+
+    async def test_returns_labeled_buckets_unmerged(self):
         search = AsyncMock()
         search.search = AsyncMock(
             return_value=(
@@ -39,7 +47,7 @@ class TestHybridSearch:
             return_value=[{"id": "r1", "updated_at": "2025-06-01T00:00:00+00:00"}]
         )
 
-        merged, next_cursor = await hybrid_search(
+        candidates = await fetch_and_dedup_candidates(
             "episodic_memory",
             search,
             relational,
@@ -47,19 +55,17 @@ class TestHybridSearch:
             limit=10,
         )
 
-        assert {r["id"] for r in merged} == {"s1", "r1"}
-        assert next_cursor is None
+        assert isinstance(candidates, DedupCandidates)
+        assert [r["id"] for r in candidates.relevant] == ["s1"]
+        assert [r["id"] for r in candidates.recent] == ["r1"]
         search.search.assert_awaited_once()
         relational.list.assert_awaited_once()
-        call_kw = relational.list.await_args
-        assert call_kw[0][0] == "episodic_memory"
-        assert call_kw[1]["user_id"] == "u1"
-        tr = call_kw[1]["time_range"]
-        assert "updated_at__gte" in tr
-        assert "created_at__gte" in tr
-        assert call_kw[1]["time_range_or_null_updated"] is True
 
-    async def test_deduplicates_by_id_relational_wins(self):
+    async def test_overlap_appears_in_both_buckets(self):
+        """A row that appears in both Search and the Relational recent window
+        is returned in both buckets verbatim. No dedup is applied; the
+        labeled-bucket contract is that the caller decides what to do with
+        overlapping IDs."""
         search = AsyncMock()
         search.search = AsyncMock(
             return_value=(
@@ -70,58 +76,69 @@ class TestHybridSearch:
         relational = AsyncMock()
         relational.list = AsyncMock(
             return_value=[
-                {"id": "1", "updated_at": "2025-01-02T00:00:00+00:00", "src": "relational"}
+                {"id": "1", "updated_at": "2025-01-02T00:00:00+00:00", "src": "relational"},
             ]
         )
 
-        merged, _next_cursor = await hybrid_search(
+        candidates = await fetch_and_dedup_candidates(
             "raw_memory", search, relational, limit=10
         )
 
-        assert len(merged) == 1
-        assert merged[0]["src"] == "relational"
+        assert len(candidates.relevant) == 1
+        assert candidates.relevant[0]["src"] == "search"
+        assert len(candidates.recent) == 1
+        assert candidates.recent[0]["src"] == "relational"
 
-    async def test_deduplicates_by_id_search_wins_if_newer(self):
+    async def test_relational_call_uses_recent_window(self):
         search = AsyncMock()
-        search.search = AsyncMock(
-            return_value=(
-                [{"id": "1", "updated_at": "2025-01-03T00:00:00+00:00", "src": "search"}],
-                None,
-            )
-        )
-        relational = AsyncMock()
-        relational.list = AsyncMock(
-            return_value=[
-                {"id": "1", "updated_at": "2025-01-02T00:00:00+00:00", "src": "relational"}
-            ]
-        )
-
-        merged, _next_cursor = await hybrid_search(
-            "raw_memory", search, relational, limit=10
-        )
-
-        assert len(merged) == 1
-        assert merged[0]["src"] == "search"
-
-    async def test_respects_limit(self):
-        search = AsyncMock()
-        search.search = AsyncMock(
-            return_value=(
-                [
-                    {"id": "a", "updated_at": "2025-01-03T00:00:00+00:00"},
-                    {"id": "b", "updated_at": "2025-01-02T00:00:00+00:00"},
-                    {"id": "c", "updated_at": "2025-01-01T00:00:00+00:00"},
-                ],
-                None,
-            )
-        )
+        search.search = AsyncMock(return_value=([], None))
         relational = AsyncMock()
         relational.list = AsyncMock(return_value=[])
 
-        merged, _next_cursor = await hybrid_search(
-            "semantic_memory", search, relational, limit=2
+        await fetch_and_dedup_candidates(
+            "episodic_memory",
+            search,
+            relational,
+            user_id="u1",
+            limit=10,
         )
-        assert len(merged) == 2
+
+        call_kw = relational.list.await_args
+        assert call_kw[0][0] == "episodic_memory"
+        assert call_kw[1]["user_id"] == "u1"
+        tr = call_kw[1]["time_range"]
+        assert "updated_at__gte" in tr
+        assert "created_at__gte" in tr
+        assert call_kw[1]["time_range_or_null_updated"] is True
+
+    async def test_recent_cap_applied_to_relational_list(self):
+        search = AsyncMock()
+        search.search = AsyncMock(return_value=([], None))
+        relational = AsyncMock()
+        relational.list = AsyncMock(return_value=[])
+
+        await fetch_and_dedup_candidates(
+            "semantic_memory",
+            search,
+            relational,
+            user_id="u1",
+            limit=10,
+            recent_cap=42,
+        )
+
+        assert relational.list.await_args[1]["limit"] == 42
+
+    async def test_recent_cap_defaults_to_500(self):
+        search = AsyncMock()
+        search.search = AsyncMock(return_value=([], None))
+        relational = AsyncMock()
+        relational.list = AsyncMock(return_value=[])
+
+        await fetch_and_dedup_candidates(
+            "semantic_memory", search, relational, user_id="u1"
+        )
+
+        assert relational.list.await_args[1]["limit"] == DEFAULT_RECENT_CAP == 500
 
     async def test_search_raises_propagates(self):
         search = AsyncMock()
@@ -130,9 +147,7 @@ class TestHybridSearch:
         relational.list = AsyncMock(return_value=[])
 
         with pytest.raises(RuntimeError, match="search down"):
-            await hybrid_search("episodic_memory", search, relational)
-
-        relational.list.assert_not_awaited()
+            await fetch_and_dedup_candidates("episodic_memory", search, relational)
 
     async def test_relational_raises_propagates(self):
         search = AsyncMock()
@@ -141,89 +156,37 @@ class TestHybridSearch:
         relational.list = AsyncMock(side_effect=RuntimeError("relational down"))
 
         with pytest.raises(RuntimeError, match="relational down"):
-            await hybrid_search("episodic_memory", search, relational)
+            await fetch_and_dedup_candidates("episodic_memory", search, relational)
 
-    async def test_next_cursor_propagates_from_search_provider(self):
-        """The cursor returned by search_provider.search() is propagated to the caller."""
+    async def test_relevant_preserves_search_order(self):
+        """The ranked Search-provider order is preserved as-is in
+        ``relevant``; the helper deliberately does not re-sort by
+        timestamp."""
         search = AsyncMock()
         search.search = AsyncMock(
             return_value=(
-                [{"id": "s1", "updated_at": "2024-01-01T00:00:00+00:00"}],
-                "opaque-cursor-token",
+                [
+                    {"id": "c", "updated_at": "2025-01-01T00:00:00+00:00"},
+                    {"id": "a", "updated_at": "2025-01-03T00:00:00+00:00"},
+                    {"id": "b", "updated_at": "2025-01-02T00:00:00+00:00"},
+                ],
+                None,
             )
         )
         relational = AsyncMock()
         relational.list = AsyncMock(return_value=[])
 
-        merged, next_cursor = await hybrid_search(
-            "episodic_memory",
-            search,
-            relational,
-            user_id="u1",
-            limit=10,
+        candidates = await fetch_and_dedup_candidates(
+            "semantic_memory", search, relational, limit=10
         )
-
-        assert next_cursor == "opaque-cursor-token"
-        assert len(merged) == 1
+        assert [r["id"] for r in candidates.relevant] == ["c", "a", "b"]
 
 
-@pytest.mark.asyncio
-class TestHybridCount:
-    async def test_returns_search_plus_relational_not_in_search(self):
-        search = AsyncMock()
-        search.count = AsyncMock(return_value=10)
-        search.get_by_id = AsyncMock(
-            side_effect=lambda table, rid, user_id=None: (
-                {"id": rid} if rid == "in_both" else None
-            )
-        )
-        relational = AsyncMock()
-        relational.list = AsyncMock(
-            return_value=[
-                {"id": "only_relational"},
-                {"id": "in_both"},
-            ]
-        )
-
-        total = await hybrid_count(
-            "knowledge_vault",
-            search,
-            relational,
-            user_id="u1",
-        )
-
-        assert total == 11
-        search.count.assert_awaited_once()
-        relational.list.assert_awaited_once()
-
-    async def test_hybrid_count_uses_configurable_limit(self):
-        search = AsyncMock()
-        search.count = AsyncMock(return_value=0)
-        search.get_by_id = AsyncMock(return_value=None)
-        relational = AsyncMock()
-        relational.list = AsyncMock(return_value=[])
-
-        await hybrid_count("knowledge_vault", search, relational, user_id="u1")
-
-        call_kw = relational.list.await_args
-        assert call_kw[1]["limit"] == HYBRID_COUNT_RECENT_LIMIT == 500
-
-
-class TestMergeAndDeduplicate:
-    def test_sorts_by_timestamp_descending(self):
-        search_results = [
-            {"id": "old", "updated_at": "2020-01-01T00:00:00+00:00"},
-        ]
-        recent = [
-            {"id": "new", "updated_at": "2025-01-01T00:00:00+00:00"},
-        ]
-        out = _merge_and_deduplicate(search_results, recent, limit=10)
-        assert [r["id"] for r in out] == ["new", "old"]
-
-    def test_fallback_created_at_for_sort(self):
-        out = _merge_and_deduplicate(
-            [{"id": "a", "created_at": "2021-01-01T00:00:00+00:00"}],
-            [{"id": "b", "created_at": "2022-01-01T00:00:00+00:00"}],
-            limit=10,
-        )
-        assert [r["id"] for r in out] == ["b", "a"]
+class TestWindowAccessors:
+    def test_set_and_get_round_trip(self):
+        original = get_hybrid_window_seconds()
+        try:
+            set_hybrid_window_seconds(42)
+            assert get_hybrid_window_seconds() == 42
+        finally:
+            set_hybrid_window_seconds(original)

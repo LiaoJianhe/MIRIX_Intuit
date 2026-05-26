@@ -1,7 +1,7 @@
 """
 Coupled startup validation for relational and search providers.
 
-IPS Relational and IPS Search must be registered together or not at all.
+Relational DB provider and Search provider must be registered together or not at all.
 Cache-only registration remains independently valid.
 """
 
@@ -34,12 +34,12 @@ def validate_provider_pairing_or_raise() -> None:
 
     if has_relational and not has_search:
         raise RuntimeError(
-            "IPS Relational provider is registered but IPS Search provider is not. "
+            "Relational DB provider is registered but Search provider is not. "
             "Both must be registered together or neither registered."
         )
     if has_search and not has_relational:
         raise RuntimeError(
-            "IPS Search provider is registered but IPS Relational provider is not. "
+            "Search provider is registered but Relational DB provider is not. "
             "Both must be registered together or neither registered."
         )
 

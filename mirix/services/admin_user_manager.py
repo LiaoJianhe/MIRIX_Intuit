@@ -218,7 +218,7 @@ class ClientAuthManager:
 
         provider = get_relational_provider()
         if provider is not None:
-            # Duplicate-email check via IPS NQ
+            # Duplicate-email check via provider NQ
             existing = await provider.find_using_named_query(
                 "clients",
                 "admin_user_manager.get_client_by_email",
@@ -243,7 +243,7 @@ class ClientAuthManager:
             }
             created_client = await provider.create("clients", client_data)
             logger.info(
-                "Registered client for dashboard (IPS): %s (%s)",
+                "Registered client for dashboard (provider): %s (%s)",
                 name,
                 email.lower(),
             )
@@ -264,7 +264,7 @@ class ClientAuthManager:
                             "is_admin": True,
                         },
                     )
-                    logger.info("Created admin user for client (IPS): %s -> %s", client_id, admin_user_id)
+                    logger.info("Created admin user for client (provider): %s -> %s", client_id, admin_user_id)
             except Exception as e:
                 logger.warning("Failed to create admin user for client %s: %s", client_id, e)
 

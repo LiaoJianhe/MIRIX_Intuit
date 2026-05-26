@@ -31,8 +31,8 @@ class Organization(OrganizationBase):
         default_factory=get_utc_time,
         description="The creation date of the organization.",
     )
-    # IPS Relational returns an updated_at timestamp; not present on the PostgreSQL path.
-    updated_at: Optional[datetime] = Field(None, description="Last update timestamp (IPS path).")
+    # Relational DB provider returns an updated_at timestamp; not present on the PostgreSQL path.
+    updated_at: Optional[datetime] = Field(None, description="Last update timestamp (provider path).")
 
 
 class OrganizationCreate(OrganizationBase):

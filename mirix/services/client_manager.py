@@ -33,7 +33,7 @@ class ClientManager:
 
         provider = get_relational_provider()
         if provider:
-            # Verify the organization exists in IPS Relational
+            # Verify the organization exists in Relational DB provider
             org = await provider.read("organizations", org_id)
             if org is None:
                 raise ValueError(f"No organization with {org_id} exists in the organization table.")
@@ -252,7 +252,7 @@ class ClientManager:
         provider = get_relational_provider()
         if provider:
             # Read the row first so we can synthesize the response without relying on
-            # IPS Relational read-after-write consistency for the mutation NQ.
+            # Relational DB provider read-after-write consistency for the mutation NQ.
             existing = await provider.read("client_api_keys", api_key_id)
             if existing is None:
                 from mirix.orm.errors import NoResultFound as _NRF
@@ -617,7 +617,7 @@ class ClientManager:
         """
         Hard delete memories, messages, and blocks for a client.
 
-        When IPS Relational provider is registered, uses bulk_delete API.
+        When Relational DB provider is registered, uses bulk_delete API.
         Otherwise uses memory managers' bulk delete via SQLAlchemy.
 
         Preserves the client, agents, and tools.
@@ -634,7 +634,7 @@ class ClientManager:
         provider = get_relational_provider()
         if provider:
             logger.info(
-                "Bulk deleting memories via IPS Relational for client %s", client_id
+                "Bulk deleting memories via Relational DB provider for client %s", client_id
             )
             # raw_memory is included here; messages is handled separately below
             # via mutate_using_named_query (messages is an engine table, not IEDM).
@@ -667,7 +667,7 @@ class ClientManager:
                 params={"clientId": client_id},
             )
 
-            logger.info("IPS bulk delete complete for client %s: %d total records", client_id, total)
+            logger.info("Provider bulk delete complete for client %s: %d total records", client_id, total)
             return
 
         logger.info(
@@ -796,7 +796,7 @@ class ClientManager:
 
     @enforce_types
     async def get_client_by_id(self, client_id: str) -> PydanticClient:
-        """Fetch a client by ID (with cache - Redis or IPS Cache)."""
+        """Fetch a client by ID (with cache - Redis or Cache provider)."""
         from mirix.log import get_logger
 
         logger = get_logger(__name__)

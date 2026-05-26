@@ -26,7 +26,7 @@ class MessageManager:
     async def get_message_by_id(
         self, message_id: str, actor: PydanticClient, use_cache: bool = True
     ) -> Optional[PydanticMessage]:
-        """Fetch a message by ID (with cache - Redis or IPS Cache)."""
+        """Fetch a message by ID (with cache - Redis or Cache provider)."""
         from mirix.log import get_logger
 
         logger = get_logger(__name__)
@@ -296,13 +296,13 @@ class MessageManager:
 
         rel_provider = get_relational_provider()
         if rel_provider:
-            # IPS branch: use the soft-delete mutation NQ (mirrors PG soft-delete path)
+            # Provider branch: use the soft-delete mutation NQ (mirrors PG soft-delete path)
             await rel_provider.mutate_using_named_query(
                 "messages",
                 "message_manager.update_by_client_id",
                 params={"clientId": actor.id},
             )
-            # Count is not reliable from IPS mutation NQs; return 0 as a sentinel.
+            # Count is not reliable from provider mutation NQs; return 0 as a sentinel.
             # Callers that need an exact count should use the PG path.
             return 0
 
@@ -668,14 +668,14 @@ class MessageManager:
         from mirix.database.relational_provider import get_relational_provider
 
         rprovider = get_relational_provider()
-        ips_eligible = (
+        provider_eligible = (
             rprovider is not None
             and start_date is None
             and end_date is None
             and cursor is None
             and (filters is None or set(filters.keys()).issubset({"role"}))
         )
-        if ips_eligible:
+        if provider_eligible:
             if query_text:
                 rows = await rprovider.find_using_named_query(
                     "messages",
