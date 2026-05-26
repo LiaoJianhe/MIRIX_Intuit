@@ -1,3 +1,4 @@
+import os
 from typing import List, Optional
 
 from mirix.orm.errors import NoResultFound
@@ -9,8 +10,14 @@ from mirix.utils import create_random_username, enforce_types
 class OrganizationManager:
     """Manager class to handle business logic related to Organizations."""
 
-    DEFAULT_ORG_ID = "org-00000000-0000-4000-8000-000000000000"
-    DEFAULT_ORG_NAME = "default_org"
+    # Read at class-definition (import) time. Callers (e.g. ECMS) must set
+    # MIRIX_DEFAULT_ORG_ID / MIRIX_DEFAULT_ORG_NAME before importing any
+    # mirix.* module to override these. Unset = today's hardcoded default,
+    # so existing deployments are unaffected.
+    DEFAULT_ORG_ID = os.environ.get(
+        "MIRIX_DEFAULT_ORG_ID", "org-00000000-0000-4000-8000-000000000000"
+    )
+    DEFAULT_ORG_NAME = os.environ.get("MIRIX_DEFAULT_ORG_NAME", "default_org")
 
     def __init__(self):
         from mirix.server.server import db_context
