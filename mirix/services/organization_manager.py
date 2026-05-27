@@ -33,8 +33,16 @@ class OrganizationManager:
             return await self.create_default_organization()
 
     @enforce_types
-    async def get_organization_by_id(self, org_id: str) -> Optional[PydanticOrganization]:
-        """Fetch an organization by ID (with cache - Redis or Cache provider)."""
+    async def get_organization_by_id(self, org_id: str) -> PydanticOrganization:
+        """Fetch an organization by ID (with cache - Redis or Cache provider).
+
+        Raises:
+            NoResultFound: if no organization with the given id exists. Both
+                the IPS relational path and the PG fallback raise this
+                consistently — callers expecting ``None`` on miss must wrap
+                the call in ``try/except NoResultFound`` instead. The return
+                type is intentionally non-Optional to reflect that.
+        """
         from mirix.log import get_logger
 
         logger = get_logger(__name__)
