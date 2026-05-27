@@ -660,7 +660,7 @@ class ClientAuthManager:
 
         provider = get_relational_provider()
         if provider is not None:
-            from common.ipsr.named_query_results import CountResult
+            from mirix.database.named_query_results import CountResult
 
             rows = await provider.find_using_named_query(
                 "clients",

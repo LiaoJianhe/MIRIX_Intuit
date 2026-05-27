@@ -1640,7 +1640,7 @@ class AgentManager:
 
         rel_provider = get_relational_provider()
         if rel_provider is not None:
-            from common.ipsr.named_query_results import CountResult
+            from mirix.database.named_query_results import CountResult
 
             rows = await rel_provider.find_using_named_query(
                 "agents",

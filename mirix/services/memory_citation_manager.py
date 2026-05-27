@@ -309,6 +309,14 @@ class MemoryCitationManager:
             # VEPAGE-1107: use a dedicated MAX(occurredAt) named query to
             # avoid pulling the full citation set client-side. Returns a
             # single scalar row keyed ``max_occurred_at``.
+            #
+            # The NQ projects only ``MAX(occurredAt) AS max_occurred_at`` — no
+            # ``id`` column — so we pass ``skip_entity_mapping=True`` and a
+            # ``MaxOccurredAtResult`` shape. Without that the provider would
+            # try to bind the row to the memoryCitations entity schema and
+            # reject with "column name id was not found in this ResultSet".
+            from mirix.database.named_query_results import MaxOccurredAtResult
+
             records = await provider.find_using_named_query(
                 "memory_citations",
                 "memory_citation_manager.max_occurred_at_for_memory",
@@ -316,6 +324,8 @@ class MemoryCitationManager:
                     "memoryType": memory_type,
                     "memoryId": memory_id,
                 },
+                result_set_entity_class=MaxOccurredAtResult,
+                skip_entity_mapping=True,
                 page_size=1,
             )
             occurreds = [

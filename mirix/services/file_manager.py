@@ -262,7 +262,7 @@ class FileManager:
 
         provider = get_relational_provider()
         if provider is not None:
-            from common.ipsr.named_query_results import FileStatsResult
+            from mirix.database.named_query_results import FileStatsResult
 
             rows = await provider.find_using_named_query(
                 "files",
