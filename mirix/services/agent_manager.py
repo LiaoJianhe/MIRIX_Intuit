@@ -141,13 +141,18 @@ class AgentManager:
         # Remove duplicates
         tool_names = list(set(tool_names))
 
-        tool_ids = agent_create.tool_ids or []
-        for tool_name in tool_names:
-            tool = await self.tool_manager.get_tool_by_name(tool_name=tool_name, actor=actor)
-            if tool:
-                tool_ids.append(tool.id)
-            else:
-                logger.debug("Tool %s not found", tool_name)
+        tool_ids = list(agent_create.tool_ids or [])
+        if tool_names:
+            resolved = await self.tool_manager.list_tools_by_names(
+                tool_names=tool_names, actor=actor
+            )
+            by_name = {t.name: t for t in resolved}
+            for tool_name in tool_names:
+                tool = by_name.get(tool_name)
+                if tool:
+                    tool_ids.append(tool.id)
+                else:
+                    logger.debug("Tool %s not found", tool_name)
 
         # Remove duplicates
         tool_ids = list(set(tool_ids))
@@ -201,8 +206,11 @@ class AgentManager:
             actor.organization_id,
         )
 
-        # Ensure base tools are available in the database for this organization
-        await self.tool_manager.upsert_base_tools(actor=actor)
+        # Ensure base tools are available in the database for this organization.
+        # Uses the lightweight existence-check path: one batched read + creates
+        # only for missing tools (zero on the common case where the startup
+        # ``upsert_base_tools`` has already seeded the org's tool rows).
+        await self.tool_manager.ensure_base_tools_exist(actor=actor)
 
         # Map agent names to their corresponding AgentType
         agent_name_to_type = {
@@ -600,18 +608,28 @@ class AgentManager:
             if mcp_tool_id not in tool_ids:
                 tool_ids.append(mcp_tool_id)
 
+        # Resolve adds and removes in a single batched lookup to avoid N+1
+        # IPSR roundtrips on the force_update=true path.
+        names_to_resolve = list(set(new_tool_names) | set(tool_names_to_remove))
+        resolved_by_name: dict = {}
+        if names_to_resolve:
+            resolved = await self.tool_manager.list_tools_by_names(
+                tool_names=names_to_resolve, actor=actor
+            )
+            resolved_by_name = {t.name: t for t in resolved}
+
         # Add new tools
-        if len(new_tool_names) > 0:
+        if new_tool_names:
             for tool_name in new_tool_names:
-                tool = await self.tool_manager.get_tool_by_name(tool_name=tool_name, actor=actor)
+                tool = resolved_by_name.get(tool_name)
                 if tool:
                     tool_ids.append(tool.id)
 
         # Remove tools that should no longer be attached
-        if len(tool_names_to_remove) > 0:
+        if tool_names_to_remove:
             tools_to_remove_ids = []
             for tool_name in tool_names_to_remove:
-                tool = await self.tool_manager.get_tool_by_name(tool_name=tool_name, actor=actor)
+                tool = resolved_by_name.get(tool_name)
                 if tool:
                     tools_to_remove_ids.append(tool.id)
 
