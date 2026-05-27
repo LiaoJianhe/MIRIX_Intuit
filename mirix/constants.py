@@ -5,8 +5,12 @@ from logging import CRITICAL, DEBUG, ERROR, INFO, NOTSET, WARN, WARNING
 # Client Constants - Used by both client and server
 # ============================================================================
 
-# Default organization and admin user IDs (needed by schemas)
-DEFAULT_ORG_ID = "org-00000000-0000-4000-8000-000000000000"
+# Default organization and admin user IDs (needed by schemas).
+# DEFAULT_ORG_ID is read from MIRIX_DEFAULT_ORG_ID at module-load time so an
+# embedding host (e.g. ECMS) can override the org per-deployment by setting
+# the env var BEFORE importing any mirix.* module.  Unset = today's hardcoded
+# default, so existing deployments are unaffected.
+DEFAULT_ORG_ID = os.environ.get("MIRIX_DEFAULT_ORG_ID", "org-00000000-0000-4000-8000-000000000000")
 ADMIN_USER_ID = "user-00000000-0000-4000-8000-000000000000"
 
 # Embedding constants

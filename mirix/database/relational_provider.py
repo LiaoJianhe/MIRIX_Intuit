@@ -66,11 +66,11 @@ Interface design notes:
       apply_access_predicate, keyset pagination).
     - ``size`` includes scoping parameters because get_total_number_of_items
       counts are always scoped.
-    - ``find_using_filter`` exposes the IPS Relational SDK's
+    - ``find_using_filter`` exposes the Relational DB provider SDK's
       find_using_filter_query for ad-hoc filter queries needed by admin
       endpoints and hybrid-read recent-record lookups.
     - CUD methods accept optional event_context for domain event propagation
-      to IPS Search (memory tables only).
+      to Search provider (memory tables only).
     - ``bulk_delete`` and ``bulk_upsert`` support batch operations with
       per-record event contexts.
 

@@ -80,7 +80,7 @@ class ToolManager:
 
     @enforce_types
     async def get_tool_by_id(self, tool_id: str, actor: PydanticClient) -> PydanticTool:
-        """Fetch a tool by its ID (async, with read-through cache on IPS path)."""
+        """Fetch a tool by its ID (async, with read-through cache on provider path)."""
         from mirix.database.cache_provider import get_cache_provider
         from mirix.database.relational_provider import get_relational_provider
         from mirix.log import get_logger

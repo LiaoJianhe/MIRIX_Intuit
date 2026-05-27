@@ -143,7 +143,7 @@ class EpisodicMemoryManager:
         Raises:
             NoResultFound: If the record doesn't exist or doesn't belong to user
         """
-        # IPS provider delegation (read by ID)
+        # Provider delegation (read by ID)
         from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
@@ -230,7 +230,7 @@ class EpisodicMemoryManager:
         Returns:
             Most recent event or None if no events exist
         """
-        # IPS provider delegation (B2 generic helper).
+        # Provider delegation (B2 generic helper).
         from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
@@ -295,7 +295,7 @@ class EpisodicMemoryManager:
             user_id = UserManager.ADMIN_USER_ID
             logger.warning("user_id not provided to create_episodic_memory, using ADMIN_USER_ID as fallback")
 
-        # IPS provider delegation (create via lower-level method)
+        # Provider delegation (create via lower-level method)
         from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
@@ -368,7 +368,7 @@ class EpisodicMemoryManager:
         """
         Delete an episodic memory record by ID (removes from Redis cache).
         """
-        # IPS provider delegation (delete)
+        # Provider delegation (delete)
         from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
@@ -410,8 +410,8 @@ class EpisodicMemoryManager:
         Returns:
             Number of records deleted
         """
-        from mirix.database.redis_client import get_redis_client
         from mirix.database.relational_provider import get_relational_provider
+        from mirix.database.redis_client import get_redis_client
 
         provider = get_relational_provider()
         if provider:
@@ -459,8 +459,8 @@ class EpisodicMemoryManager:
         Returns:
             Number of records soft deleted
         """
-        from mirix.database.redis_client import get_redis_client
         from mirix.database.relational_provider import get_relational_provider
+        from mirix.database.redis_client import get_redis_client
 
         provider = get_relational_provider()
         if provider:
@@ -518,8 +518,8 @@ class EpisodicMemoryManager:
         import datetime as dt
         from datetime import datetime
 
-        from mirix.database.redis_client import get_redis_client
         from mirix.database.relational_provider import get_relational_provider
+        from mirix.database.redis_client import get_redis_client
 
         provider = get_relational_provider()
         if provider:
@@ -588,8 +588,8 @@ class EpisodicMemoryManager:
         Returns:
             Number of records deleted
         """
-        from mirix.database.redis_client import get_redis_client
         from mirix.database.relational_provider import get_relational_provider
+        from mirix.database.redis_client import get_redis_client
 
         provider = get_relational_provider()
         if provider:
@@ -653,7 +653,7 @@ class EpisodicMemoryManager:
                 user_id = UserManager.ADMIN_USER_ID
                 logger.debug("user_id not provided, using ADMIN_USER_ID: %s", user_id)
 
-            # IPS provider delegation (create)
+            # Provider delegation (create)
             from mirix.database.relational_provider import get_relational_provider
 
             provider = get_relational_provider()
@@ -786,27 +786,9 @@ class EpisodicMemoryManager:
 
         search_provider = get_search_provider()
         if search_provider:
-            from mirix.database.call_context import CALL_ORIGIN_CLIENT_API, get_call_origin
-            from mirix.database.relational_provider import get_relational_provider
-
-            call_origin = get_call_origin()
-            if call_origin == CALL_ORIGIN_CLIENT_API:
-                return await search_provider.count(
-                    "episodic_memory",
-                    user_id=user.id,
-                    organization_id=user.organization_id,
-                )
-            else:
-                from mirix.services.hybrid_search_helper import hybrid_count
-
-                relational_provider = get_relational_provider()
-                return await hybrid_count(
-                    table="episodic_memory",
-                    search_provider=search_provider,
-                    relational_provider=relational_provider,
-                    user_id=user.id,
-                    organization_id=user.organization_id,
-                )
+            return await search_provider.count(
+                "episodic_memory", user_id=user.id, organization_id=user.organization_id,
+            )
 
         async with self.session_maker() as session:
             query = select(func.count(EpisodicEvent.id)).where(
@@ -880,54 +862,27 @@ class EpisodicMemoryManager:
         # Extract organization_id from user for multi-tenant isolation
         organization_id = user.organization_id
 
-        # IPS provider delegation (search/list)
+        # Provider delegation (search/list)
         from mirix.database.search_provider import get_search_provider
 
         search_provider = get_search_provider()
         if search_provider:
-            from mirix.database.call_context import CALL_ORIGIN_CLIENT_API, get_call_origin
-            from mirix.database.relational_provider import get_relational_provider
-
-            call_origin = get_call_origin()
-            if call_origin == CALL_ORIGIN_CLIENT_API:
-                results, _cursor = await search_provider.search(
-                    "episodic_memory",
-                    query_text=query,
-                    query_embedding=embedded_text,
-                    search_method=search_method,
-                    search_field=search_field,
-                    user_id=user.id,
-                    organization_id=organization_id,
-                    filter_tags=filter_tags,
-                    scopes=scopes,
-                    limit=limit,
-                    start_date=start_date,
-                    end_date=end_date,
-                    similarity_threshold=similarity_threshold,
-                )
-                return [PydanticEpisodicEvent(**r) for r in results]
-            else:
-                from mirix.services.hybrid_search_helper import hybrid_search
-
-                relational_provider = get_relational_provider()
-                results, _next_cursor = await hybrid_search(
-                    table="episodic_memory",
-                    search_provider=search_provider,
-                    relational_provider=relational_provider,
-                    query_text=query,
-                    query_embedding=embedded_text,
-                    search_method=search_method,
-                    search_field=search_field,
-                    user_id=user.id,
-                    organization_id=organization_id,
-                    filter_tags=filter_tags,
-                    scopes=scopes,
-                    limit=limit,
-                    start_date=start_date,
-                    end_date=end_date,
-                    similarity_threshold=similarity_threshold,
-                )
-                return [PydanticEpisodicEvent(**r) for r in results]
+            results, _cursor = await search_provider.search(
+                "episodic_memory",
+                query_text=query,
+                query_embedding=embedded_text,
+                search_method=search_method,
+                search_field=search_field,
+                user_id=user.id,
+                organization_id=organization_id,
+                filter_tags=filter_tags,
+                scopes=scopes,
+                limit=limit,
+                start_date=start_date,
+                end_date=end_date,
+                similarity_threshold=similarity_threshold,
+            )
+            return [PydanticEpisodicEvent(**r) for r in results]
 
         # Try Redis Search first (if cache enabled and Redis is available)
         from mirix.database.redis_client import get_redis_client
@@ -1690,49 +1645,21 @@ class EpisodicMemoryManager:
 
         search_provider = get_search_provider()
         if search_provider:
-            from mirix.database.call_context import (
-                CALL_ORIGIN_CLIENT_API,
-                get_call_origin,
+            results, _cursor = await search_provider.search(
+                "episodic_memory",
+                query_text=query or None,
+                query_embedding=embedded_text,
+                search_method=search_method,
+                search_field=search_field or None,
+                user_id=None,
+                organization_id=organization_id,
+                filter_tags=filter_tags,
+                scopes=scopes,
+                limit=limit,
+                start_date=start_date,
+                end_date=end_date,
+                similarity_threshold=similarity_threshold,
             )
-
-            call_origin = get_call_origin()
-            if call_origin == CALL_ORIGIN_CLIENT_API:
-                results, _cursor = await search_provider.search(
-                    "episodic_memory",
-                    query_text=query or None,
-                    query_embedding=embedded_text,
-                    search_method=search_method,
-                    search_field=search_field or None,
-                    user_id=None,
-                    organization_id=organization_id,
-                    filter_tags=filter_tags,
-                    scopes=scopes,
-                    limit=limit,
-                    start_date=start_date,
-                    end_date=end_date,
-                    similarity_threshold=similarity_threshold,
-                )
-            else:
-                from mirix.database.relational_provider import get_relational_provider
-                from mirix.services.hybrid_search_helper import hybrid_search
-
-                results, _next_cursor = await hybrid_search(
-                    table="episodic_memory",
-                    search_provider=search_provider,
-                    relational_provider=get_relational_provider(),
-                    query_text=query or None,
-                    query_embedding=embedded_text,
-                    search_method=search_method,
-                    search_field=search_field or None,
-                    user_id=None,
-                    organization_id=organization_id,
-                    filter_tags=filter_tags,
-                    scopes=scopes,
-                    limit=limit,
-                    start_date=start_date,
-                    end_date=end_date,
-                    similarity_threshold=similarity_threshold,
-                )
             return [PydanticEpisodicEvent(**r) for r in results]
 
         from mirix.database.redis_client import get_redis_client

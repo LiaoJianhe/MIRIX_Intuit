@@ -648,9 +648,9 @@ class AgentManager:
                 name = create_random_username()
 
             data_dict = {
-                # Pre-generate a UUID so IPS Relational uses it as the system entity.id.
-                # IPS Relational requires a valid UUID for engine table entity.id.
-                # Using str(uuid.uuid4()) (no prefix) ensures IPS accepts it directly.
+                # Pre-generate a UUID so Relational DB provider uses it as the system entity.id.
+                # Relational DB provider requires a valid UUID for engine table entity.id.
+                # Using str(uuid.uuid4()) (no prefix) ensures the provider accepts it directly.
                 # The matching entity_key stores this UUID for natural-key lookups.
                 "id": str(uuid.uuid4()),
                 "name": name,
@@ -668,7 +668,7 @@ class AgentManager:
                     else None
                 ),
                 "parent_id": parent_id,
-                # Pass the client UUID so the IPS Relational provider can store it
+                # Pass the client UUID so the Relational DB provider can store it
                 # in ipsr_entity_owner, enabling correct created_by_id round-trip.
                 "_created_by_id": actor.id,
             }
@@ -1249,13 +1249,13 @@ class AgentManager:
         When parent_id is provided, tries to use Redis cache via parent's children_ids first,
         then falls back to PostgreSQL if cache miss.
 
-        ``sort_desc`` selects descending vs ascending creation-time ordering for the IPS
-        Relational path (``agent_manager.list_agents_desc`` vs ``agent_manager.list_agents_asc``).
+        ``sort_desc`` selects descending vs ascending creation-time ordering for the
+        Relational DB provider path (``agent_manager.list_agents_desc`` vs ``agent_manager.list_agents_asc``).
         """
         from mirix.database.relational_provider import get_relational_provider
 
         rel_provider = get_relational_provider()
-        # A-4: query_text path (new IPS branch — replaces SQLAlchemy fallback)
+        # A-4: query_text path (new provider branch — replaces SQLAlchemy fallback)
         if rel_provider and query_text and parent_id is None and not kwargs:
             results = await rel_provider.find_using_named_query(
                 "agents",
@@ -1270,7 +1270,7 @@ class AgentManager:
             )
             return [PydanticAgentState(**r) for r in results]
 
-        # A-3: default IPS list path — choose ascending vs descending NQ based on sort_desc
+        # A-3: default provider list path — choose ascending vs descending NQ based on sort_desc
         if rel_provider and parent_id is None and not query_text and not kwargs:
             query_name = (
                 "agent_manager.list_agents_desc"
@@ -1463,7 +1463,7 @@ class AgentManager:
         except Exception as e:
             logger.warning("Cache read failed for agent %s: %s", agent_id, e)
 
-        # IPS Relational delegation (named query with include_relationships for tools)
+        # Relational DB provider delegation (named query with include_relationships for tools)
         from mirix.database.relational_provider import get_relational_provider
 
         rel_provider = get_relational_provider()
@@ -1518,7 +1518,7 @@ class AgentManager:
                     agent_cache_key = f"{cache_provider.AGENT_PREFIX}{agent_id}"
                     await cache_provider.set_hash(agent_cache_key, data, ttl=settings.redis_ttl_agents)
             except Exception as e:
-                logger.warning("Failed to populate cache after IPS read for agent %s: %s", agent_id, e)
+                logger.warning("Failed to populate cache after provider read for agent %s: %s", agent_id, e)
 
             return agent_state
 
@@ -1631,10 +1631,10 @@ class AgentManager:
     async def size_agents(self, actor: PydanticClient) -> int:
         """Return the count of non-deleted agents for the actor's organization.
 
-        Routes through the ``sqlalchemy_base.size_agents`` named query when the IPS
-        Relational provider is registered; falls back to ``AgentModel.size`` otherwise.
+        Routes through the ``sqlalchemy_base.size_agents`` named query when the
+        Relational DB provider is registered; falls back to ``AgentModel.size`` otherwise.
         ``SqlalchemyBase.size()`` is deliberately not modified to keep the ORM base
-        class decoupled from the IPS provider.
+        class decoupled from the provider.
         """
         from mirix.database.relational_provider import get_relational_provider
 

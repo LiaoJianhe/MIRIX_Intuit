@@ -35,7 +35,7 @@ class UserManager:
 
         provider = get_relational_provider()
         if provider:
-            # Verify the organization exists in IPS Relational
+            # Verify the organization exists in Relational DB provider
             org = await provider.read("organizations", org_id)
             if org is None:
                 raise ValueError(f"No organization with {org_id} exists in the organization table.")
@@ -499,7 +499,7 @@ class UserManager:
 
     @enforce_types
     async def get_user_by_id(self, user_id: str) -> PydanticUser:
-        """Fetch a user by ID (with cache - Redis or IPS Cache)."""
+        """Fetch a user by ID (with cache - Redis or Cache provider)."""
         from mirix.log import get_logger
 
         logger = get_logger(__name__)
@@ -621,7 +621,7 @@ class UserManager:
                         return PydanticUser(**existing)
                 raise
 
-        # PostgreSQL fallback path (no IPS Relational registered)
+        # PostgreSQL fallback path (no Relational DB provider registered)
         # Try to find existing default user for this org
         async with self.session_maker() as session:
             try:

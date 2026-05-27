@@ -1,5 +1,5 @@
 """
-Relational and search provider registry tests for Mirix (IPS providers).
+Relational and search provider registry tests for Mirix (providers).
 
 Usage:
     pytest tests/test_provider_registration.py -v

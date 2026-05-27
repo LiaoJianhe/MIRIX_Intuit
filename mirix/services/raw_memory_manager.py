@@ -138,7 +138,7 @@ class RawMemoryManager:
         provider = get_relational_provider()
 
         # Conditionally calculate embeddings based on BUILD_EMBEDDINGS_FOR_MEMORY flag
-        # When IPS providers are active, skip compute and persist only config metadata.
+        # When providers are active, skip compute and persist only config metadata.
         if provider:
             raw_memory.context_embedding = None
             raw_memory.embedding_config = agent_state.embedding_config if agent_state is not None else None
@@ -188,7 +188,7 @@ class RawMemoryManager:
         if not raw_memory_dict.get("context"):
             raise ValueError("Required field 'context' is missing or empty")
 
-        # IPS provider delegation (create)
+        # Provider delegation (create)
         if provider:
             result = await provider.create("raw_memory", raw_memory_dict, actor=actor)
             return PydanticRawMemoryItem(**result)
@@ -222,7 +222,7 @@ class RawMemoryManager:
         Raises:
             NoResultFound: If the record doesn't exist, scope doesn't match, or user doesn't match
         """
-        # IPS provider delegation (read by ID)
+        # Provider delegation (read by ID)
         from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
@@ -241,7 +241,7 @@ class RawMemoryManager:
 
             return pydantic_memory
 
-        # Try cache first (cache provider: Redis or IPS Cache)
+        # Try cache first (cache provider: Redis or Cache provider)
         cache_provider = None
         try:
             from mirix.database.cache_provider import get_cache_provider
@@ -353,18 +353,18 @@ class RawMemoryManager:
             tags_merge_mode,
         )
 
-        # IPS provider delegation (update)
+        # Provider delegation (update)
         from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
         if provider:
-            # IPS branch: last-write-wins semantics. Unlike the PG branch (which
+            # Provider branch: last-write-wins semantics. Unlike the PG branch (which
             # uses SELECT FOR UPDATE to serialize concurrent append/merge updates
-            # on the same row), IPS Relational has no row-level lock primitive
+            # on the same row), Relational DB provider has no row-level lock primitive
             # exposed here. Concurrent updates from two callers may race; the
-            # one that lands last in IPS overwrites the other. This is an
+            # one that lands last in the provider overwrites the other. This is an
             # intentional trade-off: most clients update distinct rows, and the
-            # IPS path optimises for throughput over write-serialisation.
+            # provider path optimises for throughput over write-serialisation.
             existing = await provider.read("raw_memory", memory_id, actor=actor)
             if existing is None:
                 raise ValueError(f"Raw memory {memory_id} not found")
@@ -408,7 +408,7 @@ class RawMemoryManager:
                     if preserved_scope:
                         existing["filter_tags"]["scope"] = preserved_scope
 
-            # When IPS providers are active, skip embedding compute and keep only config metadata.
+            # When providers are active, skip embedding compute and keep only config metadata.
             if agent_state is not None:
                 existing["embedding_config"] = agent_state.embedding_config
             existing.pop("context_embedding", None)
@@ -567,7 +567,7 @@ class RawMemoryManager:
         """
         logger.info("Deleting raw memory: id=%s", memory_id)
 
-        # IPS provider delegation (delete)
+        # Provider delegation (delete)
         from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
@@ -704,48 +704,24 @@ class RawMemoryManager:
             except (ValueError, KeyError, json.JSONDecodeError, UnicodeDecodeError) as e:
                 raise ValueError(f"Invalid cursor format: {e}")
 
-        # IPS provider delegation (search / list)
+        # Provider delegation (search / list)
         from mirix.database.search_provider import get_search_provider
 
         search_provider = get_search_provider()
         if search_provider:
-            from mirix.database.call_context import CALL_ORIGIN_CLIENT_API, get_call_origin
-            from mirix.database.relational_provider import get_relational_provider
-
-            call_origin = get_call_origin()
-            if call_origin == CALL_ORIGIN_CLIENT_API:
-                results, next_c = await search_provider.search(
-                    "raw_memory",
-                    organization_id=organization_id,
-                    user_id=user_id,
-                    filter_tags=filter_tags,
-                    scopes=scopes,
-                    limit=limit,
-                    sort=sort,
-                    cursor=cursor,
-                    time_range=time_range,
-                    search_method="string_match",
-                )
-                return [PydanticRawMemoryItem(**r) for r in results], next_c
-            else:
-                from mirix.services.hybrid_search_helper import hybrid_search
-
-                relational_provider = get_relational_provider()
-                results, next_cursor = await hybrid_search(
-                    table="raw_memory",
-                    search_provider=search_provider,
-                    relational_provider=relational_provider,
-                    organization_id=organization_id,
-                    user_id=user_id,
-                    filter_tags=filter_tags,
-                    scopes=scopes,
-                    limit=limit,
-                    sort=sort,
-                    cursor=cursor,
-                    time_range=time_range,
-                    search_method="string_match",
-                )
-                return [PydanticRawMemoryItem(**r) for r in results], next_cursor
+            results, next_c = await search_provider.search(
+                "raw_memory",
+                organization_id=organization_id,
+                user_id=user_id,
+                filter_tags=filter_tags,
+                scopes=scopes,
+                limit=limit,
+                sort=sort,
+                cursor=cursor,
+                time_range=time_range,
+                search_method="string_match",
+            )
+            return [PydanticRawMemoryItem(**r) for r in results], next_c
 
         async with self.session_maker() as session:
             # Base query filtering by organization_id

@@ -25,7 +25,6 @@ from mirix.settings import settings
 _NO_DB_ENGINE_RESET_MODULES = frozenset(
     {
         "test_provider_registration",
-        "test_call_context",
         "test_hybrid_search",
         "test_provider_validation",
         "test_embedding_skip",

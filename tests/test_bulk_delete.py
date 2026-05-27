@@ -1,6 +1,6 @@
 """
 M4.5: delete_by_client_id uses bulk SQL (session_maker) when no relational
-provider delegation applies — flow remains intact after IPS changes.
+provider delegation applies — flow remains intact after provider changes.
 
 Run: pytest tests/test_bulk_delete.py -v
 """

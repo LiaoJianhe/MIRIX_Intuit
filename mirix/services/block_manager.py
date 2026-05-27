@@ -327,7 +327,6 @@ class BlockManager:
 
         search_provider = get_search_provider()
         if search_provider:
-            from mirix.database.call_context import CALL_ORIGIN_CLIENT_API, get_call_origin
             from mirix.database.relational_provider import get_relational_provider
 
             search_kwargs: Dict[str, Any] = {}
@@ -338,43 +337,23 @@ class BlockManager:
             if cursor is not None:
                 search_kwargs["cursor"] = cursor
 
-            call_origin = get_call_origin()
             effective_limit = limit or 50
 
             if user is None:
                 if organization_id is None or any_scopes is None or not any_scopes:
                     return []
-                if call_origin == CALL_ORIGIN_CLIENT_API:
-                    results, _next = await search_provider.search(
-                        "block",
-                        query_text="",
-                        search_method="string_match",
-                        search_field="",
-                        user_id=None,
-                        organization_id=organization_id,
-                        filter_tags=filter_tags,
-                        scopes=any_scopes,
-                        limit=effective_limit,
-                        **search_kwargs,
-                    )
-                else:
-                    from mirix.services.hybrid_search_helper import hybrid_search
-
-                    relational_provider = get_relational_provider()
-                    results, _next_cursor = await hybrid_search(
-                        table="block",
-                        search_provider=search_provider,
-                        relational_provider=relational_provider,
-                        query_text="",
-                        search_method="string_match",
-                        search_field="",
-                        user_id=None,
-                        organization_id=organization_id,
-                        filter_tags=filter_tags,
-                        scopes=any_scopes,
-                        limit=effective_limit,
-                        **search_kwargs,
-                    )
+                results, _next = await search_provider.search(
+                    "block",
+                    query_text="",
+                    search_method="string_match",
+                    search_field="",
+                    user_id=None,
+                    organization_id=organization_id,
+                    filter_tags=filter_tags,
+                    scopes=any_scopes,
+                    limit=effective_limit,
+                    **search_kwargs,
+                )
                 return [PydanticBlock(**r) for r in results]
 
             org_id = user.organization_id
@@ -386,37 +365,18 @@ class BlockManager:
             else:
                 scope_list = None
 
-            if call_origin == CALL_ORIGIN_CLIENT_API:
-                results, _next = await search_provider.search(
-                    "block",
-                    query_text="",
-                    search_method="string_match",
-                    search_field="",
-                    user_id=user.id,
-                    organization_id=org_id,
-                    filter_tags=filter_tags,
-                    scopes=scope_list,
-                    limit=effective_limit,
-                    **search_kwargs,
-                )
-            else:
-                from mirix.services.hybrid_search_helper import hybrid_search
-
-                relational_provider = get_relational_provider()
-                results, _next_cursor = await hybrid_search(
-                    table="block",
-                    search_provider=search_provider,
-                    relational_provider=relational_provider,
-                    query_text="",
-                    search_method="string_match",
-                    search_field="",
-                    user_id=user.id,
-                    organization_id=org_id,
-                    filter_tags=filter_tags,
-                    scopes=scope_list,
-                    limit=effective_limit,
-                    **search_kwargs,
-                )
+            results, _next = await search_provider.search(
+                "block",
+                query_text="",
+                search_method="string_match",
+                search_field="",
+                user_id=user.id,
+                organization_id=org_id,
+                filter_tags=filter_tags,
+                scopes=scope_list,
+                limit=effective_limit,
+                **search_kwargs,
+            )
             pydantic_blocks = [PydanticBlock(**r) for r in results]
             if (
                 not pydantic_blocks
@@ -427,7 +387,7 @@ class BlockManager:
                 scope = any_scopes[0]
                 assert org_id is not None
                 logger.debug(
-                    "No blocks found for user %s, scope %s. Creating from default user template via IPS provider.",
+                    "No blocks found for user %s, scope %s. Creating from default user template via provider.",
                     user.id,
                     scope,
                 )
@@ -517,11 +477,11 @@ class BlockManager:
         search_provider: Any,
         relational_provider: Any,
     ) -> List[PydanticBlock]:
-        """IPS-aware counterpart of :meth:`_copy_blocks_from_default_user`.
+        """Provider-aware counterpart of :meth:`_copy_blocks_from_default_user`.
 
-        Finds template blocks for ``scope`` on the org default user via IPS
-        Search, then creates per-user copies through ``provider.create``.
-        Avoids the cross-backend write where the IPS branch previously fell
+        Finds template blocks for ``scope`` on the org default user via the
+        Search provider, then creates per-user copies through ``provider.create``.
+        Avoids the cross-backend write where the provider branch previously fell
         through to direct SQL.
         """
         from mirix.schemas.block import Block as PydanticBlock
@@ -539,7 +499,7 @@ class BlockManager:
             )
             default_user_id = UserManager.ADMIN_USER_ID
 
-        # Find template blocks for this scope on the default user via IPS Search.
+        # Find template blocks for this scope on the default user via Search provider.
         template_results, _next = await search_provider.search(
             "block",
             query_text="",
@@ -554,7 +514,7 @@ class BlockManager:
 
         if not template_results:
             logger.warning(
-                "No template blocks found for scope %s via IPS Search. "
+                "No template blocks found for scope %s via Search provider. "
                 "Ensure create_meta_agent was called with a blocks config for this scope. "
                 "User %s will have no blocks.",
                 scope,
@@ -564,15 +524,15 @@ class BlockManager:
 
         # De-duplicate templates by ``label`` to mirror the PG ORM contract,
         # where ``seed_template_block_for_actor_scope_if_necessary`` enforces
-        # exactly one template per (user, scope, label).  IPS Search may return
+        # exactly one template per (user, scope, label).  Search provider may return
         # multiple historical rows for the same logical template when a
-        # previous run's cleanup deletes the IPS Relational row but the IPS
-        # Search index still has stale documents (eventual consistency lag).
+        # previous run's cleanup deletes the Relational DB provider row but the
+        # Search provider index still has stale documents (eventual consistency lag).
         # Without this de-dup, every new test user would copy N stale rows
         # for the same label, which (a) creates N redundant blocks per label
-        # and (b) overwhelms the IPS Relational write path with a burst of
+        # and (b) overwhelms the Relational DB provider write path with a burst of
         # CREATE + domain-event UPSERT calls, eventually marking the provider
-        # unhealthy ("IPS Relational is unavailable").  The PG path never
+        # unhealthy ("Relational DB provider is unavailable").  The PG path never
         # exhibits this because deletes are synchronous against a single
         # source of truth.  Keep the first template seen per label (search
         # results are stable / the duplicates are byte-identical templates).
@@ -629,7 +589,7 @@ class BlockManager:
                 continue
 
         logger.info(
-            "Created %d blocks for user %s from IPS template (scope=%s)",
+            "Created %d blocks for user %s from provider template (scope=%s)",
             len(new_blocks),
             target_user.id,
             scope,
@@ -766,7 +726,7 @@ class BlockManager:
 
     @enforce_types
     async def get_block_by_id(self, block_id: str, user: Optional[PydanticUser] = None) -> Optional[PydanticBlock]:
-        """Retrieve a block by its ID (with cache - Redis or IPS Cache)."""
+        """Retrieve a block by its ID (with cache - Redis or Cache provider)."""
         from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
