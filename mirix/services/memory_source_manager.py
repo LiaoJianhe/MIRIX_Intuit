@@ -127,20 +127,47 @@ class MemorySourceManager:
                     raise
                 # Conflict — look up the pre-existing row by the dedup key the caller
                 # provided. Without a dedup key we can't recover, so re-raise.
+                #
+                # VEPAGE-1107: use named queries that explicitly project all
+                # columns + FK columns so PydanticMemorySource construction
+                # works. The generic ``provider.list`` path here was also
+                # failing because ``client_id`` and ``user_id`` filter
+                # property resolution didn't include the right relationship
+                # logical names for memory_sources.
                 logger.debug(
                     "memory_sources conflict for %s — looking up existing row",
                     memory_source_id,
                 )
-                lookup_kwargs = {"client_id": actor.id, "user_id": user_id}
                 if external_id is not None:
-                    lookup_kwargs["external_id"] = external_id
+                    records = await provider.find_using_named_query(
+                        "memory_sources",
+                        "memory_source_manager.find_by_external_id",
+                        params={
+                            # NQ binds :clientId against the client_id FK column
+                            # (matches uq_memory_sources_ext_id). The actor IS the
+                            # client when MIRIX runs under ECMS, so actor.id is the
+                            # client id; we use the parameter name "clientId" so the
+                            # provider's APP=-prefixing of :createdById doesn't fire.
+                            "clientId": actor.id,
+                            "userId": user_id,
+                            "externalId": external_id,
+                        },
+                        page_size=1,
+                    )
                 elif batch_hash is not None:
-                    lookup_kwargs["batch_hash"] = batch_hash
+                    records = await provider.find_using_named_query(
+                        "memory_sources",
+                        "memory_source_manager.find_by_batch_hash",
+                        params={
+                            # See note in find_by_external_id above re: clientId vs createdById.
+                            "clientId": actor.id,
+                            "userId": user_id,
+                            "batchHash": batch_hash,
+                        },
+                        page_size=1,
+                    )
                 else:
                     raise
-                records = await provider.list(
-                    "memory_sources", filter_tags=None, limit=1, **lookup_kwargs
-                )
                 if records:
                     return PydanticMemorySource(**records[0])
                 raise
@@ -275,14 +302,20 @@ class MemorySourceManager:
 
         provider = get_relational_provider()
         if provider:
-            list_kwargs = {"external_thread_id": external_thread_id}
-            if user_id:
-                list_kwargs["user_id"] = user_id
-            records = await provider.list(
+            # VEPAGE-1107: NQ encodes the optional user_id filter and the
+            # scopes CSV inline so the response carries all the columns
+            # PydanticMemorySource needs without depending on the generic
+            # filter-query path's relationship resolution.
+            scopes_csv = ",".join(scopes) if scopes else None
+            records = await provider.find_using_named_query(
                 "memory_sources",
-                filter_tags={"scope": scopes} if scopes else None,
-                limit=1500,
-                **list_kwargs,
+                "memory_source_manager.list_sources_by_thread_id",
+                params={
+                    "externalThreadId": external_thread_id,
+                    "userId": user_id,
+                    "scopesCsv": scopes_csv,
+                },
+                page_size=1500,
             )
             # Sort ascending by (occurred_at, created_at)
             records.sort(
