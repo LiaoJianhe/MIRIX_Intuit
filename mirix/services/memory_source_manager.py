@@ -143,7 +143,12 @@ class MemorySourceManager:
                         "memory_sources",
                         "memory_source_manager.find_by_external_id",
                         params={
-                            "createdById": actor.id,
+                            # NQ binds :clientId against the client_id FK column
+                            # (matches uq_memory_sources_ext_id). The actor IS the
+                            # client when MIRIX runs under ECMS, so actor.id is the
+                            # client id; we use the parameter name "clientId" so the
+                            # provider's APP=-prefixing of :createdById doesn't fire.
+                            "clientId": actor.id,
                             "userId": user_id,
                             "externalId": external_id,
                         },
@@ -154,7 +159,8 @@ class MemorySourceManager:
                         "memory_sources",
                         "memory_source_manager.find_by_batch_hash",
                         params={
-                            "createdById": actor.id,
+                            # See note in find_by_external_id above re: clientId vs createdById.
+                            "clientId": actor.id,
                             "userId": user_id,
                             "batchHash": batch_hash,
                         },
