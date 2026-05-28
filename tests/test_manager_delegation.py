@@ -1241,3 +1241,300 @@ class TestFindMostRecentlyUpdatedNamedQuery:
 
         mock_provider.list.assert_awaited()
         mock_provider.find_using_named_query.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Batch tool lookup helpers (list_tools_by_names / list_tools_by_ids) and the
+# ensure_base_tools_exist init-path fast path. Validates that the request path
+# avoids the historical N+1 IPSR get_tool_by_name loop.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+class TestToolManagerBatchLookups:
+    async def test_list_tools_by_names_single_batch_call(self):
+        row_a = {**_tool_row_dict("tool-aaaaaaaa"), "name": "name_a"}
+        row_b = {**_tool_row_dict("tool-bbbbbbbb"), "name": "name_b"}
+        mock_provider = MagicMock()
+        mock_provider.find_using_named_query = AsyncMock(return_value=[row_a, row_b])
+        actor = _mock_actor()
+
+        with patch(
+            "mirix.database.relational_provider.get_relational_provider",
+            return_value=mock_provider,
+        ):
+            mgr = _tool_mgr()
+            out = await mgr.list_tools_by_names(["name_a", "name_b"], actor)
+
+        mock_provider.find_using_named_query.assert_awaited_once()
+        args, kwargs = mock_provider.find_using_named_query.await_args
+        assert args[0] == "tools"
+        assert args[1] == "tool_manager.list_tools_by_names"
+        # NQ uses ``string_to_array(CAST(:names AS varchar), ',')``, so the
+        # bind value is a comma-separated string, not a list.
+        names_param = kwargs["params"]["names"]
+        assert isinstance(names_param, str)
+        assert set(names_param.split(",")) == {"name_a", "name_b"}
+        assert kwargs["params"]["organizationId"] == actor.organization_id
+        assert {t.name for t in out} == {"name_a", "name_b"}
+
+    async def test_list_tools_by_names_dedupes_and_drops_empties(self):
+        mock_provider = MagicMock()
+        mock_provider.find_using_named_query = AsyncMock(return_value=[])
+        actor = _mock_actor()
+
+        with patch(
+            "mirix.database.relational_provider.get_relational_provider",
+            return_value=mock_provider,
+        ):
+            mgr = _tool_mgr()
+            await mgr.list_tools_by_names(["a", "a", "", "b"], actor)
+
+        sent = mock_provider.find_using_named_query.await_args[1]["params"]["names"]
+        assert isinstance(sent, str)
+        parts = sent.split(",")
+        assert set(parts) == {"a", "b"}
+        assert len(parts) == 2
+
+    async def test_list_tools_by_names_empty_short_circuits(self):
+        mock_provider = MagicMock()
+        mock_provider.find_using_named_query = AsyncMock(return_value=[])
+
+        with patch(
+            "mirix.database.relational_provider.get_relational_provider",
+            return_value=mock_provider,
+        ):
+            mgr = _tool_mgr()
+            out = await mgr.list_tools_by_names([], _mock_actor())
+
+        assert out == []
+        mock_provider.find_using_named_query.assert_not_called()
+
+    async def test_list_tools_by_names_chunks_above_200(self):
+        from mirix.services.tool_manager import _BATCH_CHUNK_SIZE
+
+        assert _BATCH_CHUNK_SIZE == 200
+        names = [f"name_{i}" for i in range(250)]
+
+        async def _fake_nq(_table, _nq_name, **kwargs):
+            # NQ receives a comma-separated string; split to recover the chunk.
+            chunk_names = kwargs["params"]["names"].split(",")
+            return [
+                {**_tool_row_dict(f"tool-{i:08x}"), "name": n}
+                for i, n in enumerate(chunk_names)
+            ]
+
+        mock_provider = MagicMock()
+        mock_provider.find_using_named_query = AsyncMock(side_effect=_fake_nq)
+
+        with patch(
+            "mirix.database.relational_provider.get_relational_provider",
+            return_value=mock_provider,
+        ):
+            mgr = _tool_mgr()
+            out = await mgr.list_tools_by_names(names, _mock_actor())
+
+        # 250 unique names => 2 chunks (200 + 50)
+        assert mock_provider.find_using_named_query.await_count == 2
+        chunk_sizes = sorted(
+            len(call.kwargs["params"]["names"].split(","))
+            for call in mock_provider.find_using_named_query.await_args_list
+        )
+        assert chunk_sizes == [50, 200]
+        assert len(out) == 250
+
+    async def test_list_tools_by_ids_single_batch_call(self):
+        row = _tool_row_dict("tool-abcdef01")
+        mock_provider = MagicMock()
+        mock_provider.find_using_named_query = AsyncMock(return_value=[row])
+        actor = _mock_actor()
+
+        with patch(
+            "mirix.database.relational_provider.get_relational_provider",
+            return_value=mock_provider,
+        ):
+            mgr = _tool_mgr()
+            out = await mgr.list_tools_by_ids(["tool-abcdef01", "tool-abcdef01"], actor)
+
+        mock_provider.find_using_named_query.assert_awaited_once()
+        args, kwargs = mock_provider.find_using_named_query.await_args
+        assert args[1] == "tool_manager.list_tools_by_ids"
+        # Comma-separated string (one id after dedup).
+        assert kwargs["params"]["ids"] == "tool-abcdef01"
+        assert kwargs["params"]["organizationId"] == actor.organization_id
+        assert len(out) == 1
+
+
+@pytest.mark.asyncio
+class TestEnsureBaseToolsExist:
+    async def test_first_call_does_one_batch_read_then_creates_missing(self):
+        from mirix.constants import ALL_TOOLS
+
+        # Pretend half of the expected base tools are already present.
+        existing_names = list(ALL_TOOLS)[: len(ALL_TOOLS) // 2]
+        existing_rows = [
+            {**_tool_row_dict(f"tool-{i:08x}"), "name": n}
+            for i, n in enumerate(existing_names)
+        ]
+
+        mock_provider = MagicMock()
+        mock_provider.find_using_named_query = AsyncMock(return_value=existing_rows)
+
+        # create_tool would normally hit the provider too; stub it.
+        created_calls = []
+
+        async def _fake_create_tool(self, pydantic_tool, actor):
+            created_calls.append(pydantic_tool.name)
+            return pydantic_tool
+
+        with patch(
+            "mirix.database.relational_provider.get_relational_provider",
+            return_value=mock_provider,
+        ):
+            with patch.object(ToolManager, "create_tool", _fake_create_tool):
+                mgr = _tool_mgr()
+                mgr._base_tools_verified_org_ids = set()
+                actor = _mock_actor()
+                out = await mgr.ensure_base_tools_exist(actor=actor)
+
+        # Exactly one batched read against the IPSR provider.
+        assert mock_provider.find_using_named_query.await_count == 1
+        nq_args = mock_provider.find_using_named_query.await_args
+        assert nq_args[0][1] == "tool_manager.list_tools_by_names"
+
+        # Only the missing tools were created (no updates for existing rows).
+        expected_missing = [n for n in ALL_TOOLS if n not in existing_names]
+        assert set(created_calls) == set(expected_missing)
+        assert len(out) == len(expected_missing)
+
+    async def test_second_call_same_org_is_zero_roundtrip(self):
+        from mirix.constants import ALL_TOOLS
+
+        all_rows = [
+            {**_tool_row_dict(f"tool-{i:08x}"), "name": n}
+            for i, n in enumerate(ALL_TOOLS)
+        ]
+        mock_provider = MagicMock()
+        mock_provider.find_using_named_query = AsyncMock(return_value=all_rows)
+
+        async def _no_create(self, *_a, **_kw):  # pragma: no cover
+            raise AssertionError("create_tool must not be called when nothing is missing")
+
+        with patch(
+            "mirix.database.relational_provider.get_relational_provider",
+            return_value=mock_provider,
+        ):
+            with patch.object(ToolManager, "create_tool", _no_create):
+                mgr = _tool_mgr()
+                mgr._base_tools_verified_org_ids = set()
+                actor = _mock_actor()
+                await mgr.ensure_base_tools_exist(actor=actor)
+                first_call_count = mock_provider.find_using_named_query.await_count
+
+                # Second invocation for the same org_id must be a no-op.
+                out = await mgr.ensure_base_tools_exist(actor=actor)
+
+        assert out == []
+        assert mock_provider.find_using_named_query.await_count == first_call_count
+
+    async def test_upsert_base_tools_memoized_per_org(self):
+        from mirix.constants import ALL_TOOLS
+
+        existing_rows = [
+            {**_tool_row_dict(f"tool-{i:08x}"), "name": n}
+            for i, n in enumerate(ALL_TOOLS)
+        ]
+        mock_provider = MagicMock()
+        mock_provider.find_using_named_query = AsyncMock(return_value=existing_rows)
+        mock_provider.update = AsyncMock(side_effect=lambda *_a, **_kw: existing_rows[0])
+
+        with patch(
+            "mirix.database.relational_provider.get_relational_provider",
+            return_value=mock_provider,
+        ):
+            mgr = _tool_mgr()
+            mgr._base_tools_verified_org_ids = set()
+            actor = _mock_actor()
+            # First call performs full per-tool create_or_update_tool walk.
+            await mgr.upsert_base_tools(actor=actor)
+            calls_after_first = mock_provider.find_using_named_query.await_count
+            # Second call hits the memoization guard.
+            out_second = await mgr.upsert_base_tools(actor=actor)
+
+        assert out_second == []
+        assert mock_provider.find_using_named_query.await_count == calls_after_first
+
+
+@pytest.mark.asyncio
+class TestAgentManagerBatchedToolResolution:
+    """Asserts agent_manager paths use the batched ToolManager helpers and
+    issue zero per-name get_tool_by_name calls (the original N+1 shape)."""
+
+    async def test_create_agent_uses_list_tools_by_names(self):
+        from mirix.schemas.agent import CreateAgent
+
+        mgr = _agent_mgr()
+        # Inject a mocked tool_manager that records calls.
+        mgr.tool_manager = MagicMock()
+        tool_a = PydanticTool.model_construct(id="tool-aaaaaaaa", name="send_message")
+        mgr.tool_manager.list_tools_by_names = AsyncMock(return_value=[tool_a])
+        mgr.tool_manager.get_tool_by_name = AsyncMock()
+
+        # Short-circuit the underlying _create_agent (DB-touching).
+        mgr._create_agent = AsyncMock(return_value=_minimal_agent_state())
+
+        actor = _mock_actor()
+        await mgr.create_agent(
+            agent_create=CreateAgent(
+                name="x",
+                agent_type=AgentType.chat_agent,
+                llm_config=LLMConfig(
+                    model="m", model_endpoint_type="openai", context_window=8000
+                ),
+                embedding_config=EmbeddingConfig.default_config(
+                    "text-embedding-3-small"
+                ),
+                include_base_tools=False,
+                tools=["send_message"],
+            ),
+            actor=actor,
+        )
+
+        mgr.tool_manager.list_tools_by_names.assert_awaited_once()
+        mgr.tool_manager.get_tool_by_name.assert_not_awaited()
+
+    async def test_update_agent_tools_uses_one_batched_lookup(self):
+        from mirix.schemas.agent import AgentState
+        from mirix.schemas.tool import Tool
+
+        mgr = _agent_mgr()
+        mgr.tool_manager = MagicMock()
+        mgr.tool_manager.list_tools_by_names = AsyncMock(
+            return_value=[Tool.model_construct(id="tool-11111111", name="new_tool")]
+        )
+        mgr.tool_manager.get_tool_by_name = AsyncMock()
+        mgr.get_agent_by_id = AsyncMock(
+            return_value=AgentState.model_construct(
+                id="agent-1",
+                name="a",
+                system="sys",
+                agent_type=AgentType.chat_agent,
+                llm_config=LLMConfig(
+                    model="m", model_endpoint_type="openai", context_window=8000
+                ),
+                embedding_config=EmbeddingConfig.default_config(
+                    "text-embedding-3-small"
+                ),
+                organization_id="org-1",
+                tools=[Tool.model_construct(id="tool-22222222", name="old_tool")],
+            )
+        )
+        mgr.update_agent = AsyncMock()
+        mgr.update_system_prompt = AsyncMock()
+
+        await mgr.update_agent_tools_and_system_prompts(
+            agent_id="agent-1", actor=_mock_actor()
+        )
+
+        # Exactly one batched lookup covering union(new, removed); the
+        # per-name N+1 path must not be used.
+        assert mgr.tool_manager.list_tools_by_names.await_count == 1
+        mgr.tool_manager.get_tool_by_name.assert_not_awaited()
