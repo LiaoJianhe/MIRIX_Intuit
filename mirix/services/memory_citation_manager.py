@@ -14,39 +14,6 @@ from mirix.utils import enforce_types
 logger = get_logger(__name__)
 
 
-def _pydantic_citation_from_row(row: Dict) -> PydanticMemoryCitation:
-    """Defensive constructor for PydanticMemoryCitation from a provider row.
-
-    Provider rows can arrive in two shapes depending on whether the call
-    went through a named query (which projects ``memorysource_id`` as a flat
-    column and gets flattened by ``from_entity`` to ``memory_source_id``)
-    or the legacy generic filter-query path (which does NOT populate the
-    ``memorySource`` MANY_TO_ONE relationship and therefore leaves
-    ``memory_source_id`` absent from the row).
-
-    VEPAGE-1107 routes the hot read paths through named queries to make
-    this Just Work. This helper provides a defensive fallback: if a row
-    is missing ``memory_source_id`` (e.g., because the NQ hasn't deployed
-    yet, or because some other code path is still using the generic
-    provider.list), we log a warning and synthesize an empty string
-    rather than crashing the whole search response.
-    """
-    if "memory_source_id" not in row or row.get("memory_source_id") is None:
-        logger.warning(
-            "MemoryCitation row missing memory_source_id (id=%s, "
-            "memory_type=%s, memory_id=%s). This indicates a code path "
-            "still using the generic provider.list against memory_citations "
-            "instead of the named-query path. Synthesizing empty string so "
-            "the search response doesn't crash.",
-            row.get("id"),
-            row.get("memory_type"),
-            row.get("memory_id"),
-        )
-        row = dict(row)
-        row["memory_source_id"] = ""
-    return PydanticMemoryCitation(**row)
-
-
 class MemoryCitationManager:
     """Manager for memory citation persistence with INSERT ON CONFLICT DO NOTHING semantics."""
 
@@ -384,7 +351,7 @@ class MemoryCitationManager:
                 key=lambda r: r.get("occurred_at") or "",
                 reverse=True,
             )
-            return [_pydantic_citation_from_row(r) for r in records]
+            return [PydanticMemoryCitation(**r) for r in records]
 
         async with self.session_maker() as session:
             stmt = (
@@ -457,7 +424,7 @@ class MemoryCitationManager:
                     page_size=1000,
                 )
                 grouped[(memory_type, memory_id)].extend(
-                    _pydantic_citation_from_row(r) for r in records
+                    PydanticMemoryCitation(**r) for r in records
                 )
             return dict(grouped)
 
