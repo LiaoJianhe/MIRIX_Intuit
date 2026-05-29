@@ -199,21 +199,50 @@ class TestMemorySourceManagerDelegation:
 
     @pytest.mark.asyncio
     async def test_list_sources_delegates_to_provider(self):
+        # VEPAGE-1144: rewritten to use list_sources_admin NQ. The NQ
+        # orders server-side (occurredAt DESC NULLS LAST), so the
+        # provider returns rows already in DESC order; the manager no
+        # longer sorts client-side.
         rows = [
-            _memory_source_row(id="src-aaaaaaa1", occurred_at="2026-05-01T00:00:00+00:00"),
             _memory_source_row(id="src-aaaaaaa2", occurred_at="2026-05-02T00:00:00+00:00"),
+            _memory_source_row(id="src-aaaaaaa1", occurred_at="2026-05-01T00:00:00+00:00"),
         ]
         mock_provider = MagicMock()
-        mock_provider.list = AsyncMock(return_value=rows)
+        mock_provider.find_using_named_query = AsyncMock(return_value=rows)
 
         with patch(
             "mirix.database.relational_provider.get_relational_provider",
             return_value=mock_provider,
         ):
             mgr = _memory_source_mgr()
-            page = await mgr.list_sources(user_id="user-1", limit=10)
-            # Descending order: src-2 first
+            page = await mgr.list_sources(
+                organization_id="org-1", user_id="user-1", limit=10
+            )
+            mock_provider.find_using_named_query.assert_awaited_once()
+            args, kwargs = mock_provider.find_using_named_query.call_args
+            assert args[0] == "memory_sources"
+            assert args[1] == "memory_source_manager.list_sources_admin"
+            assert kwargs["params"]["organizationId"] == "org-1"
+            assert kwargs["params"]["userId"] == "user-1"
+            # Order preserved as returned by the NQ.
             assert [item.id for item in page.items] == ["src-aaaaaaa2", "src-aaaaaaa1"]
+
+    @pytest.mark.asyncio
+    async def test_list_sources_requires_organization_id_on_ipsr_path(self):
+        """VEPAGE-1144: the NQ uses organizationId as its access predicate;
+        calling without one when an IPSR provider is registered should fail
+        loudly rather than silently issue an unscoped query."""
+        mock_provider = MagicMock()
+        mock_provider.find_using_named_query = AsyncMock()
+
+        with patch(
+            "mirix.database.relational_provider.get_relational_provider",
+            return_value=mock_provider,
+        ):
+            mgr = _memory_source_mgr()
+            with pytest.raises(ValueError, match="organization_id"):
+                await mgr.list_sources(user_id="user-1", limit=10)
+            mock_provider.find_using_named_query.assert_not_awaited()
 
 
 # ---------- SourceMessageManager ----------

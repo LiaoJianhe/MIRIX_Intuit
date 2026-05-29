@@ -393,6 +393,7 @@ class MemorySourceManager:
 
     async def list_sources(
         self,
+        organization_id: Optional[str] = None,
         user_id: Optional[str] = None,
         client_id: Optional[str] = None,
         scope: Optional[str] = None,
@@ -404,40 +405,49 @@ class MemorySourceManager:
         """List memory sources ordered by occurred_at descending.
 
         No scope-based access control — intended for admin use.
-        Supports filtering by user_id, client_id, scope, and time range.
+        Supports filtering by organization_id (required for the IPSR path),
+        user_id, client_id, scope, and time range.
+
+        organization_id is optional only for the legacy ORM fallback path
+        (which has no IPSR-style org isolation requirement). The IPSR path
+        requires it because the underlying named query uses it as the
+        org-scoped access predicate.
         """
-        # Relational provider delegation — fetch then sort/paginate client-side
+        # Relational provider delegation
         from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
         if provider:
-            list_kwargs: Dict[str, Any] = {}
-            if user_id:
-                list_kwargs["user_id"] = user_id
-            if client_id:
-                list_kwargs["client_id"] = client_id
-            time_range: Dict[str, Any] = {}
-            if since:
-                time_range["occurred_at__gte"] = since.isoformat()
-            if until:
-                time_range["occurred_at__lte"] = until.isoformat()
-            if time_range:
-                list_kwargs["time_range"] = time_range
-            records = await provider.list(
+            # VEPAGE-1144: route through list_sources_admin NQ. The NQ
+            # filters and orders server-side (occurredAt DESC NULLS LAST,
+            # ipsrcreatedon DESC); cursor pagination is still applied
+            # client-side by walking the returned page (matches the
+            # get_sources_by_thread_id pattern). The 1500-row IPSR cap
+            # applies to a single page fetch — datasets larger than that
+            # need to switch to pageNum-based iteration, which is a
+            # follow-up.
+            if not organization_id:
+                raise ValueError(
+                    "list_sources requires organization_id when an IPSR "
+                    "provider is registered (the NQ uses it as the "
+                    "org-scoped access predicate)"
+                )
+            records = await provider.find_using_named_query(
                 "memory_sources",
-                filter_tags={"scope": [scope]} if scope else None,
-                # IPSR caps page_size at 1500 server-side; honor that.
-                limit=1500,
-                **list_kwargs,
+                "memory_source_manager.list_sources_admin",
+                params={
+                    "organizationId": organization_id,
+                    "userId": user_id,
+                    "clientId": client_id,
+                    "scope": scope,
+                    "since": since.isoformat() if since else None,
+                    "until": until.isoformat() if until else None,
+                },
+                page_size=1500,
             )
-            # Descending order: nulls last on occurred_at, then created_at desc
-            records.sort(
-                key=lambda r: (
-                    r.get("occurred_at") or "",
-                    r.get("created_at") or "",
-                ),
-                reverse=True,
-            )
+            # Apply cursor: skip until we pass the cursor row's id.
+            # Server-side ordering is already correct, so no client-side
+            # sort is needed here.
             if cursor:
                 idx = next(
                     (i for i, r in enumerate(records) if r.get("id") == cursor), None
@@ -463,6 +473,10 @@ class MemorySourceManager:
                 )
             )
 
+            if organization_id:
+                query = query.where(
+                    MemorySourceModel.organization_id == organization_id
+                )
             if user_id:
                 query = query.where(MemorySourceModel.user_id == user_id)
             if client_id:
