@@ -2468,13 +2468,14 @@ These keywords have been used to retrieve relevant memories from the database.
         Returns:
             Optional[str]: Extracted topics or None if extraction fails
 
-        VEPAGE-1149: The returned string is consumed downstream as a
-        ``;``-joined list of search topics. The IPS Search backend
-        enforces a 200-character limit per text-field value, so each
-        individual topic must stay strictly under that limit. The
-        prompt + tool description below ask the LLM to constrain its
-        output, and ``_enforce_topic_length`` truncates anything that
-        slips through with a logged warning so we can tune the prompt.
+        The returned string is consumed downstream as a ``;``-joined
+        list of search topics — each segment becomes its own clause in
+        the OpenSearch query. The IPS Search backend caps text-field
+        values at 200 characters, so individual topics must stay under
+        that limit; the prompt and ``update_topic`` tool description
+        below set that expectation with the LLM, and
+        ``_enforce_topic_length`` truncates anything that slips
+        through with a logged warning so the prompt can be tuned.
         """
         try:
             # Add instruction message for topic extraction
@@ -2573,12 +2574,13 @@ These keywords have been used to retrieve relevant memories from the database.
                     try:
                         function_args = json.loads(choice.message.tool_calls[0].function.arguments)
                         topics = function_args.get("topic")
-                        # VEPAGE-1149: post-tool-call length validator.
-                        # Truncates any individual ;-delimited topic that
-                        # exceeds the IPS Search 200-char field limit so
-                        # downstream search doesn't 400 and abort the
-                        # entire memory-extraction pipeline. Warns so we
-                        # can tune the upstream prompt over time.
+                        # Guard against the LLM ignoring the per-topic
+                        # length constraint in the prompt — truncate
+                        # any individual ;-delimited segment that
+                        # would exceed the downstream IPS Search
+                        # field limit. Failing closed here would abort
+                        # the entire memory-extraction pipeline, so we
+                        # truncate and warn instead.
                         topics = self._enforce_topic_length(topics)
                         printv(f"[Mirix.Agent.{self.agent_state.name}] INFO: Extracted topics: {topics}")
                         return topics
@@ -2593,21 +2595,25 @@ These keywords have been used to retrieve relevant memories from the database.
 
         return None
 
-    # VEPAGE-1149. IPS Search enforces a 200-character cap on text fields.
-    # Topics are forwarded to the search backend as the ``query=`` value;
-    # see the four call sites in ``build_system_prompt_with_memories``.
+    # Maximum length, in characters, of a single ``;``-delimited topic
+    # forwarded to memory search. Set to the IPS Search backend's
+    # 200-character text-field cap (values over this yield a 400 from
+    # IPS Search that would otherwise abort the whole inner_step).
+    # Topics flow into ``query=`` on the four memory-list calls in
+    # ``build_system_prompt_with_memories``.
     _TOPIC_MAX_LEN = 200
 
     def _enforce_topic_length(self, topics: Optional[str]) -> Optional[str]:
-        """Truncate individual ``;``-delimited topics that exceed the
-        IPS Search field-length limit. Returns the (possibly modified)
-        joined string. None / empty inputs pass through unchanged.
+        """Truncate individual ``;``-delimited topics that exceed
+        ``_TOPIC_MAX_LEN``. Returns the (possibly modified) joined
+        string. None / empty inputs pass through unchanged.
 
-        Truncation rather than rejection is the right call here: the
-        whole memory-extraction pipeline depends on the topic string,
-        so failing closed would just reproduce the bug we're fixing. We
-        log a warning per truncation so the upstream prompt can be
-        tuned over time.
+        The downstream search backend rejects text-field values over
+        the limit. We truncate rather than reject the whole string:
+        the memory-extraction pipeline depends on this value being
+        present, and failing closed reproduces the exact crash this
+        guard is here to prevent. A warning is logged per truncation
+        so the upstream extraction prompt can be tuned over time.
         """
         if not topics:
             return topics
@@ -2619,9 +2625,10 @@ These keywords have been used to retrieve relevant memories from the database.
             if len(p) > self._TOPIC_MAX_LEN:
                 printv(
                     f"[Mirix.Agent.{self.agent_state.name}] WARNING: "
-                    f"VEPAGE-1149 — truncating oversized topic "
+                    f"truncating oversized topic "
                     f"({len(p)} chars > {self._TOPIC_MAX_LEN}); "
-                    f"prompt should constrain this: {p[:80]!r}..."
+                    f"the topic-extraction prompt should keep this "
+                    f"under the limit: {p[:80]!r}..."
                 )
                 p = p[: self._TOPIC_MAX_LEN]
             out.append(p)

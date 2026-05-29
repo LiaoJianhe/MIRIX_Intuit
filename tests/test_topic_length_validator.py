@@ -1,12 +1,12 @@
-"""Unit tests for VEPAGE-1149 topic length validator.
+"""Unit tests for ``Agent._enforce_topic_length``.
 
 The meta agent extracts conversation topics via LLM and forwards them
-to downstream search as a ``;``-joined string. IPS Search enforces a
-200-character cap on text-field values; oversized topics aborted the
-entire memory-extraction pipeline. ``Agent._enforce_topic_length``
-truncates any individual ``;``-delimited segment that exceeds the cap
-so the search still runs (degraded but not crashed). These tests pin
-that behavior.
+to memory search as a ``;``-joined string. The downstream search
+backend (IPS Search) caps text-field values at 200 characters, so
+each ``;``-delimited segment must stay under that limit;
+``_enforce_topic_length`` truncates any oversized segment so the
+search still runs (degraded but not crashed). These tests pin its
+behavior end-to-end and on a few edge cases.
 """
 
 from unittest.mock import MagicMock
@@ -58,11 +58,12 @@ class TestEnforceTopicLength:
         assert len(parts[1]) == 200
         assert parts[2] == "beta"
 
-    def test_215_char_4_topic_string_from_ticket_repro(self):
-        """The literal failing input from the VEPAGE-1149 LangFuse trace.
-        Each individual topic is already under 200; the joined string is
-        215. Validator should leave each topic untouched and rejoin
-        cleanly."""
+    def test_four_topic_string_under_per_topic_limit_passes_through(self):
+        """A realistic four-topic ``key_words`` string where each
+        individual topic is under 200 chars but the joined whole is
+        over (215). Per-topic enforcement leaves the segments untouched
+        and rejoins them — only the total length grows; the validator
+        only cares about per-segment length."""
         topics = (
             "QuickBooks Online payroll tax workflow for restaurant clients; "
             "Reviewing payroll register for accurate tax filing; "
