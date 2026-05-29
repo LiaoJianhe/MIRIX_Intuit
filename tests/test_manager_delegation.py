@@ -265,7 +265,10 @@ class TestEpisodicMemoryManagerDelegation:
         with patch("mirix.database.relational_provider.get_relational_provider", return_value=mock_provider):
             mgr = _episodic_mgr()
             out = await mgr.get_episodic_memory_by_id("ep-123", _mock_user())
-            mock_provider.read.assert_awaited_once_with("episodic_memory", "ep-123")
+            mock_provider.read.assert_awaited_once()
+            args, _ = mock_provider.read.call_args
+            assert args[0] == "episodic_memory"
+            assert args[1] == "ep-123"
             assert out.id == "ep-123"
             assert out.summary == "sum"
 
@@ -322,7 +325,10 @@ class TestEpisodicMemoryManagerDelegation:
         with patch("mirix.database.relational_provider.get_relational_provider", return_value=mock_provider):
             mgr = _episodic_mgr()
             await mgr.delete_event_by_id("ep-123", _mock_actor())
-            mock_provider.delete.assert_awaited_once_with("episodic_memory", "ep-123")
+            mock_provider.delete.assert_awaited_once()
+            args, _ = mock_provider.delete.call_args
+            assert args[0] == "episodic_memory"
+            assert args[1] == "ep-123"
 
     @pytest.mark.asyncio
     async def test_insert_event_delegates_to_provider(self):
@@ -399,7 +405,10 @@ class TestSemanticMemoryManagerDelegation:
         with patch("mirix.database.relational_provider.get_relational_provider", return_value=mock_provider):
             mgr = _semantic_mgr()
             out = await mgr.get_semantic_item_by_id("sem-123", _mock_user(), timezone_str="UTC")
-            mock_provider.read.assert_awaited_once_with("semantic_memory", "sem-123")
+            mock_provider.read.assert_awaited_once()
+            args, _ = mock_provider.read.call_args
+            assert args[0] == "semantic_memory"
+            assert args[1] == "sem-123"
             assert out.id == "sem-123"
 
     @pytest.mark.asyncio
@@ -457,7 +466,11 @@ class TestSemanticMemoryManagerDelegation:
         with patch("mirix.database.relational_provider.get_relational_provider", return_value=mock_provider):
             mgr = _semantic_mgr()
             out = await mgr.update_item(upd, _mock_user(), _mock_actor())
-            mock_provider.update.assert_awaited_once_with("semantic_memory", "sem-123", {"summary": "updated"})
+            mock_provider.update.assert_awaited_once()
+            args, _ = mock_provider.update.call_args
+            assert args[0] == "semantic_memory"
+            assert args[1] == "sem-123"
+            assert args[2] == {"summary": "updated"}
             assert out.summary == "updated"
 
     @pytest.mark.asyncio
@@ -468,7 +481,10 @@ class TestSemanticMemoryManagerDelegation:
         with patch("mirix.database.relational_provider.get_relational_provider", return_value=mock_provider):
             mgr = _semantic_mgr()
             await mgr.delete_semantic_item_by_id("sem-123", _mock_actor())
-            mock_provider.delete.assert_awaited_once_with("semantic_memory", "sem-123")
+            mock_provider.delete.assert_awaited_once()
+            args, _ = mock_provider.delete.call_args
+            assert args[0] == "semantic_memory"
+            assert args[1] == "sem-123"
 
     @pytest.mark.asyncio
     async def test_list_semantic_items_delegates_to_search_provider(self):
@@ -585,7 +601,10 @@ class TestBlockManagerDelegation:
             with patch.object(BlockManager, "_invalidate_block_cache", new_callable=AsyncMock):
                 mgr = _block_mgr()
                 out = await mgr.delete_block("block-c0ffee00", _mock_actor())
-                mock_provider.delete.assert_awaited_once_with("block", "block-c0ffee00")
+                mock_provider.delete.assert_awaited_once()
+                args, _ = mock_provider.delete.call_args
+                assert args[0] == "block"
+                assert args[1] == "block-c0ffee00"
                 assert out.id == "block-c0ffee00"
 
     @pytest.mark.asyncio
@@ -657,7 +676,8 @@ class TestOrganizationManagerDelegation:
             args, kwargs = mock_provider.find_using_named_query.call_args
             assert args[0] == "organizations"
             assert args[1] == "organization_manager.list_organizations"
-            assert kwargs["params"]["limit"] == 25
+            assert kwargs["params"]["cursor"] is None
+            assert kwargs["page_size"] == 25
             assert len(out) == 1
             assert out[0].id == "org-1"
 
@@ -703,12 +723,16 @@ class TestUserManagerDelegation:
     async def test_list_users_delegates(self):
         row = _user_row_dict()
         mock_provider = MagicMock()
-        mock_provider.list = AsyncMock(return_value=[row])
+        mock_provider.find_using_named_query = AsyncMock(return_value=[row])
 
         with patch("mirix.database.relational_provider.get_relational_provider", return_value=mock_provider):
             mgr = _user_mgr()
             out = await mgr.list_users(organization_id="org-1", limit=10)
-            mock_provider.list.assert_awaited_once_with("users", organization_id="org-1", limit=10)
+            mock_provider.find_using_named_query.assert_awaited_once()
+            args, kwargs = mock_provider.find_using_named_query.call_args
+            assert args[0] == "users"
+            assert args[1] == "user_manager.list_users"
+            assert kwargs["page_size"] == 10
             assert len(out) == 1
             assert out[0].id == "user-1"
 
@@ -768,7 +792,8 @@ class TestToolManagerDelegation:
             args, kwargs = mock_provider.find_using_named_query.call_args
             assert args[0] == "tools"
             assert args[1] == "tool_manager.list_tools"
-            assert kwargs["params"] == {"organizationId": actor.organization_id, "limit": 30}
+            assert kwargs["params"] == {"organizationId": actor.organization_id, "cursor": None}
+            assert kwargs["page_size"] == 30
             assert len(out) == 1
             assert out[0].id == "tool-c0ffee00"
 

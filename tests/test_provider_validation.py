@@ -44,7 +44,7 @@ class TestValidateProviderPairing:
 
     def test_raises_when_only_relational_registered(self):
         register_relational_provider("r", object())
-        with pytest.raises(RuntimeError, match="Relational provider is registered"):
+        with pytest.raises(RuntimeError, match="Relational DB provider is registered"):
             validate_provider_pairing_or_raise()
 
     def test_raises_when_only_search_registered(self):

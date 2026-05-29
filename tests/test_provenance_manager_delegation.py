@@ -99,7 +99,9 @@ class TestMemorySourceManagerDelegation:
         existing = _memory_source_row()
         mock_provider = MagicMock()
         mock_provider.create = AsyncMock(side_effect=Exception("unique constraint violation"))
-        mock_provider.list = AsyncMock(return_value=[existing])
+        # Conflict-recovery path was rewritten to use the find_by_external_id
+        # named query (VEPAGE-1107) instead of provider.list.
+        mock_provider.find_using_named_query = AsyncMock(return_value=[existing])
 
         with patch(
             "mirix.database.relational_provider.get_relational_provider",
@@ -113,7 +115,7 @@ class TestMemorySourceManagerDelegation:
                 organization_id="org-1",
                 external_id="ext-1",
             )
-            mock_provider.list.assert_awaited_once()
+            mock_provider.find_using_named_query.assert_awaited_once()
             assert out.id == "src-aaaaaaaa"
 
     @pytest.mark.asyncio
@@ -183,7 +185,8 @@ class TestMemorySourceManagerDelegation:
             _memory_source_row(id="src-aaaaaaa2", occurred_at="2026-05-02T00:00:00+00:00"),
         ]
         mock_provider = MagicMock()
-        mock_provider.list = AsyncMock(return_value=rows)
+        # VEPAGE-1107: rewritten to use a named query for ordered cursor pagination.
+        mock_provider.find_using_named_query = AsyncMock(return_value=rows)
 
         with patch(
             "mirix.database.relational_provider.get_relational_provider",
@@ -278,7 +281,8 @@ class TestSourceMessageManagerDelegation:
             },
         ]
         mock_provider = MagicMock()
-        mock_provider.list = AsyncMock(return_value=rows)
+        # VEPAGE-1107: rewritten to use a named query (ordering / projection).
+        mock_provider.find_using_named_query = AsyncMock(return_value=rows)
 
         with patch(
             "mirix.database.relational_provider.get_relational_provider",
@@ -350,8 +354,9 @@ class TestMemoryCitationManagerDelegation:
 
     @pytest.mark.asyncio
     async def test_check_exists_returns_true_when_provider_returns_row(self):
+        # VEPAGE-1107: routes through find_existing_citation named query.
         mock_provider = MagicMock()
-        mock_provider.list = AsyncMock(return_value=[_citation_row()])
+        mock_provider.find_using_named_query = AsyncMock(return_value=[_citation_row()])
 
         with patch(
             "mirix.database.relational_provider.get_relational_provider",
@@ -363,7 +368,7 @@ class TestMemoryCitationManagerDelegation:
     @pytest.mark.asyncio
     async def test_check_exists_returns_false_when_provider_returns_empty(self):
         mock_provider = MagicMock()
-        mock_provider.list = AsyncMock(return_value=[])
+        mock_provider.find_using_named_query = AsyncMock(return_value=[])
 
         with patch(
             "mirix.database.relational_provider.get_relational_provider",
@@ -374,13 +379,15 @@ class TestMemoryCitationManagerDelegation:
 
     @pytest.mark.asyncio
     async def test_get_max_occurred_at_takes_max_across_rows(self):
+        # VEPAGE-1107: server-side MAX via max_occurred_at_for_memory NQ.
+        # The NQ projects a single scalar column ``max_occurred_at``.
         rows = [
-            _citation_row(id="cit-aaaaaaa1", occurred_at="2026-05-01T00:00:00+00:00"),
-            _citation_row(id="cit-aaaaaaa2", occurred_at="2026-05-03T00:00:00+00:00"),
-            _citation_row(id="cit-aaaaaaa3", occurred_at="2026-05-02T00:00:00+00:00"),
+            {"max_occurred_at": "2026-05-01T00:00:00+00:00"},
+            {"max_occurred_at": "2026-05-03T00:00:00+00:00"},
+            {"max_occurred_at": "2026-05-02T00:00:00+00:00"},
         ]
         mock_provider = MagicMock()
-        mock_provider.list = AsyncMock(return_value=rows)
+        mock_provider.find_using_named_query = AsyncMock(return_value=rows)
 
         with patch(
             "mirix.database.relational_provider.get_relational_provider",
@@ -394,7 +401,7 @@ class TestMemoryCitationManagerDelegation:
     @pytest.mark.asyncio
     async def test_get_max_occurred_at_returns_none_when_no_rows(self):
         mock_provider = MagicMock()
-        mock_provider.list = AsyncMock(return_value=[])
+        mock_provider.find_using_named_query = AsyncMock(return_value=[])
 
         with patch(
             "mirix.database.relational_provider.get_relational_provider",
@@ -405,9 +412,10 @@ class TestMemoryCitationManagerDelegation:
 
     @pytest.mark.asyncio
     async def test_get_citations_for_memory_delegates_to_provider(self):
+        # VEPAGE-1107: routes through get_citations_for_memory NQ.
         rows = [_citation_row()]
         mock_provider = MagicMock()
-        mock_provider.list = AsyncMock(return_value=rows)
+        mock_provider.find_using_named_query = AsyncMock(return_value=rows)
 
         with patch(
             "mirix.database.relational_provider.get_relational_provider",
@@ -420,10 +428,11 @@ class TestMemoryCitationManagerDelegation:
 
     @pytest.mark.asyncio
     async def test_get_citations_for_memories_groups_by_key(self):
+        # VEPAGE-1107: per-key fan-out via get_citations_for_memory NQ.
         ep_row = _citation_row(id="cit-aaaaaaa1", memory_type="episodic", memory_id="ep-1")
         sem_row = _citation_row(id="cit-aaaaaaa2", memory_type="semantic", memory_id="sem-1")
         mock_provider = MagicMock()
-        mock_provider.list = AsyncMock(side_effect=[[ep_row], [sem_row]])
+        mock_provider.find_using_named_query = AsyncMock(side_effect=[[ep_row], [sem_row]])
 
         with patch(
             "mirix.database.relational_provider.get_relational_provider",
