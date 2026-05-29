@@ -2467,6 +2467,14 @@ These keywords have been used to retrieve relevant memories from the database.
 
         Returns:
             Optional[str]: Extracted topics or None if extraction fails
+
+        VEPAGE-1149: The returned string is consumed downstream as a
+        ``;``-joined list of search topics. The IPS Search backend
+        enforces a 200-character limit per text-field value, so each
+        individual topic must stay strictly under that limit. The
+        prompt + tool description below ask the LLM to constrain its
+        output, and ``_enforce_topic_length`` truncates anything that
+        slips through with a logged warning so we can tune the prompt.
         """
         try:
             # Add instruction message for topic extraction
@@ -2475,7 +2483,20 @@ These keywords have been used to retrieve relevant memories from the database.
                 prepare_input_message_create(
                     MessageCreate(
                         role=MessageRole.user,
-                        content="The above are the inputs from the user, please look at these content and extract the topic (brief description of what the user is focusing on) from these content. If there are multiple focuses in these content, then extract them all and put them into one string separated by ';'. Call the function `update_topic` to update the topic with the extracted topics.",
+                        content=(
+                            "The above are the inputs from the user, please "
+                            "look at these content and extract the topic "
+                            "(brief description of what the user is focusing "
+                            "on) from these content. If there are multiple "
+                            "focuses in these content, then extract them all "
+                            "and put them into one string separated by ';'. "
+                            "Each individual topic must be a short noun "
+                            "phrase (NOT a full sentence) and STRICTLY UNDER "
+                            "200 characters — preferably much shorter. "
+                            "Topics longer than 200 characters will be "
+                            "rejected. Call the function `update_topic` to "
+                            "update the topic with the extracted topics."
+                        ),
                     ),
                     self.agent_state.id,
                     wrap_user_message=False,
@@ -2505,7 +2526,16 @@ These keywords have been used to retrieve relevant memories from the database.
                         "properties": {
                             "topic": {
                                 "type": "string",
-                                "description": 'The topic of the current conversation/content. If there are multiple topics then separate them with ";".',
+                                "description": (
+                                    "The topic of the current conversation/"
+                                    "content. If there are multiple topics "
+                                    'then separate them with ";". Each '
+                                    "individual topic (each ;-delimited "
+                                    "segment) MUST be a short noun phrase "
+                                    "strictly under 200 characters. "
+                                    "Downstream search will reject longer "
+                                    "values."
+                                ),
                             }
                         },
                         "required": ["topic"],
@@ -2543,6 +2573,13 @@ These keywords have been used to retrieve relevant memories from the database.
                     try:
                         function_args = json.loads(choice.message.tool_calls[0].function.arguments)
                         topics = function_args.get("topic")
+                        # VEPAGE-1149: post-tool-call length validator.
+                        # Truncates any individual ;-delimited topic that
+                        # exceeds the IPS Search 200-char field limit so
+                        # downstream search doesn't 400 and abort the
+                        # entire memory-extraction pipeline. Warns so we
+                        # can tune the upstream prompt over time.
+                        topics = self._enforce_topic_length(topics)
                         printv(f"[Mirix.Agent.{self.agent_state.name}] INFO: Extracted topics: {topics}")
                         return topics
                     except (json.JSONDecodeError, KeyError) as parse_error:
@@ -2555,6 +2592,40 @@ These keywords have been used to retrieve relevant memories from the database.
             printv(f"[Mirix.Agent.{self.agent_state.name}] INFO: Error in extracting the topic from the messages: {e}")
 
         return None
+
+    # VEPAGE-1149. IPS Search enforces a 200-character cap on text fields.
+    # Topics are forwarded to the search backend as the ``query=`` value;
+    # see the four call sites in ``build_system_prompt_with_memories``.
+    _TOPIC_MAX_LEN = 200
+
+    def _enforce_topic_length(self, topics: Optional[str]) -> Optional[str]:
+        """Truncate individual ``;``-delimited topics that exceed the
+        IPS Search field-length limit. Returns the (possibly modified)
+        joined string. None / empty inputs pass through unchanged.
+
+        Truncation rather than rejection is the right call here: the
+        whole memory-extraction pipeline depends on the topic string,
+        so failing closed would just reproduce the bug we're fixing. We
+        log a warning per truncation so the upstream prompt can be
+        tuned over time.
+        """
+        if not topics:
+            return topics
+        parts = [p.strip() for p in topics.split(";")]
+        out: List[str] = []
+        for p in parts:
+            if not p:
+                continue
+            if len(p) > self._TOPIC_MAX_LEN:
+                printv(
+                    f"[Mirix.Agent.{self.agent_state.name}] WARNING: "
+                    f"VEPAGE-1149 — truncating oversized topic "
+                    f"({len(p)} chars > {self._TOPIC_MAX_LEN}); "
+                    f"prompt should constrain this: {p[:80]!r}..."
+                )
+                p = p[: self._TOPIC_MAX_LEN]
+            out.append(p)
+        return ";".join(out) if out else None
 
     async def _retrieve_memories_for_topics(self, topics: Optional[str]) -> dict:
         """
