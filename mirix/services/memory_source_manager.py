@@ -1,7 +1,9 @@
 """Manager for MemorySource CRUD operations."""
 
+import base64
+import json
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Optional, Union
 
 from sqlalchemy import select
 
@@ -13,6 +15,38 @@ from mirix.schemas.memory_source import PaginatedResponse
 from mirix.utils import enforce_types
 
 logger = get_logger(__name__)
+
+# Hard ceiling on the per-request page size we'll forward to IPSR. The IPSR
+# named-query runner caps page_size at 1500 server-side; we cap a little
+# lower so we never get truncated silently. Callers asking for more than this
+# get clamped.
+_LIST_SOURCES_MAX_PAGE_SIZE = 1000
+
+
+def _encode_page_cursor(page_num: int) -> str:
+    """Encode an offset-pagination cursor for list_sources.
+
+    The cursor is an opaque base64 JSON blob carrying the *next* page_num to
+    fetch. We don't promise stability across param changes — callers who
+    change filters mid-pagination get whatever the new query returns at the
+    encoded page.
+    """
+    return base64.urlsafe_b64encode(
+        json.dumps({"p": page_num}).encode("utf-8")
+    ).decode("ascii")
+
+
+def _decode_page_cursor(cursor: Optional[str]) -> int:
+    """Decode a list_sources cursor → page_num. None / malformed → 0."""
+    if not cursor:
+        return 0
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(cursor.encode("ascii")))
+        page_num = int(payload.get("p", 0))
+        return page_num if page_num >= 0 else 0
+    except (ValueError, TypeError, json.JSONDecodeError, UnicodeDecodeError):
+        logger.warning("Malformed list_sources cursor; restarting at page 0")
+        return 0
 
 
 def parse_occurred_at(value: Union[str, datetime, None]) -> Optional[datetime]:
@@ -280,117 +314,6 @@ class MemorySourceManager:
 
         return pydantic_source
 
-    async def get_sources_by_thread_id(
-        self,
-        external_thread_id: str,
-        scopes: Optional[List[str]] = None,
-        user_id: Optional[str] = None,
-        limit: int = 50,
-        cursor: Optional[str] = None,
-    ) -> PaginatedResponse[PydanticMemorySource]:
-        """Fetch all sources in a thread, ordered by occurred_at ascending.
-
-        Access control uses scope-based filtering via filter_tags->>'scope',
-        matching the pattern used by memory tables. If user_id is provided,
-        results are further filtered to that user.
-
-        Returns a PaginatedResponse with next_cursor and has_more.
-        """
-        # Relational provider delegation — fetch matching rows via provider.list, then
-        # sort/paginate client-side (provider.list doesn't expose ordering or cursors).
-        from mirix.database.relational_provider import get_relational_provider
-
-        provider = get_relational_provider()
-        if provider:
-            # VEPAGE-1107: NQ encodes the optional user_id filter and the
-            # scopes CSV inline so the response carries all the columns
-            # PydanticMemorySource needs without depending on the generic
-            # filter-query path's relationship resolution.
-            scopes_csv = ",".join(scopes) if scopes else None
-            records = await provider.find_using_named_query(
-                "memory_sources",
-                "memory_source_manager.list_sources_by_thread_id",
-                params={
-                    "externalThreadId": external_thread_id,
-                    "userId": user_id,
-                    "scopesCsv": scopes_csv,
-                },
-                page_size=1500,
-            )
-            # Sort ascending by (occurred_at, created_at)
-            records.sort(
-                key=lambda r: (r.get("occurred_at") or "", r.get("created_at") or "")
-            )
-            # Apply cursor (skip until we pass cursor row by id)
-            if cursor:
-                idx = next(
-                    (i for i, r in enumerate(records) if r.get("id") == cursor), None
-                )
-                if idx is not None:
-                    records = records[idx + 1 :]
-            has_more = len(records) > limit
-            records = records[:limit]
-            items = [PydanticMemorySource(**r) for r in records]
-            return PaginatedResponse(
-                items=items,
-                next_cursor=items[-1].id if has_more and items else None,
-                has_more=has_more,
-            )
-
-        from mirix.database.filter_tags_query import apply_filter_tags_sqlalchemy
-
-        async with self.session_maker() as session:
-            query = (
-                select(MemorySourceModel)
-                .where(
-                    MemorySourceModel.external_thread_id == external_thread_id,
-                    ~MemorySourceModel.is_deleted,
-                )
-                .order_by(
-                    MemorySourceModel.occurred_at.asc(),
-                    MemorySourceModel.created_at.asc(),
-                )
-            )
-
-            # Scope-based access control (same pattern as memory tables)
-            query = apply_filter_tags_sqlalchemy(
-                query, MemorySourceModel, None, scopes=scopes
-            )
-
-            if user_id:
-                query = query.where(MemorySourceModel.user_id == user_id)
-
-            if cursor:
-                cursor_result = await session.execute(
-                    select(MemorySourceModel).where(MemorySourceModel.id == cursor)
-                )
-                cursor_obj = cursor_result.scalar_one_or_none()
-                if cursor_obj:
-                    # Use created_at for stable ordering when occurred_at may be null
-                    ref = cursor_obj.occurred_at or cursor_obj.created_at
-                    query = query.where(
-                        (MemorySourceModel.occurred_at > ref)
-                        | (
-                            (MemorySourceModel.occurred_at == ref)
-                            & (MemorySourceModel.created_at > cursor_obj.created_at)
-                        )
-                    )
-
-            # Fetch limit+1 to determine has_more
-            query = query.limit(limit + 1)
-            result = await session.execute(query)
-            records = result.scalars().all()
-
-            has_more = len(records) > limit
-            records = records[:limit]
-            items = [rec.to_pydantic() for rec in records]
-
-            return PaginatedResponse(
-                items=items,
-                next_cursor=items[-1].id if has_more and items else None,
-                has_more=has_more,
-            )
-
     async def list_sources(
         self,
         organization_id: Optional[str] = None,
@@ -404,34 +327,42 @@ class MemorySourceManager:
     ) -> PaginatedResponse[PydanticMemorySource]:
         """List memory sources ordered by occurred_at descending.
 
-        No scope-based access control — intended for admin use.
-        Supports filtering by organization_id (required for the IPSR path),
-        user_id, client_id, scope, and time range.
+        Admin-only listing — no scope-based access control. organization_id
+        is required on the IPSR path (the NQ uses it as the access predicate)
+        and recommended on the ORM fallback path.
 
-        organization_id is optional only for the legacy ORM fallback path
-        (which has no IPSR-style org isolation requirement). The IPSR path
-        requires it because the underlying named query uses it as the
-        org-scoped access predicate.
+        Pagination is offset-based: ``limit`` is the page size, ``cursor`` is
+        an opaque token encoding the next page_num. Page 0 is returned when
+        ``cursor`` is None.
+
+        IPSR ``page_size`` is clamped to ``_LIST_SOURCES_MAX_PAGE_SIZE`` (the
+        server enforces 1500). Use a smaller ``limit`` if you want snappy
+        round-trips.
         """
+        if limit < 1:
+            raise ValueError("limit must be >= 1")
+        page_size = min(limit, _LIST_SOURCES_MAX_PAGE_SIZE)
+        page_num = _decode_page_cursor(cursor)
+
         # Relational provider delegation
         from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
         if provider:
-            # VEPAGE-1144: route through list_sources_admin NQ. The NQ
-            # filters and orders server-side (occurredAt DESC NULLS LAST,
-            # ipsrcreatedon DESC); cursor pagination is still applied
-            # client-side by walking the returned page (matches the
-            # get_sources_by_thread_id pattern). The 1500-row IPSR cap
-            # applies to a single page fetch — datasets larger than that
-            # need to switch to pageNum-based iteration, which is a
-            # follow-up.
+            # VEPAGE-1144: real offset pagination against list_sources_admin
+            # NQ. The NQ filters and orders server-side (occurredAt DESC
+            # NULLS LAST, ipsrcreatedon DESC); page_num + page_size are
+            # forwarded to IPSR's slice-pagination contract.
             if not organization_id:
                 raise ValueError(
                     "list_sources requires organization_id when an IPSR "
                     "provider is registered (the NQ uses it as the "
                     "org-scoped access predicate)"
                 )
+            # Fetch page_size + 1 so we can tell has_more without an extra
+            # round-trip. IPSR's slice contract returns up to the requested
+            # count, so a full page means "there is at least one more row".
+            fetch_size = min(page_size + 1, _LIST_SOURCES_MAX_PAGE_SIZE)
             records = await provider.find_using_named_query(
                 "memory_sources",
                 "memory_source_manager.list_sources_admin",
@@ -443,23 +374,15 @@ class MemorySourceManager:
                     "since": since.isoformat() if since else None,
                     "until": until.isoformat() if until else None,
                 },
-                page_size=1500,
+                page_size=fetch_size,
+                page_num=page_num,
             )
-            # Apply cursor: skip until we pass the cursor row's id.
-            # Server-side ordering is already correct, so no client-side
-            # sort is needed here.
-            if cursor:
-                idx = next(
-                    (i for i, r in enumerate(records) if r.get("id") == cursor), None
-                )
-                if idx is not None:
-                    records = records[idx + 1 :]
-            has_more = len(records) > limit
-            records = records[:limit]
+            has_more = len(records) > page_size
+            records = records[:page_size]
             items = [PydanticMemorySource(**r) for r in records]
             return PaginatedResponse(
                 items=items,
-                next_cursor=items[-1].id if has_more and items else None,
+                next_cursor=_encode_page_cursor(page_num + 1) if has_more else None,
                 has_more=has_more,
             )
 
@@ -490,32 +413,19 @@ class MemorySourceManager:
             if until:
                 query = query.where(MemorySourceModel.occurred_at <= until)
 
-            if cursor:
-                cursor_result = await session.execute(
-                    select(MemorySourceModel).where(MemorySourceModel.id == cursor)
-                )
-                cursor_obj = cursor_result.scalar_one_or_none()
-                if cursor_obj:
-                    ref = cursor_obj.occurred_at or cursor_obj.created_at
-                    query = query.where(
-                        (MemorySourceModel.occurred_at < ref)
-                        | (
-                            (MemorySourceModel.occurred_at == ref)
-                            & (MemorySourceModel.created_at < cursor_obj.created_at)
-                        )
-                    )
-
-            query = query.limit(limit + 1)
+            # Mirror the IPSR path's offset-pagination contract: SQL OFFSET
+            # for page traversal, LIMIT + 1 for has_more probing.
+            query = query.offset(page_num * page_size).limit(page_size + 1)
             result = await session.execute(query)
             records = result.scalars().all()
 
-            has_more = len(records) > limit
-            records = records[:limit]
+            has_more = len(records) > page_size
+            records = records[:page_size]
             items = [rec.to_pydantic() for rec in records]
 
             return PaginatedResponse(
                 items=items,
-                next_cursor=items[-1].id if has_more and items else None,
+                next_cursor=_encode_page_cursor(page_num + 1) if has_more else None,
                 has_more=has_more,
             )
 
