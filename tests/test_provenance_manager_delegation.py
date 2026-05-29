@@ -179,13 +179,15 @@ class TestMemorySourceManagerDelegation:
             )
 
     @pytest.mark.asyncio
-    async def test_get_sources_by_thread_id_delegates_to_provider(self):
+    async def test_list_sources_delegates_to_provider(self):
+        # VEPAGE-1144: list_sources_admin NQ orders server-side
+        # (occurredAt DESC NULLS LAST, ipsrcreatedon DESC), so the manager
+        # forwards rows without any client-side sorting.
         rows = [
-            _memory_source_row(id="src-aaaaaaa1", occurred_at="2026-05-01T00:00:00+00:00"),
             _memory_source_row(id="src-aaaaaaa2", occurred_at="2026-05-02T00:00:00+00:00"),
+            _memory_source_row(id="src-aaaaaaa1", occurred_at="2026-05-01T00:00:00+00:00"),
         ]
         mock_provider = MagicMock()
-        # VEPAGE-1107: rewritten to use a named query for ordered cursor pagination.
         mock_provider.find_using_named_query = AsyncMock(return_value=rows)
 
         with patch(
@@ -193,27 +195,89 @@ class TestMemorySourceManagerDelegation:
             return_value=mock_provider,
         ):
             mgr = _memory_source_mgr()
-            page = await mgr.get_sources_by_thread_id("thr-1", scopes=["scope-a"], user_id="user-1", limit=10)
-            assert [item.id for item in page.items] == ["src-aaaaaaa1", "src-aaaaaaa2"]
+            page = await mgr.list_sources(
+                organization_id="org-1", user_id="user-1", limit=10
+            )
+            mock_provider.find_using_named_query.assert_awaited_once()
+            args, kwargs = mock_provider.find_using_named_query.call_args
+            assert args[0] == "memory_sources"
+            assert args[1] == "memory_source_manager.list_sources_admin"
+            assert kwargs["params"]["organizationId"] == "org-1"
+            assert kwargs["params"]["userId"] == "user-1"
+            # First call → page 0; fetch_size = limit + 1 = 11.
+            assert kwargs["page_num"] == 0
+            assert kwargs["page_size"] == 11
+            # Order preserved as returned by the NQ.
+            assert [item.id for item in page.items] == ["src-aaaaaaa2", "src-aaaaaaa1"]
+            # Only 2 rows back, page size 10 → no more pages.
             assert page.has_more is False
+            assert page.next_cursor is None
 
     @pytest.mark.asyncio
-    async def test_list_sources_delegates_to_provider(self):
-        rows = [
-            _memory_source_row(id="src-aaaaaaa1", occurred_at="2026-05-01T00:00:00+00:00"),
-            _memory_source_row(id="src-aaaaaaa2", occurred_at="2026-05-02T00:00:00+00:00"),
-        ]
+    async def test_list_sources_requires_organization_id_on_ipsr_path(self):
+        """VEPAGE-1144: the NQ uses organizationId as its access predicate;
+        calling without one when an IPSR provider is registered should fail
+        loudly rather than silently issue an unscoped query."""
         mock_provider = MagicMock()
-        mock_provider.list = AsyncMock(return_value=rows)
+        mock_provider.find_using_named_query = AsyncMock()
 
         with patch(
             "mirix.database.relational_provider.get_relational_provider",
             return_value=mock_provider,
         ):
             mgr = _memory_source_mgr()
-            page = await mgr.list_sources(user_id="user-1", limit=10)
-            # Descending order: src-2 first
-            assert [item.id for item in page.items] == ["src-aaaaaaa2", "src-aaaaaaa1"]
+            with pytest.raises(ValueError, match="organization_id"):
+                await mgr.list_sources(user_id="user-1", limit=10)
+            mock_provider.find_using_named_query.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_list_sources_pagination_full_page_advances_cursor(self):
+        """When the provider returns a full page + 1 (the sentinel row
+        signalling more pages exist), has_more=True and next_cursor
+        decodes to the next page_num."""
+        # limit=2 → fetch_size=3. Provider returns 3 rows → full page +
+        # sentinel → has_more=True, items trimmed to 2.
+        rows = [
+            _memory_source_row(id="src-aaaaaaa1", occurred_at="2026-05-03T00:00:00+00:00"),
+            _memory_source_row(id="src-aaaaaaa2", occurred_at="2026-05-02T00:00:00+00:00"),
+            _memory_source_row(id="src-aaaaaaa3", occurred_at="2026-05-01T00:00:00+00:00"),
+        ]
+        mock_provider = MagicMock()
+        mock_provider.find_using_named_query = AsyncMock(return_value=rows)
+
+        with patch(
+            "mirix.database.relational_provider.get_relational_provider",
+            return_value=mock_provider,
+        ):
+            mgr = _memory_source_mgr()
+            page = await mgr.list_sources(organization_id="org-1", limit=2)
+            assert len(page.items) == 2
+            assert page.has_more is True
+            assert page.next_cursor is not None
+            # Round-trip the cursor — second call must request page_num=1.
+            await mgr.list_sources(
+                organization_id="org-1", limit=2, cursor=page.next_cursor
+            )
+            second_call_kwargs = mock_provider.find_using_named_query.call_args.kwargs
+            assert second_call_kwargs["page_num"] == 1
+
+    @pytest.mark.asyncio
+    async def test_list_sources_cursor_malformed_resets_to_page_zero(self):
+        """A garbage cursor should not 500 the request; it should start
+        over at page 0."""
+        mock_provider = MagicMock()
+        mock_provider.find_using_named_query = AsyncMock(return_value=[])
+
+        with patch(
+            "mirix.database.relational_provider.get_relational_provider",
+            return_value=mock_provider,
+        ):
+            mgr = _memory_source_mgr()
+            await mgr.list_sources(
+                organization_id="org-1", limit=10, cursor="not-base64-at-all!!!"
+            )
+            kwargs = mock_provider.find_using_named_query.call_args.kwargs
+            assert kwargs["page_num"] == 0
 
 
 # ---------- SourceMessageManager ----------
