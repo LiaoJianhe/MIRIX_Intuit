@@ -58,20 +58,41 @@ class Outcome:
 # but kept stable for readability.
 _PERMANENT_TYPES: tuple[type[BaseException], ...] = (
     LLMUnprocessableEntityError,  # 422
-    LLMBadRequestError,           # 400
-    LLMAuthenticationError,       # 401
-    LLMPermissionDeniedError,     # 403
+    LLMBadRequestError,  # 400
+    LLMAuthenticationError,  # 401
+    LLMPermissionDeniedError,  # 403
 )
 
 _TRANSIENT_TYPES: tuple[type[BaseException], ...] = (
-    LLMRateLimitError,    # 429
-    LLMServerError,       # 5xx
+    LLMRateLimitError,  # 429
+    LLMServerError,  # 5xx
     LLMConnectionError,
 )
 
 # One-shot warning per unknown exception class so the log doesn't flood when
 # a new error type starts appearing in production.
 _unknown_warned: set[type[BaseException]] = set()
+
+
+def format_exc_chain(exc: BaseException, max_depth: int = 8) -> str:
+    """Render an exception's __cause__ chain as a compact one-line string.
+
+    VEPAGE-1157 instrumentation. Used to capture wrapped-exception cascades
+    in log lines so we can see the original type even when intermediate code
+    re-raised with `raise X(...) from y`.
+
+    Example output: "RuntimeError: foo <- LLMUnprocessableEntityError: 422"
+    """
+    parts: list[str] = []
+    seen: set[int] = set()
+    current: Optional[BaseException] = exc
+    depth = 0
+    while current is not None and depth < max_depth and id(current) not in seen:
+        parts.append(f"{type(current).__name__}: {current}")
+        seen.add(id(current))
+        current = current.__cause__
+        depth += 1
+    return " <- ".join(parts)
 
 
 def classify(exc: BaseException) -> Bucket:
@@ -95,8 +116,20 @@ def classify(exc: BaseException) -> Bucket:
     depth = 0
     while current is not None and depth < 8 and id(current) not in seen:
         if isinstance(current, _PERMANENT_TYPES):
+            logger.info(
+                "error_policy.classify: PERMANENT (matched %s at depth=%d) — chain: %s",
+                type(current).__name__,
+                depth,
+                format_exc_chain(exc),
+            )
             return Bucket.PERMANENT
         if isinstance(current, _TRANSIENT_TYPES):
+            logger.info(
+                "error_policy.classify: TRANSIENT (matched %s at depth=%d) — chain: %s",
+                type(current).__name__,
+                depth,
+                format_exc_chain(exc),
+            )
             return Bucket.TRANSIENT
         seen.add(id(current))
         current = current.__cause__
@@ -153,10 +186,11 @@ async def process_with_policy(
             if bucket is Bucket.PERMANENT:
                 error_message = f"{type(exc).__name__}: {exc}"
                 logger.info(
-                    "error_policy: permanent failure (%s) on memory_source=%s — %s",
+                    "error_policy: permanent failure (%s) on memory_source=%s — %s " "— chain: %s",
                     type(exc).__name__,
                     memory_source_id,
                     exc,
+                    format_exc_chain(exc),
                 )
                 if on_permanent is not None and memory_source_id is not None:
                     try:
@@ -180,10 +214,11 @@ async def process_with_policy(
                 await asyncio.sleep(sleep_s)
                 continue
             logger.warning(
-                "error_policy: transient retries exhausted on memory_source=%s after %d attempts: %s",
+                "error_policy: transient retries exhausted on memory_source=%s after %d attempts: %s " "— chain: %s",
                 memory_source_id,
                 max_attempts + 1,
                 exc,
+                format_exc_chain(exc),
             )
             return Outcome(kind=OutcomeKind.TRANSIENT_EXHAUSTED, cause=exc, bucket=Bucket.TRANSIENT)
 
