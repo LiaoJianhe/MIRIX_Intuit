@@ -2467,6 +2467,15 @@ These keywords have been used to retrieve relevant memories from the database.
 
         Returns:
             Optional[str]: Extracted topics or None if extraction fails
+
+        The returned string is consumed downstream as a ``;``-joined
+        list of search topics — each segment becomes its own clause in
+        the OpenSearch query. The IPS Search backend caps text-field
+        values at 200 characters, so individual topics must stay under
+        that limit; the prompt and ``update_topic`` tool description
+        below set that expectation with the LLM, and
+        ``_enforce_topic_length`` truncates anything that slips
+        through with a logged warning so the prompt can be tuned.
         """
         try:
             # Add instruction message for topic extraction
@@ -2475,7 +2484,20 @@ These keywords have been used to retrieve relevant memories from the database.
                 prepare_input_message_create(
                     MessageCreate(
                         role=MessageRole.user,
-                        content="The above are the inputs from the user, please look at these content and extract the topic (brief description of what the user is focusing on) from these content. If there are multiple focuses in these content, then extract them all and put them into one string separated by ';'. Call the function `update_topic` to update the topic with the extracted topics.",
+                        content=(
+                            "The above are the inputs from the user, please "
+                            "look at these content and extract the topic "
+                            "(brief description of what the user is focusing "
+                            "on) from these content. If there are multiple "
+                            "focuses in these content, then extract them all "
+                            "and put them into one string separated by ';'. "
+                            "Each individual topic must be a short noun "
+                            "phrase (NOT a full sentence) and STRICTLY UNDER "
+                            "200 characters — preferably much shorter. "
+                            "Topics longer than 200 characters will be "
+                            "rejected. Call the function `update_topic` to "
+                            "update the topic with the extracted topics."
+                        ),
                     ),
                     self.agent_state.id,
                     wrap_user_message=False,
@@ -2505,7 +2527,16 @@ These keywords have been used to retrieve relevant memories from the database.
                         "properties": {
                             "topic": {
                                 "type": "string",
-                                "description": 'The topic of the current conversation/content. If there are multiple topics then separate them with ";".',
+                                "description": (
+                                    "The topic of the current conversation/"
+                                    "content. If there are multiple topics "
+                                    'then separate them with ";". Each '
+                                    "individual topic (each ;-delimited "
+                                    "segment) MUST be a short noun phrase "
+                                    "strictly under 200 characters. "
+                                    "Downstream search will reject longer "
+                                    "values."
+                                ),
                             }
                         },
                         "required": ["topic"],
@@ -2543,6 +2574,14 @@ These keywords have been used to retrieve relevant memories from the database.
                     try:
                         function_args = json.loads(choice.message.tool_calls[0].function.arguments)
                         topics = function_args.get("topic")
+                        # Guard against the LLM ignoring the per-topic
+                        # length constraint in the prompt — truncate
+                        # any individual ;-delimited segment that
+                        # would exceed the downstream IPS Search
+                        # field limit. Failing closed here would abort
+                        # the entire memory-extraction pipeline, so we
+                        # truncate and warn instead.
+                        topics = self._enforce_topic_length(topics)
                         printv(f"[Mirix.Agent.{self.agent_state.name}] INFO: Extracted topics: {topics}")
                         return topics
                     except (json.JSONDecodeError, KeyError) as parse_error:
@@ -2555,6 +2594,45 @@ These keywords have been used to retrieve relevant memories from the database.
             printv(f"[Mirix.Agent.{self.agent_state.name}] INFO: Error in extracting the topic from the messages: {e}")
 
         return None
+
+    # Maximum length, in characters, of a single ``;``-delimited topic
+    # forwarded to memory search. Set to the IPS Search backend's
+    # 200-character text-field cap (values over this yield a 400 from
+    # IPS Search that would otherwise abort the whole inner_step).
+    # Topics flow into ``query=`` on the four memory-list calls in
+    # ``build_system_prompt_with_memories``.
+    _TOPIC_MAX_LEN = 200
+
+    def _enforce_topic_length(self, topics: Optional[str]) -> Optional[str]:
+        """Truncate individual ``;``-delimited topics that exceed
+        ``_TOPIC_MAX_LEN``. Returns the (possibly modified) joined
+        string. None / empty inputs pass through unchanged.
+
+        The downstream search backend rejects text-field values over
+        the limit. We truncate rather than reject the whole string:
+        the memory-extraction pipeline depends on this value being
+        present, and failing closed reproduces the exact crash this
+        guard is here to prevent. A warning is logged per truncation
+        so the upstream extraction prompt can be tuned over time.
+        """
+        if not topics:
+            return topics
+        parts = [p.strip() for p in topics.split(";")]
+        out: List[str] = []
+        for p in parts:
+            if not p:
+                continue
+            if len(p) > self._TOPIC_MAX_LEN:
+                printv(
+                    f"[Mirix.Agent.{self.agent_state.name}] WARNING: "
+                    f"truncating oversized topic "
+                    f"({len(p)} chars > {self._TOPIC_MAX_LEN}); "
+                    f"the topic-extraction prompt should keep this "
+                    f"under the limit: {p[:80]!r}..."
+                )
+                p = p[: self._TOPIC_MAX_LEN]
+            out.append(p)
+        return ";".join(out) if out else None
 
     async def _retrieve_memories_for_topics(self, topics: Optional[str]) -> dict:
         """
