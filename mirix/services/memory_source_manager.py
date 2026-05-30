@@ -96,7 +96,13 @@ class MemorySourceManager:
         actor.write_scope, matching the pattern in raw_memory_manager.
         Client-provided filter_tags are preserved but scope cannot be overridden.
 
-        Returns the record (whether just inserted or pre-existing).
+        Returns the newly-created ``PydanticMemorySource`` on success, or ``None``
+        when the write was deduped — i.e. a prior submission already created a
+        source under the same dedup key (external_id / batch_hash). A ``None``
+        return is the caller's signal to short-circuit agent processing. Both the
+        IPS-Relational provider path and the PG ON CONFLICT DO NOTHING path honor
+        this contract.
+
         Cache write handled by the ORM layer via create_or_ignore_with_redis.
         """
         # Enforce scope from actor's write_scope (same pattern as raw_memory_manager)
@@ -159,17 +165,22 @@ class MemorySourceManager:
                             e,
                         )
                     raise
-                # Conflict — look up the pre-existing row by the dedup key the caller
-                # provided. Without a dedup key we can't recover, so re-raise.
+                # Conflict — a prior submission already created this source under
+                # the same dedup key (external_id or batch_hash). Signal dedup to
+                # the caller by returning None, matching the PG ON CONFLICT DO
+                # NOTHING path (get_by_id(this_id) is None because this call's row
+                # was never inserted). The caller (Agent._persist_memory_source)
+                # treats a None return as "deduped" and short-circuits agent
+                # processing, so we must NOT return the pre-existing (different-id)
+                # row here — doing so would make the worker re-run the pipeline and
+                # produce duplicate memories.
                 #
-                # VEPAGE-1107: use named queries that explicitly project all
-                # columns + FK columns so PydanticMemorySource construction
-                # works. The generic ``provider.list`` path here was also
-                # failing because ``client_id`` and ``user_id`` filter
-                # property resolution didn't include the right relationship
-                # logical names for memory_sources.
+                # We still confirm the pre-existing row exists (defensive: a
+                # conflict with no recoverable row indicates a different failure,
+                # so re-raise). VEPAGE-1107: named queries explicitly project all
+                # columns + FK columns so PydanticMemorySource construction works.
                 logger.debug(
-                    "memory_sources conflict for %s — looking up existing row",
+                    "memory_sources conflict for %s — deduped against existing row",
                     memory_source_id,
                 )
                 if external_id is not None:
@@ -203,7 +214,8 @@ class MemorySourceManager:
                 else:
                     raise
                 if records:
-                    return PydanticMemorySource(**records[0])
+                    # Deduped: a pre-existing row won the unique constraint.
+                    return None
                 raise
 
         async with self.session_maker() as session:

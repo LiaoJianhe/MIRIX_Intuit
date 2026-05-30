@@ -40,13 +40,24 @@ def is_conflict(exc: BaseException) -> bool:
     We don't have a single canonical IPSR error code for unique conflicts yet;
     treat 409 plus any error_code/message containing CONFLICT/DUPLICATE/UNIQUE
     as a conflict. Conservative — false positives just skip a retry, not data loss.
+
+    IPS-Relational does not surface unique-index violations as a 409 nor with a
+    CONFLICT/DUPLICATE/UNIQUE token. It raises ``BadRequestError`` (no
+    ``status_code``) with the message
+    ``"Client data violates a database constraint:  uq_<index>"`` and an ambiguous
+    ``DATABASE_CONSTRAINT_VIOLATION`` error_code that is *also* used for
+    column-shape mismatches. We therefore key off the unique-index name prefix
+    (``uq_``) which only appears for genuine uniqueness conflicts — the
+    column-shape variant of the same error carries no constraint name.
     """
     status = _exc_status_code(exc)
     if status == 409:
         return True
     code = (getattr(exc, "error_code", "") or "").upper()
     msg = (str(exc) or "").upper()
-    return any(hint in code or hint in msg for hint in _CONFLICT_HINTS)
+    if any(hint in code or hint in msg for hint in _CONFLICT_HINTS):
+        return True
+    return "VIOLATES A DATABASE CONSTRAINT" in msg and "UQ_" in msg
 
 
 def is_transient(exc: BaseException) -> bool:
