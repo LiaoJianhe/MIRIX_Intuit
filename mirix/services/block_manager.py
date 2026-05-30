@@ -323,36 +323,39 @@ class BlockManager:
             filter_tags_set_on_create: Optional dict; applied only when new blocks are created (e.g. from
                               default user template). Existing blocks are never updated.
         """
-        from mirix.database.search_provider import get_search_provider
+        from mirix.database.relational_provider import get_relational_provider
 
-        search_provider = get_search_provider()
-        if search_provider:
-            from mirix.database.relational_provider import get_relational_provider
-
-            search_kwargs: Dict[str, Any] = {}
+        # Blocks are read from the relational store (strong read-after-write),
+        # never the search index. Core memory has no ranking semantics — a caller
+        # always wants every block for a (user, scope) — and several of these
+        # reads gate a write decision (the auto-create-from-template branch below,
+        # the template existence check in seed_template_block_for_actor_scope_if_necessary)
+        # or feed the agent pipeline moments after a sibling step wrote a block.
+        # The search index is eventually consistent, so a read against it inside
+        # the propagation window returns a stale empty result, which both (a) drives
+        # spurious template duplication and (b) crashes core_memory_append when the
+        # agent's loaded blocks get clobbered by an empty reload.
+        relational_provider = get_relational_provider()
+        if relational_provider:
+            list_kwargs: Dict[str, Any] = {}
             if label is not None:
-                search_kwargs["label"] = label
+                list_kwargs["label"] = label
             if id is not None:
-                search_kwargs["id"] = id
-            if cursor is not None:
-                search_kwargs["cursor"] = cursor
+                list_kwargs["id"] = id
 
             effective_limit = limit or 50
 
             if user is None:
                 if organization_id is None or any_scopes is None or not any_scopes:
                     return []
-                results, _next = await search_provider.search(
+                results = await relational_provider.list(
                     "block",
-                    query_text="",
-                    search_method="string_match",
-                    search_field="",
                     user_id=None,
                     organization_id=organization_id,
                     filter_tags=filter_tags,
                     scopes=any_scopes,
                     limit=effective_limit,
-                    **search_kwargs,
+                    **list_kwargs,
                 )
                 return [PydanticBlock(**r) for r in results]
 
@@ -365,17 +368,14 @@ class BlockManager:
             else:
                 scope_list = None
 
-            results, _next = await search_provider.search(
+            results = await relational_provider.list(
                 "block",
-                query_text="",
-                search_method="string_match",
-                search_field="",
                 user_id=user.id,
                 organization_id=org_id,
                 filter_tags=filter_tags,
                 scopes=scope_list,
                 limit=effective_limit,
-                **search_kwargs,
+                **list_kwargs,
             )
             pydantic_blocks = [PydanticBlock(**r) for r in results]
             if (
@@ -391,13 +391,11 @@ class BlockManager:
                     user.id,
                     scope,
                 )
-                relational_provider = get_relational_provider()
                 return await self._copy_blocks_from_default_user_via_provider(
                     target_user=user,
                     scope=scope,
                     organization_id=org_id,
                     block_filter_tags=filter_tags_set_on_create,
-                    search_provider=search_provider,
                     relational_provider=relational_provider,
                 )
             return pydantic_blocks
@@ -474,15 +472,17 @@ class BlockManager:
         organization_id: str,
         block_filter_tags: Optional[Dict[str, Any]] = None,
         *,
-        search_provider: Any,
         relational_provider: Any,
     ) -> List[PydanticBlock]:
         """Provider-aware counterpart of :meth:`_copy_blocks_from_default_user`.
 
         Finds template blocks for ``scope`` on the org default user via the
-        Search provider, then creates per-user copies through ``provider.create``.
-        Avoids the cross-backend write where the provider branch previously fell
-        through to direct SQL.
+        Relational provider, then creates per-user copies through
+        ``provider.create``. Templates are read from the relational store
+        (strong read-after-write) rather than the search index: this read gates
+        a write (the per-user copy), and a stale empty/duplicated result from
+        the eventually-consistent search index would either skip the copy or
+        fan out N redundant blocks per label.
         """
         from mirix.schemas.block import Block as PydanticBlock
         from mirix.services.user_manager import UserManager
@@ -499,12 +499,12 @@ class BlockManager:
             )
             default_user_id = UserManager.ADMIN_USER_ID
 
-        # Find template blocks for this scope on the default user via Search provider.
-        template_results, _next = await search_provider.search(
+        # Find template blocks for this scope on the default user via the
+        # Relational provider (strong read-after-write). Reading from the
+        # search index here would risk a stale empty result (skip the copy
+        # entirely) or stale duplicates (fan out redundant per-user blocks).
+        template_results = await relational_provider.list(
             "block",
-            query_text="",
-            search_method="string_match",
-            search_field="",
             user_id=default_user_id,
             organization_id=organization_id,
             filter_tags=None,
@@ -514,7 +514,7 @@ class BlockManager:
 
         if not template_results:
             logger.warning(
-                "No template blocks found for scope %s via Search provider. "
+                "No template blocks found for scope %s via Relational provider. "
                 "Ensure create_meta_agent was called with a blocks config for this scope. "
                 "User %s will have no blocks.",
                 scope,
@@ -524,18 +524,8 @@ class BlockManager:
 
         # De-duplicate templates by ``label`` to mirror the PG ORM contract,
         # where ``seed_template_block_for_actor_scope_if_necessary`` enforces
-        # exactly one template per (user, scope, label).  Search provider may return
-        # multiple historical rows for the same logical template when a
-        # previous run's cleanup deletes the Relational DB provider row but the
-        # Search provider index still has stale documents (eventual consistency lag).
-        # Without this de-dup, every new test user would copy N stale rows
-        # for the same label, which (a) creates N redundant blocks per label
-        # and (b) overwhelms the Relational DB provider write path with a burst of
-        # CREATE + domain-event UPSERT calls, eventually marking the provider
-        # unhealthy ("Relational DB provider is unavailable").  The PG path never
-        # exhibits this because deletes are synchronous against a single
-        # source of truth.  Keep the first template seen per label (search
-        # results are stable / the duplicates are byte-identical templates).
+        # exactly one template per (user, scope, label). Keep the first template
+        # seen per label.
         deduped_templates: List[Dict[str, Any]] = []
         seen_labels: set[str] = set()
         for tpl in template_results:
@@ -546,7 +536,7 @@ class BlockManager:
             deduped_templates.append(tpl)
         if len(deduped_templates) != len(template_results):
             logger.info(
-                "Deduped %d stale template duplicates for scope=%s on default "
+                "Deduped %d template duplicates for scope=%s on default "
                 "user %s (kept %d unique label(s): %s)",
                 len(template_results) - len(deduped_templates),
                 scope,
