@@ -8,6 +8,13 @@ from mirix.observability.langfuse_client import (
     is_langfuse_enabled,
     shutdown_langfuse,
 )
+from mirix.observability.pii_mask import (
+    REDACTED_PLACEHOLDER,
+    build_langfuse_mask,
+    get_langfuse_mask,
+    ispy_pii_mask,
+    set_langfuse_mask,
+)
 from mirix.observability.skip_spans import emit_idempotency_skip_span
 from mirix.observability.trace_propagation import (
     add_trace_to_queue_message,
@@ -24,4 +31,10 @@ __all__ = [
     "restore_trace_from_queue_message",
     "mark_observation_as_child",
     "emit_idempotency_skip_span",
+    # PII masking for Langfuse exports.
+    "REDACTED_PLACEHOLDER",
+    "build_langfuse_mask",
+    "ispy_pii_mask",
+    "get_langfuse_mask",
+    "set_langfuse_mask",
 ]

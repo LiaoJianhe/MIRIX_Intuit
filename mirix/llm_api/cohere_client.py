@@ -31,6 +31,6 @@ class CohereClient(LLMClientBase):
         # TODO: Implement cohere-specific response conversion
         raise NotImplementedError("CohereClient not yet implemented - use fallback")
 
-    def handle_llm_error(self, e: Exception) -> Exception:
+    async def handle_llm_error(self, e: Exception) -> Exception:
         # TODO: Implement cohere-specific error handling
-        return super().handle_llm_error(e)
+        return await super().handle_llm_error(e)

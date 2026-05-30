@@ -198,6 +198,16 @@ class Settings(BaseSettings):
     llm_retry_backoff_factor: float = Field(0.5, env="MIRIX_LLM_RETRY_BACKOFF_FACTOR")  # Exponential backoff multiplier
     llm_retry_max_delay: float = Field(10.0, env="MIRIX_LLM_RETRY_MAX_DELAY")  # Max delay between retries (seconds)
 
+    # Bounded retry budgets used by the error_policy classifier.
+    # Inline LLM retry inside _get_ai_reply: tight, transient-only.
+    llm_inline_retry_max_attempts: int = Field(2, env="MIRIX_LLM_INLINE_RETRY_MAX_ATTEMPTS")
+    llm_inline_retry_base_seconds: float = Field(2.0, env="MIRIX_LLM_INLINE_RETRY_BASE_SECONDS")
+    llm_inline_retry_max_delay: float = Field(10.0, env="MIRIX_LLM_INLINE_RETRY_MAX_DELAY")
+    # Whole-step retry around agent.step in the error_policy wrapper.
+    whole_step_retry_max_attempts: int = Field(2, env="MIRIX_WHOLE_STEP_RETRY_MAX_ATTEMPTS")
+    whole_step_retry_base_seconds: float = Field(10.0, env="MIRIX_WHOLE_STEP_RETRY_BASE_SECONDS")
+    whole_step_retry_max_delay: float = Field(30.0, env="MIRIX_WHOLE_STEP_RETRY_MAX_DELAY")
+
     # cron job parameters
     enable_batch_job_polling: bool = False
     poll_running_llm_batches_interval_seconds: int = 5 * 60

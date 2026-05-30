@@ -709,7 +709,12 @@ class AsyncServer(Server):
         direct_writes: Optional[List[dict]] = None,
     ) -> MirixUsageStatistics:
         """Send the input message through the agent"""
-        logger.debug("Got input messages: %s", input_messages)
+        # Do not log message content — user text reaches Splunk at DEBUG.
+        logger.debug(
+            "Got input messages: type=%s count=%d",
+            type(input_messages).__name__,
+            len(input_messages) if isinstance(input_messages, list) else 1,
+        )
         if user is None:
             raise ValueError("AsyncServer._step requires a non-null user.")
         mirix_agent = None
@@ -1025,7 +1030,8 @@ class AsyncServer(Server):
         """
         Construct a system message from a message.
         """
-        logger.debug("Got message: %s", message)
+        # Do not log message content — user text reaches Splunk at DEBUG.
+        logger.debug("Got message: length=%d", len(message) if message else 0)
         mirix_agent = None
         mirix_agent = await self.load_agent(agent_id=agent_id, actor=actor)
         if mirix_agent is None:
@@ -1036,7 +1042,8 @@ class AsyncServer(Server):
         """
         Construct a system message from a message.
         """
-        logger.debug("Got message: %s", message)
+        # Do not log message content — user text reaches Splunk at DEBUG.
+        logger.debug("Got message: length=%d", len(message) if message else 0)
         mirix_agent = None
         mirix_agent = await self.load_agent(agent_id=agent_id, actor=actor)
         if mirix_agent is None:
