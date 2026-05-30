@@ -2310,14 +2310,29 @@ async def retrieve_memories_by_keywords(
             "knowledge_vault": {"total_count": 0, "items": []},
             "core": {"total_count": 0, "scopes": {}},
         }
-    memories = {}
+    import asyncio
 
-    # Get episodic memories (recent + relevant) with optional temporal filtering
-    try:
-        episodic_manager = server.episodic_memory_manager
+    memories: Dict[str, Any] = {}
 
-        # Get recent episodic memories with temporal filter
-        recent_episodic = await episodic_manager.list_episodic_memory(
+    # Fan out all per-memory-type backend reads concurrently. Each call is
+    # independent (different manager, different table) — running them serially
+    # adds the sum of latencies; running them in parallel adds the max. Any
+    # failure propagates out of the gather and bubbles to the route layer.
+    episodic_manager = server.episodic_memory_manager
+    semantic_manager = server.semantic_memory_manager
+    resource_manager = server.resource_memory_manager
+    procedural_manager = server.procedural_memory_manager
+    knowledge_vault_manager = server.knowledge_vault_manager
+    block_manager = server.block_manager
+
+    # Build the task list and a parallel index of (memory_type, slot) keys so
+    # we can route results back to the right per-type assembly.
+    tasks: list = []
+    keys: list = []
+
+    # Episodic: recent (always) + relevant (only when key_words present) + count
+    tasks.append(
+        episodic_manager.list_episodic_memory(
             agent_state=agent_state,  # Not accessed during BM25 search
             user=user,
             limit=limit,
@@ -2328,11 +2343,12 @@ async def retrieve_memories_by_keywords(
             start_date=start_date,
             end_date=end_date,
         )
+    )
+    keys.append(("episodic", "recent"))
 
-        # Get relevant episodic memories based on keywords with temporal filter
-        relevant_episodic = []
-        if key_words:
-            relevant_episodic = await episodic_manager.list_episodic_memory(
+    if key_words:
+        tasks.append(
+            episodic_manager.list_episodic_memory(
                 agent_state=agent_state,  # Not accessed during BM25 search
                 user=user,
                 query=key_words,
@@ -2345,37 +2361,15 @@ async def retrieve_memories_by_keywords(
                 start_date=start_date,
                 end_date=end_date,
             )
+        )
+        keys.append(("episodic", "relevant"))
 
-        memories["episodic"] = {
-            "total_count": await episodic_manager.get_total_number_of_items(user=user),
-            "recent": [
-                {
-                    "id": event.id,
-                    "timestamp": (event.occurred_at.isoformat() if event.occurred_at else None),
-                    "summary": event.summary,
-                    "details": event.details,
-                }
-                for event in recent_episodic
-            ],
-            "relevant": [
-                {
-                    "id": event.id,
-                    "timestamp": (event.occurred_at.isoformat() if event.occurred_at else None),
-                    "summary": event.summary,
-                    "details": event.details,
-                }
-                for event in relevant_episodic
-            ],
-        }
-    except Exception as e:
-        logger.error("Error retrieving episodic memories: %s", e)
-        memories["episodic"] = {"total_count": 0, "recent": [], "relevant": []}
+    tasks.append(episodic_manager.get_total_number_of_items(user=user))
+    keys.append(("episodic", "count"))
 
-    # Get semantic memories
-    try:
-        semantic_manager = server.semantic_memory_manager
-
-        semantic_items = await semantic_manager.list_semantic_items(
+    # Semantic
+    tasks.append(
+        semantic_manager.list_semantic_items(
             agent_state=agent_state,  # Not accessed during BM25 search
             user=user,
             query=key_words,
@@ -2387,28 +2381,14 @@ async def retrieve_memories_by_keywords(
             scopes=scopes,
             use_cache=use_cache,
         )
+    )
+    keys.append(("semantic", "items"))
+    tasks.append(semantic_manager.get_total_number_of_items(user=user))
+    keys.append(("semantic", "count"))
 
-        memories["semantic"] = {
-            "total_count": await semantic_manager.get_total_number_of_items(user=user),
-            "items": [
-                {
-                    "id": item.id,
-                    "name": item.name,
-                    "summary": item.summary,
-                    "details": item.details,
-                }
-                for item in semantic_items
-            ],
-        }
-    except Exception as e:
-        logger.error("Error retrieving semantic memories: %s", e)
-        memories["semantic"] = {"total_count": 0, "items": []}
-
-    # Get resource memories
-    try:
-        resource_manager = server.resource_memory_manager
-
-        resources = await resource_manager.list_resources(
+    # Resource
+    tasks.append(
+        resource_manager.list_resources(
             agent_state=agent_state,  # Not accessed during BM25 search
             user=user,
             query=key_words,
@@ -2420,28 +2400,14 @@ async def retrieve_memories_by_keywords(
             scopes=scopes,
             use_cache=use_cache,
         )
+    )
+    keys.append(("resource", "items"))
+    tasks.append(resource_manager.get_total_number_of_items(user=user))
+    keys.append(("resource", "count"))
 
-        memories["resource"] = {
-            "total_count": await resource_manager.get_total_number_of_items(user=user),
-            "items": [
-                {
-                    "id": resource.id,
-                    "title": resource.title,
-                    "summary": resource.summary,
-                    "resource_type": resource.resource_type,
-                }
-                for resource in resources
-            ],
-        }
-    except Exception as e:
-        logger.error("Error retrieving resource memories: %s", e)
-        memories["resource"] = {"total_count": 0, "items": []}
-
-    # Get procedural memories
-    try:
-        procedural_manager = server.procedural_memory_manager
-
-        procedures = await procedural_manager.list_procedures(
+    # Procedural
+    tasks.append(
+        procedural_manager.list_procedures(
             agent_state=agent_state,  # Not accessed during BM25 search
             user=user,
             query=key_words,
@@ -2453,27 +2419,14 @@ async def retrieve_memories_by_keywords(
             scopes=scopes,
             use_cache=use_cache,
         )
+    )
+    keys.append(("procedural", "items"))
+    tasks.append(procedural_manager.get_total_number_of_items(user=user))
+    keys.append(("procedural", "count"))
 
-        memories["procedural"] = {
-            "total_count": await procedural_manager.get_total_number_of_items(user=user),
-            "items": [
-                {
-                    "id": procedure.id,
-                    "entry_type": procedure.entry_type,
-                    "summary": procedure.summary,
-                }
-                for procedure in procedures
-            ],
-        }
-    except Exception as e:
-        logger.error("Error retrieving procedural memories: %s", e)
-        memories["procedural"] = {"total_count": 0, "items": []}
-
-    # Get knowledge vault items
-    try:
-        knowledge_vault_manager = server.knowledge_vault_manager
-
-        knowledge_items = await knowledge_vault_manager.list_knowledge(
+    # Knowledge vault
+    tasks.append(
+        knowledge_vault_manager.list_knowledge(
             agent_state=agent_state,  # Not accessed during BM25 search
             user=user,
             query=key_words,
@@ -2482,52 +2435,126 @@ async def retrieve_memories_by_keywords(
             limit=limit,
             timezone_str=timezone_str,
         )
+    )
+    keys.append(("knowledge_vault", "items"))
+    tasks.append(knowledge_vault_manager.get_total_number_of_items(user=user))
+    keys.append(("knowledge_vault", "count"))
 
-        memories["knowledge_vault"] = {
-            "total_count": await knowledge_vault_manager.get_total_number_of_items(user=user),
-            "items": [
-                {
-                    "id": item.id,
-                    "caption": item.caption,
-                }
-                for item in knowledge_items
-            ],
-        }
-    except Exception as e:
-        logger.error("Error retrieving knowledge vault items: %s", e)
-        memories["knowledge_vault"] = {"total_count": 0, "items": []}
-
-    # Get core memory blocks (filtered by client's read_scopes, grouped by scope)
-    try:
-        block_manager = server.block_manager
-
-        blocks = await block_manager.get_blocks(
+    # Core memory blocks (filtered by client's read_scopes, grouped by scope below)
+    tasks.append(
+        block_manager.get_blocks(
             user=user,
             any_scopes=client.read_scopes,
             auto_create_from_default=False,
         )
+    )
+    keys.append(("core", "blocks"))
 
-        # Group blocks by scope
-        scopes_dict: Dict[str, list] = {}
-        for block in blocks:
-            scope = (block.filter_tags or {}).get("scope", "default")
-            if scope not in scopes_dict:
-                scopes_dict[scope] = []
-            scopes_dict[scope].append(
-                {
-                    "id": block.id,
-                    "label": block.label,
-                    "value": block.value,
-                }
-            )
+    # Let any failure propagate — callers (search_service / route layer) already
+    # translate exceptions into the appropriate HTTP error response.
+    results = await asyncio.gather(*tasks)
 
-        memories["core"] = {
-            "total_count": len(blocks),
-            "scopes": {scope: {"items": items} for scope, items in scopes_dict.items()},
-        }
-    except Exception as e:
-        logger.error("Error retrieving core memory blocks: %s", e)
-        memories["core"] = {"total_count": 0, "scopes": {}}
+    # Bucket results by (memory_type, slot) so per-type assembly is straightforward.
+    bucket: Dict[str, Dict[str, Any]] = {}
+    for (memory_type, slot), result in zip(keys, results):
+        bucket.setdefault(memory_type, {})[slot] = result
+
+    # Episodic assembly
+    recent_episodic = bucket["episodic"]["recent"]
+    relevant_episodic = bucket["episodic"].get("relevant", []) or []
+    memories["episodic"] = {
+        "total_count": bucket["episodic"]["count"],
+        "recent": [
+            {
+                "id": event.id,
+                "timestamp": (event.occurred_at.isoformat() if event.occurred_at else None),
+                "summary": event.summary,
+                "details": event.details,
+            }
+            for event in recent_episodic
+        ],
+        "relevant": [
+            {
+                "id": event.id,
+                "timestamp": (event.occurred_at.isoformat() if event.occurred_at else None),
+                "summary": event.summary,
+                "details": event.details,
+            }
+            for event in relevant_episodic
+        ],
+    }
+
+    # Semantic assembly
+    memories["semantic"] = {
+        "total_count": bucket["semantic"]["count"],
+        "items": [
+            {
+                "id": item.id,
+                "name": item.name,
+                "summary": item.summary,
+                "details": item.details,
+            }
+            for item in bucket["semantic"]["items"]
+        ],
+    }
+
+    # Resource assembly
+    memories["resource"] = {
+        "total_count": bucket["resource"]["count"],
+        "items": [
+            {
+                "id": resource.id,
+                "title": resource.title,
+                "summary": resource.summary,
+                "resource_type": resource.resource_type,
+            }
+            for resource in bucket["resource"]["items"]
+        ],
+    }
+
+    # Procedural assembly
+    memories["procedural"] = {
+        "total_count": bucket["procedural"]["count"],
+        "items": [
+            {
+                "id": procedure.id,
+                "entry_type": procedure.entry_type,
+                "summary": procedure.summary,
+            }
+            for procedure in bucket["procedural"]["items"]
+        ],
+    }
+
+    # Knowledge vault assembly
+    memories["knowledge_vault"] = {
+        "total_count": bucket["knowledge_vault"]["count"],
+        "items": [
+            {
+                "id": item.id,
+                "caption": item.caption,
+            }
+            for item in bucket["knowledge_vault"]["items"]
+        ],
+    }
+
+    # Core memory blocks (group by scope after the fetch)
+    blocks = bucket["core"]["blocks"]
+    scopes_dict: Dict[str, list] = {}
+    for block in blocks:
+        scope = (block.filter_tags or {}).get("scope", "default")
+        if scope not in scopes_dict:
+            scopes_dict[scope] = []
+        scopes_dict[scope].append(
+            {
+                "id": block.id,
+                "label": block.label,
+                "value": block.value,
+            }
+        )
+    memories["core"] = {
+        "total_count": len(blocks),
+        "scopes": {scope: {"items": items} for scope, items in scopes_dict.items()},
+    }
 
     return memories
 
