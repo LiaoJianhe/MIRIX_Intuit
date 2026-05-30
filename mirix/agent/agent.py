@@ -28,7 +28,6 @@ from mirix.constants import (
 )
 from mirix.embeddings import embedding_model
 from mirix.errors import ContextWindowExceededError
-from mirix.queue.error_policy import Bucket, classify
 from mirix.functions.functions import get_function_from_module
 from mirix.helpers import ToolRulesSolver
 from mirix.helpers.message_helpers import prepare_input_message_create
@@ -41,6 +40,7 @@ from mirix.memory import summarize_messages
 from mirix.observability.context import get_trace_context, mark_observation_as_child
 from mirix.observability.langfuse_client import get_langfuse_client
 from mirix.observability.skip_spans import emit_idempotency_skip_span
+from mirix.queue.error_policy import Bucket, classify
 from mirix.schemas.agent import AgentState, AgentStepResponse
 from mirix.schemas.block import BlockUpdate
 from mirix.schemas.client import Client
@@ -745,9 +745,7 @@ class Agent(BaseAgent):
                 ]:
                     # "length" historically retried; treat the same way via ValueError
                     # so the unified classifier handles it.
-                    raise ValueError(
-                        f"Bad finish reason from API: {response.choices[0].finish_reason}"
-                    )
+                    raise ValueError(f"Bad finish reason from API: {response.choices[0].finish_reason}")
 
                 log_telemetry(self.logger, "_handle_ai_response finish")
                 return response
@@ -1494,7 +1492,24 @@ class Agent(BaseAgent):
             try:
                 await summary_task
             except Exception as e:
-                logger.warning("Failed to generate summary for source %s: %s", self.memory_source_id, e)
+                # VEPAGE-1157: this task runs CONCURRENTLY with the sub-agent
+                # gather via asyncio.create_task. Its exceptions surface here
+                # only at await time. Log the full cause chain — the original
+                # warning swallowed the stack and made the asyncpg / MissingGreenlet
+                # signature invisible.
+                try:
+                    from mirix.queue.error_policy import format_exc_chain
+
+                    chain = format_exc_chain(e)
+                except Exception:
+                    chain = "<chain-format-failed>"
+                logger.error(
+                    "VEPAGE-1157 summary_task EXC: source=%s exc_type=%s — chain: %s",
+                    self.memory_source_id,
+                    type(e).__name__,
+                    chain,
+                    exc_info=True,
+                )
                 raise
 
         # Mark memory source as fully processed after all agents complete

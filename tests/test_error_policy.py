@@ -225,3 +225,45 @@ def test_classify_unwraps_cause_to_find_transient():
             raise RuntimeError("wrapper") from e
     except RuntimeError as wrapped:
         assert classify(wrapped) is Bucket.TRANSIENT
+
+
+# ---------- format_exc_chain ----------
+
+
+def test_format_exc_chain_single_exception():
+    exc = ValueError("bad value")
+    assert ep.format_exc_chain(exc) == "ValueError: bad value"
+
+
+def test_format_exc_chain_two_levels():
+    try:
+        try:
+            raise LLMUnprocessableEntityError("422 unprocessable")
+        except LLMUnprocessableEntityError as inner:
+            raise RuntimeError("wrapper failed") from inner
+    except RuntimeError as wrapped:
+        chain = ep.format_exc_chain(wrapped)
+    assert "RuntimeError: wrapper failed" in chain
+    assert "LLMUnprocessableEntityError: 422 unprocessable" in chain
+    assert chain.index("RuntimeError") < chain.index("LLMUnprocessableEntityError")
+    assert " <- " in chain
+
+
+def test_format_exc_chain_respects_max_depth():
+    # Build a 5-link chain manually with __cause__ links
+    e1 = ValueError("1")
+    e2 = ValueError("2")
+    e2.__cause__ = e1
+    e3 = ValueError("3")
+    e3.__cause__ = e2
+    chain = ep.format_exc_chain(e3, max_depth=2)
+    # max_depth=2 means only 2 frames included
+    assert chain.count("ValueError") == 2
+
+
+def test_format_exc_chain_handles_cycles():
+    # A cause-chain that points back at itself MUST not infinite-loop.
+    e = ValueError("self")
+    e.__cause__ = e  # pathological but possible if someone screws up
+    chain = ep.format_exc_chain(e)
+    assert chain == "ValueError: self"  # only one entry, no loop
