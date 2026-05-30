@@ -608,21 +608,26 @@ class TestBlockManagerDelegation:
                 assert out.id == "block-c0ffee00"
 
     @pytest.mark.asyncio
-    async def test_get_blocks_delegates_to_search_provider(self):
+    async def test_get_blocks_delegates_to_relational_provider(self):
         row = _block_row_dict()
-        mock_search = MagicMock()
-        mock_search.search = AsyncMock(return_value=([row], None))
+        mock_provider = MagicMock()
+        mock_provider.list = AsyncMock(return_value=[row])
 
-        with patch("mirix.database.search_provider.get_search_provider", return_value=mock_search):
+        with patch(
+            "mirix.database.relational_provider.get_relational_provider",
+            return_value=mock_provider,
+        ):
             mgr = _block_mgr()
             out = await mgr.get_blocks(
                 user=_mock_user(),
                 any_scopes=["scope-a"],
                 auto_create_from_default=False,
             )
-            mock_search.search.assert_awaited_once()
-            args, _kwargs = mock_search.search.await_args
+            mock_provider.list.assert_awaited_once()
+            args, kwargs = mock_provider.list.await_args
             assert args[0] == "block"
+            assert kwargs["user_id"] == "user-1"
+            assert kwargs["scopes"] == ["scope-a"]
             assert len(out) == 1
 
 
