@@ -70,6 +70,8 @@ async def initialize_langfuse(force: bool = False) -> Optional["Langfuse"]:
             from langfuse import Langfuse
             from opentelemetry.sdk.trace import TracerProvider
 
+            from mirix.observability.pii_mask import get_langfuse_mask
+
             _langfuse_client = await asyncio.to_thread(
                 Langfuse,
                 public_key=settings.langfuse_public_key,
@@ -80,6 +82,13 @@ async def initialize_langfuse(force: bool = False) -> Optional["Langfuse"]:
                 flush_at=settings.langfuse_flush_at,
                 tracer_provider=TracerProvider(),
                 environment=environment,
+                # PII masking: Langfuse invokes this callable per
+                # observation field, so PII tokens (emails, SSNs,
+                # phone, etc.) are scrubbed via ispy-pii before traces
+                # are exported. Defaults to the env-configured ispy-pii
+                # masker; downstream consumers can register their own
+                # callable via mirix.observability.set_langfuse_mask.
+                mask=get_langfuse_mask(),
             )
 
             _langfuse_enabled = True
