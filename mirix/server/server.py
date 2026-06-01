@@ -324,8 +324,13 @@ if not USE_PGLITE and settings.mirix_pg_uri_no_default:
         _ssl_ctx.verify_mode = _ssl_mod.CERT_NONE
         _connect_args["ssl"] = _ssl_ctx
 
-    engine = create_async_engine(
-        _pg_uri,
+    # Capture the engine-build parameters so the engine can be rebuilt on a
+    # different event loop later via reset_engine_for_current_loop(). asyncpg
+    # connections are bound to the loop that created them, so a pool created at
+    # import time cannot be safely driven from a separate event loop; callers
+    # running on their own loop rebind the pool before issuing queries.
+    _ENGINE_URI = _pg_uri
+    _ENGINE_KWARGS = dict(
         pool_size=settings.pg_pool_size,
         max_overflow=settings.pg_max_overflow,
         pool_timeout=settings.pg_pool_timeout,
@@ -333,6 +338,8 @@ if not USE_PGLITE and settings.mirix_pg_uri_no_default:
         echo=settings.pg_echo,
         connect_args=_connect_args,
     )
+
+    engine = create_async_engine(_ENGINE_URI, **_ENGINE_KWARGS)
 elif not USE_PGLITE:
     # TODO: don't rely on config storage
     sqlite_db_path = os.path.join(config.recall_storage_path, "sqlite.db")
@@ -341,8 +348,8 @@ elif not USE_PGLITE:
     logger.debug("Connection String: sqlite+aiosqlite:///%s", sqlite_db_path)
 
     # Async engine for SQLite (tables created in lifespan via ensure_tables_created)
-    engine = create_async_engine(
-        f"sqlite+aiosqlite:///{sqlite_db_path}",
+    _ENGINE_URI = f"sqlite+aiosqlite:///{sqlite_db_path}"
+    _ENGINE_KWARGS = dict(
         pool_size=20,
         max_overflow=30,
         pool_timeout=30,
@@ -350,6 +357,7 @@ elif not USE_PGLITE:
         connect_args={"timeout": 30},
         echo=False,
     )
+    engine = create_async_engine(_ENGINE_URI, **_ENGINE_KWARGS)
 
 # Async session and db context for non-PGlite (PostgreSQL and SQLite)
 if not USE_PGLITE:
@@ -360,6 +368,45 @@ if not USE_PGLITE:
         autoflush=False,
         expire_on_commit=False,
     )
+
+    async def reset_engine_for_current_loop() -> None:
+        """Rebuild the async engine and session-maker bound to the currently
+        running event loop, disposing the previous engine.
+
+        asyncpg connections are bound to the event loop that created them. The
+        module-level engine is created at import time, on whichever loop is
+        active then (e.g. the web server's loop). A workload that processes
+        requests on a different event loop than the import-time one must call
+        this from inside its own loop so the connection pool belongs to the
+        loop that drives it.
+
+        Without this, coroutines on the processing loop can concurrently drive
+        connections bound to a different loop, which asyncpg rejects with
+        "another operation is in progress" (and which can also surface as a
+        SQLAlchemy MissingGreenlet error).
+
+        Idempotent for a given loop; await once during the workload's
+        initialization, from within the target loop.
+        """
+        global engine, AsyncSessionLocal
+        old_engine = engine
+        new_engine = create_async_engine(_ENGINE_URI, **_ENGINE_KWARGS)
+        AsyncSessionLocal = async_sessionmaker(
+            bind=new_engine,
+            class_=AsyncSession,
+            autocommit=False,
+            autoflush=False,
+            expire_on_commit=False,
+        )
+        engine = new_engine
+        # The previous engine's pool is bound to a different loop; close its
+        # connections best-effort and never let cleanup raise.
+        try:
+            await old_engine.dispose()
+        except Exception as exc:  # pragma: no cover - best effort
+            logger.warning("reset_engine_for_current_loop: old engine dispose failed: %s", exc)
+        logger.info("Async DB engine rebound to current event loop")
+
 
 # ========================================================================
 # REDIS INITIALIZATION (Module Level - Runs on Import)
