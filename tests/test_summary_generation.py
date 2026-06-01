@@ -566,6 +566,24 @@ class TestClientProvidedSummary:
         assert agent.source_summary_source == "client"
 
 
+class TestSummaryPromptProfanity:
+    """The summarizer prompts must instruct the LLM to remove profanity.
+
+    Profanity in generated summaries trips the LLM provider's content-moderation
+    guardrail, which returns a non-retryable 422.
+    """
+
+    def test_source_message_prompt_instructs_profanity_removal(self):
+        from mirix.prompts.gpt_summarize_source_messages import SYSTEM
+
+        assert "profanity" in SYSTEM.lower()
+
+    def test_internal_prompt_instructs_profanity_removal(self):
+        from mirix.prompts.gpt_summarize_internal import SYSTEM
+
+        assert "profanity" in SYSTEM.lower()
+
+
 class TestUpdateSummaryManager:
     """Test the MemorySourceManager.update_summary method."""
 
