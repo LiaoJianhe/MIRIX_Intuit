@@ -106,7 +106,7 @@ async def _create_client_and_key(client_id: str, org_id: str, org_name: Optional
     client_mgr = ClientManager()
     await _ensure_org(org_mgr, org_id, org_name or TEST_ORG_NAME)
     try:
-        await client_mgr.get_client_by_id(client_id)
+        await client_mgr.get_client_by_id(client_id, organization_id=org_id)
     except Exception:
         await client_mgr.create_client(
             PydanticClient(

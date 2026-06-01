@@ -1,6 +1,6 @@
 from typing import TYPE_CHECKING, List, Optional, Type
 
-from sqlalchemy import JSON, BigInteger, Index, Integer, UniqueConstraint, event, or_, select, text
+from sqlalchemy import JSON, BigInteger, ForeignKeyConstraint, Index, Integer, UniqueConstraint, event, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import (
     Mapped,
@@ -30,6 +30,10 @@ class Block(OrganizationMixin, UserMixin, SqlalchemyBase):
         filter(
             None,
             [
+                ForeignKeyConstraint(
+                    ["organization_id", "user_id"],
+                    ["users.organization_id", "users.id"],
+                ),
                 UniqueConstraint("id", "label", name="unique_block_id_label"),
                 Index("idx_block_id_label", "id", "label", unique=True),
                 # GIN index on filter_tags for JSONB containment queries
@@ -78,7 +82,15 @@ class Block(OrganizationMixin, UserMixin, SqlalchemyBase):
         """
         Relationship to the User that owns this block.
         """
-        return relationship("User", lazy="selectin")
+        return relationship(
+            "User",
+            lazy="selectin",
+            primaryjoin=(
+                "and_(foreign(%s.organization_id) == User.organization_id, "
+                "foreign(%s.user_id) == User.id)" % (cls.__name__, cls.__name__)
+            ),
+            viewonly=True,
+        )
 
     @classmethod
     async def list_by_scopes(

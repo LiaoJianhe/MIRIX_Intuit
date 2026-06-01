@@ -116,7 +116,10 @@ class TestMemorySourceManagerDelegation:
                 external_id="ext-1",
             )
             mock_provider.find_using_named_query.assert_awaited_once()
-            assert out.id == "src-aaaaaaaa"
+            # On conflict-with-existing-row the manager signals dedup by returning
+            # None (matching the PG ON CONFLICT DO NOTHING path) so the caller
+            # short-circuits agent processing instead of re-running the pipeline.
+            assert out is None
 
     @pytest.mark.asyncio
     async def test_get_by_id_delegates_to_provider(self):

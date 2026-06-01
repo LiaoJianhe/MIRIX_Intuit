@@ -697,11 +697,11 @@ class TestUserManagerDelegation:
         with patch("mirix.database.cache_provider.get_cache_provider", return_value=None):
             with patch("mirix.database.relational_provider.get_relational_provider", return_value=mock_provider):
                 mgr = _user_mgr()
-                out = await mgr.get_user_by_id("user-1")
+                out = await mgr.get_user_by_id("user-1", organization_id="org-1")
                 args, kwargs = mock_provider.find_using_named_query.call_args
                 assert args[0] == "users"
                 assert args[1] == "user_manager.get_user_by_id"
-                assert kwargs["params"] == {"id": "user-1"}
+                assert kwargs["params"] == {"id": "user-1", "organizationId": "org-1"}
                 assert out.id == "user-1"
                 assert out.name == "test-user"
 

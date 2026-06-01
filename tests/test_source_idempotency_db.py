@@ -35,7 +35,7 @@ async def _provision_org_client_and_user():
 
     user_mgr = UserManager()
     try:
-        await user_mgr.get_user_by_id(TEST_USER_ID)
+        await user_mgr.get_user_by_id(TEST_USER_ID, organization_id=TEST_ORG_ID)
     except Exception:
         await user_mgr.create_user(
             PydanticUser(
@@ -58,7 +58,7 @@ async def _get_actor():
     from mirix.services.client_manager import ClientManager
 
     client_mgr = ClientManager()
-    return await client_mgr.get_client_by_id(TEST_CLIENT_ID)
+    return await client_mgr.get_client_by_id(TEST_CLIENT_ID, organization_id=TEST_ORG_ID)
 
 
 async def test_duplicate_external_id_silently_skipped(manager):

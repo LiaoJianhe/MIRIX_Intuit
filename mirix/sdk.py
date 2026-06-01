@@ -287,7 +287,7 @@ class Mirix:
                     "messages_deleted": messages_count,
                 }
             else:
-                target_user = await self._client.server.user_manager.get_user_by_id(user_id)
+                target_user = await self._client.server.user_manager.get_user_by_id(user_id, organization_id=self._client.client.organization_id)
                 if not target_user:
                     return {
                         "success": False,
@@ -547,7 +547,7 @@ class Mirix:
         try:
             # Find the target user
             if user_id:
-                target_user = await self._client.server.user_manager.get_user_by_id(user_id)
+                target_user = await self._client.server.user_manager.get_user_by_id(user_id, organization_id=self._client.client.organization_id)
                 if not target_user:
                     return {
                         "success": False,
@@ -834,7 +834,7 @@ class Mirix:
         try:
             # If user_id is provided, get the specific user
             if user_id:
-                target_user = await self._client.server.user_manager.get_user_by_id(user_id)
+                target_user = await self._client.server.user_manager.get_user_by_id(user_id, organization_id=self._client.client.organization_id)
                 if not target_user:
                     return {
                         "success": False,

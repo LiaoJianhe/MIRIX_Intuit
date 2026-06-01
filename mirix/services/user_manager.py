@@ -40,10 +40,17 @@ class UserManager:
             if org is None:
                 raise ValueError(f"No organization with {org_id} exists in the organization table.")
 
-            # Return existing admin user if already present
-            existing = await provider.read("users", self.ADMIN_USER_ID)
-            if existing:
-                return PydanticUser(**existing)
+            # Return existing admin user if already present *in this org*.
+            # Identity is (organization_id, id); a global lookup would return
+            # another org's admin (first-write-wins across orgs).
+            existing_rows = await provider.find_using_named_query(
+                "users",
+                "user_manager.get_user_by_id",
+                params={"id": self.ADMIN_USER_ID, "organizationId": org_id},
+                page_size=1,
+            )
+            if existing_rows:
+                return PydanticUser(**existing_rows[0])
 
             result = await provider.create(
                 "users",
@@ -65,7 +72,9 @@ class UserManager:
                 raise ValueError(f"No organization with {org_id} exists in the organization table.") from None
 
             try:
-                user = await UserModel.read(db_session=session, identifier=self.ADMIN_USER_ID)
+                user = await UserModel.read(
+                    db_session=session, identifier=self.ADMIN_USER_ID, organization_id=org_id
+                )
             except NoResultFound:
                 user = UserModel(
                     id=self.ADMIN_USER_ID,
@@ -498,22 +507,28 @@ class UserManager:
             raise
 
     @enforce_types
-    async def get_user_by_id(self, user_id: str) -> PydanticUser:
-        """Fetch a user by ID (with cache - Redis or Cache provider)."""
+    async def get_user_by_id(self, user_id: str, *, organization_id: str) -> PydanticUser:
+        """Fetch a user by (organization_id, id) (with cache - Redis or Cache provider).
+
+        Identity is (organization_id, id), not id alone. A lookup whose org does
+        not match the stored row raises NoResultFound — cross-org reads are not
+        allowed.
+        """
         from mirix.log import get_logger
 
         logger = get_logger(__name__)
         cache_provider = None
+        cache_key = None
         try:
             from mirix.database.cache_provider import get_cache_provider
 
             cache_provider = get_cache_provider()
 
             if cache_provider:
-                cache_key = f"{cache_provider.USER_PREFIX}{user_id}"
+                cache_key = f"{cache_provider.USER_PREFIX}{organization_id}:{user_id}"
                 cached_data = await cache_provider.get_hash(cache_key)
                 if cached_data:
-                    logger.debug("Cache HIT for user %s", user_id)
+                    logger.debug("Cache HIT for user %s in org %s", user_id, organization_id)
                     return PydanticUser(**cached_data)
         except Exception as e:
             logger.warning("Cache read failed for user %s: %s", user_id, e)
@@ -525,17 +540,16 @@ class UserManager:
             rows = await provider.find_using_named_query(
                 "users",
                 "user_manager.get_user_by_id",
-                params={"id": user_id},
+                params={"id": user_id, "organizationId": organization_id},
                 page_size=1,
             )
             if not rows:
-                raise NoResultFound(f"User {user_id} not found")
+                raise NoResultFound(f"User {user_id} not found in organization {organization_id}")
             pydantic_user = PydanticUser(**rows[0])
             try:
                 if cache_provider:
                     from mirix.settings import settings
 
-                    cache_key = f"{cache_provider.USER_PREFIX}{user_id}"
                     data = pydantic_user.model_dump(mode="json")
                     await cache_provider.set_hash(cache_key, data, ttl=settings.redis_ttl_users)
             except Exception as e:
@@ -543,35 +557,39 @@ class UserManager:
             return pydantic_user
 
         async with self.session_maker() as session:
-            user = await UserModel.read(db_session=session, identifier=user_id)
+            user = await UserModel.read(db_session=session, identifier=user_id, organization_id=organization_id)
             pydantic_user = user.to_pydantic()
 
             try:
                 if cache_provider:
                     from mirix.settings import settings
 
-                    cache_key = f"{cache_provider.USER_PREFIX}{user_id}"
                     data = pydantic_user.model_dump(mode="json")
                     await cache_provider.set_hash(cache_key, data, ttl=settings.redis_ttl_users)
-                    logger.debug("Populated cache for user %s", user_id)
+                    logger.debug("Populated cache for user %s in org %s", user_id, organization_id)
             except Exception as e:
                 logger.warning("Failed to populate cache for user %s: %s", user_id, e)
 
             return pydantic_user
 
     @enforce_types
-    async def get_admin_user(self) -> PydanticUser:
-        """Fetch the admin user, creating it if it doesn't exist."""
+    async def get_admin_user(self, org_id: str = OrganizationManager.DEFAULT_ORG_ID) -> PydanticUser:
+        """Fetch the admin user for an organization, creating it if it doesn't exist.
+
+        The admin user is a well-known name (ADMIN_USER_ID) *within* an org, not a
+        global singleton — each org has its own admin-user row.
+        """
         try:
-            return await self.get_user_by_id(self.ADMIN_USER_ID)
+            return await self.get_user_by_id(self.ADMIN_USER_ID, organization_id=org_id)
         except NoResultFound:
-            # Admin user doesn't exist, create it
-            # First ensure the default organization exists
+            # Admin user doesn't exist for this org, create it.
+            # First ensure the organization exists.
             from mirix.services.organization_manager import OrganizationManager
 
             org_mgr = OrganizationManager()
-            await org_mgr.get_default_organization()  # Auto-creates if missing
-            return await self.create_admin_user(org_id=OrganizationManager.DEFAULT_ORG_ID)
+            if org_id == OrganizationManager.DEFAULT_ORG_ID:
+                await org_mgr.get_default_organization()  # Auto-creates if missing
+            return await self.create_admin_user(org_id=org_id)
 
     @enforce_types
     async def get_or_create_org_default_user(self, org_id: str) -> PydanticUser:
@@ -648,7 +666,7 @@ class UserManager:
 
         try:
             # Try to get by ID first (in case it exists with that ID)
-            return await self.get_user_by_id(default_user_id)
+            return await self.get_user_by_id(default_user_id, organization_id=org_id)
         except NoResultFound:
             pass
 
@@ -669,19 +687,23 @@ class UserManager:
             error_msg = str(create_err).lower()
             if "unique" in error_msg or "duplicate" in error_msg or "already exists" in error_msg:
                 logger.debug("Default user creation race condition, retrying lookup: %s", create_err)
-                return await self.get_user_by_id(default_user_id)
+                return await self.get_user_by_id(default_user_id, organization_id=org_id)
             raise
 
     @enforce_types
-    async def get_user_or_admin(self, user_id: Optional[str] = None):
+    async def get_user_or_admin(
+        self,
+        user_id: Optional[str] = None,
+        organization_id: str = OrganizationManager.DEFAULT_ORG_ID,
+    ):
         """Fetch the user or admin user."""
         if not user_id:
-            return await self.get_admin_user()
+            return await self.get_admin_user(organization_id)
 
         try:
-            return await self.get_user_by_id(user_id=user_id)
+            return await self.get_user_by_id(user_id=user_id, organization_id=organization_id)
         except NoResultFound:
-            return await self.get_admin_user()
+            return await self.get_admin_user(organization_id)
 
     @enforce_types
     async def list_users(

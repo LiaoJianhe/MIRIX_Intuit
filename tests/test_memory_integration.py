@@ -433,7 +433,7 @@ async def test_no_messages_persisted_with_zero_retention(msg_client):
     agent_map = await _get_sub_agent_ids(client)
 
     server = _get_server()
-    db_client = await server.client_manager.get_client_by_id(MSG_TEST_CLIENT_ID)
+    db_client = await server.client_manager.get_client_by_id(MSG_TEST_CLIENT_ID, organization_id=TEST_ORG_ID)
     assert (db_client.message_set_retention_count or 0) == 0, "Test client should default to retention=0"
 
     result = await client.add(
@@ -615,7 +615,7 @@ async def test_failed_processing_leaves_no_messages(msg_client):
         pytest.skip("Meta agent not found")
 
     server = _get_server()
-    db_client = await server.client_manager.get_client_by_id(MSG_TEST_CLIENT_ID)
+    db_client = await server.client_manager.get_client_by_id(MSG_TEST_CLIENT_ID, organization_id=TEST_ORG_ID)
     assert (db_client.message_set_retention_count or 0) == 0
 
     # ~2M chars / ~500k tokens — well beyond any model's context window

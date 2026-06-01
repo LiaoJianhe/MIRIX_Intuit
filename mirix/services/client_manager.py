@@ -38,10 +38,17 @@ class ClientManager:
             if org is None:
                 raise ValueError(f"No organization with {org_id} exists in the organization table.")
 
-            # Return existing default client if already present
-            existing = await provider.read("clients", self.DEFAULT_CLIENT_ID)
-            if existing:
-                return PydanticClient(**existing)
+            # Return existing default client if already present *in this org*.
+            # Identity is (organization_id, id); a global lookup would return
+            # another org's default client (first-write-wins across orgs).
+            existing_rows = await provider.find_using_named_query(
+                "clients",
+                "client_manager.get_client_by_id",
+                params={"id": self.DEFAULT_CLIENT_ID, "organizationId": org_id},
+                page_size=1,
+            )
+            if existing_rows:
+                return PydanticClient(**existing_rows[0])
 
             result = await provider.create(
                 "clients",
@@ -63,7 +70,9 @@ class ClientManager:
                 raise ValueError(f"No organization with {org_id} exists in the organization table.") from None
 
             try:
-                client = await ClientModel.read(db_session=session, identifier=self.DEFAULT_CLIENT_ID)
+                client = await ClientModel.read(
+                    db_session=session, identifier=self.DEFAULT_CLIENT_ID, organization_id=org_id
+                )
             except NoResultFound:
                 client = ClientModel(
                     id=self.DEFAULT_CLIENT_ID,
@@ -185,15 +194,12 @@ class ClientManager:
             if not keys:
                 return None
             client_id = keys[0].get("client_id", "")
-            client_rows = await provider.find_using_named_query(
-                "clients",
-                "client_manager.get_client_by_id",
-                params={"id": client_id},
-                page_size=1,
-            )
-            if not client_rows:
+            # The API-key hash is the authenticator and the org-bootstrap point:
+            # we don't know the client's org until we read the row. Read by PK
+            # (org-agnostic) rather than the org-scoped get_client_by_id NQ.
+            client_data = await provider.read("clients", client_id)
+            if not client_data:
                 return None
-            client_data = client_rows[0]
             # client_manager.get_client_by_api_key YAML already enforces
             # status = 'active' and is_deleted = false on the api_key row,
             # so no additional Python status check is needed here.
@@ -489,8 +495,8 @@ class ClientManager:
             logger.info("Soft deleted client %s via provider path", client_id)
             return
 
-        # Get client for actor parameter
-        client = await self.get_client_by_id(client_id)
+        # Get client for actor parameter (org-agnostic: we only have client_id here)
+        client = await self._read_client_unscoped(client_id)
 
         # Import memory managers
         from mirix.services.episodic_memory_manager import EpisodicMemoryManager
@@ -691,8 +697,8 @@ class ClientManager:
         knowledge_manager = KnowledgeVaultManager()
         message_manager = MessageManager()
 
-        # Get client as actor for manager methods
-        client = await self.get_client_by_id(client_id)
+        # Get client as actor for manager methods (org-agnostic: only client_id here)
+        client = await self._read_client_unscoped(client_id)
         if not client:
             logger.warning("Client %s not found", client_id)
             return
@@ -794,23 +800,51 @@ class ClientManager:
             logger.error("Failed to bulk delete memories for client %s: %s", client_id, e)
             raise
 
+    async def _read_client_unscoped(self, client_id: str) -> Optional[PydanticClient]:
+        """Read a client row by primary key, org-agnostic.
+
+        Used only for bootstrap/identity-root paths where the org is not yet
+        known (the client row itself defines the org): API-key authentication,
+        cascade-delete actor resolution, and the well-known default client.
+        Authorized callers that already know the org must use get_client_by_id.
+        """
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            client_data = await provider.read("clients", client_id)
+            return PydanticClient(**client_data) if client_data else None
+
+        async with self.session_maker() as session:
+            try:
+                client = await ClientModel.read(db_session=session, identifier=client_id)
+            except NoResultFound:
+                return None
+            return client.to_pydantic()
+
     @enforce_types
-    async def get_client_by_id(self, client_id: str) -> PydanticClient:
-        """Fetch a client by ID (with cache - Redis or Cache provider)."""
+    async def get_client_by_id(self, client_id: str, *, organization_id: str) -> PydanticClient:
+        """Fetch a client by (organization_id, id) (with cache - Redis or Cache provider).
+
+        Identity is (organization_id, id), not id alone. A lookup whose org does
+        not match the stored row raises NoResultFound — cross-org reads are not
+        allowed.
+        """
         from mirix.log import get_logger
 
         logger = get_logger(__name__)
         cache_provider = None
+        cache_key = None
         try:
             from mirix.database.cache_provider import get_cache_provider
 
             cache_provider = get_cache_provider()
 
             if cache_provider:
-                cache_key = f"{cache_provider.CLIENT_PREFIX}{client_id}"
+                cache_key = f"{cache_provider.CLIENT_PREFIX}{organization_id}:{client_id}"
                 cached_data = await cache_provider.get_hash(cache_key)
                 if cached_data:
-                    logger.debug("Cache HIT for client %s", client_id)
+                    logger.debug("Cache HIT for client %s in org %s", client_id, organization_id)
                     return PydanticClient(**cached_data)
         except Exception as e:
             logger.warning("Cache read failed for client %s: %s", client_id, e)
@@ -824,17 +858,16 @@ class ClientManager:
             rows = await provider.find_using_named_query(
                 "clients",
                 "client_manager.get_client_by_id",
-                params={"id": client_id},
+                params={"id": client_id, "organizationId": organization_id},
                 page_size=1,
             )
             if not rows:
-                raise _NRF(f"Client {client_id} not found")
+                raise _NRF(f"Client {client_id} not found in organization {organization_id}")
             pydantic_client = PydanticClient(**rows[0])
             try:
                 if cache_provider:
                     from mirix.settings import settings
 
-                    cache_key = f"{cache_provider.CLIENT_PREFIX}{client_id}"
                     data = pydantic_client.model_dump(mode="json")
                     await cache_provider.set_hash(cache_key, data, ttl=settings.redis_ttl_clients)
             except Exception as e:
@@ -842,33 +875,37 @@ class ClientManager:
             return pydantic_client
 
         async with self.session_maker() as session:
-            client = await ClientModel.read(db_session=session, identifier=client_id)
+            client = await ClientModel.read(db_session=session, identifier=client_id, organization_id=organization_id)
             pydantic_client = client.to_pydantic()
 
             try:
                 if cache_provider:
                     from mirix.settings import settings
 
-                    cache_key = f"{cache_provider.CLIENT_PREFIX}{client_id}"
                     data = pydantic_client.model_dump(mode="json")
                     await cache_provider.set_hash(cache_key, data, ttl=settings.redis_ttl_clients)
-                    logger.debug("Populated cache for client %s", client_id)
+                    logger.debug("Populated cache for client %s in org %s", client_id, organization_id)
             except Exception as e:
                 logger.warning("Failed to populate cache for client %s: %s", client_id, e)
 
             return pydantic_client
 
     @enforce_types
-    async def get_default_client(self) -> PydanticClient:
-        """Fetch the default client, creating it if it doesn't exist."""
+    async def get_default_client(self, org_id: str = OrganizationManager.DEFAULT_ORG_ID) -> PydanticClient:
+        """Fetch the default client for an organization, creating it if it doesn't exist.
+
+        The default client is a well-known name (DEFAULT_CLIENT_ID) *within* an org,
+        not a global singleton — each org has its own default-client row.
+        """
         try:
-            return await self.get_client_by_id(self.DEFAULT_CLIENT_ID)
+            return await self.get_client_by_id(self.DEFAULT_CLIENT_ID, organization_id=org_id)
         except NoResultFound:
             from mirix.services.organization_manager import OrganizationManager
 
             org_mgr = OrganizationManager()
-            await org_mgr.get_default_organization()
-            return await self.create_default_client(org_id=OrganizationManager.DEFAULT_ORG_ID)
+            if org_id == OrganizationManager.DEFAULT_ORG_ID:
+                await org_mgr.get_default_organization()
+            return await self.create_default_client(org_id=org_id)
 
     @enforce_types
     async def get_client_or_default(
@@ -887,23 +924,34 @@ class ClientManager:
             PydanticClient: The client object
         """
         if not client_id:
+            if organization_id:
+                return await self.get_default_client(org_id=organization_id)
             return await self.get_default_client()
 
-        try:
-            return await self.get_client_by_id(client_id=client_id)
-        except NoResultFound:
-            if organization_id:
-                return await self.create_client(
-                    PydanticClient(
-                        id=client_id,
-                        organization_id=organization_id,
-                        name=f"Local Client {client_id}",
-                        status="active",
-                        write_scope="local",
-                        read_scopes=["local"],
-                    )
+        # When the org is known, do an authorized (org-scoped) lookup. When it
+        # isn't, this is an identity-bootstrap by client_id — read unscoped.
+        if organization_id:
+            try:
+                return await self.get_client_by_id(client_id, organization_id=organization_id)
+            except NoResultFound:
+                existing = None
+        else:
+            existing = await self._read_client_unscoped(client_id)
+            if existing:
+                return existing
+
+        if organization_id:
+            return await self.create_client(
+                PydanticClient(
+                    id=client_id,
+                    organization_id=organization_id,
+                    name=f"Local Client {client_id}",
+                    status="active",
+                    write_scope="local",
+                    read_scopes=["local"],
                 )
-            return await self.get_default_client()
+            )
+        return await self.get_default_client()
 
     @enforce_types
     async def list_clients(

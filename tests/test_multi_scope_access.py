@@ -61,7 +61,7 @@ async def test_user(test_org):
     user_id = generate_test_id("multi-scope-user")
 
     try:
-        return await user_mgr.get_user_by_id(user_id)
+        return await user_mgr.get_user_by_id(user_id, organization_id=test_org.id)
     except Exception:
         return await user_mgr.create_user(
             PydanticUser(
@@ -99,7 +99,7 @@ async def read_only_client(test_org, client_manager):
     """
     client_id = generate_test_id("read-only-client")
     try:
-        return await client_manager.get_client_by_id(client_id)
+        return await client_manager.get_client_by_id(client_id, organization_id=test_org.id)
     except Exception:
         return await client_manager.create_client(
             PydanticClient(
@@ -121,7 +121,7 @@ async def shared_writer_client(test_org, client_manager):
     """
     client_id = generate_test_id("shared-writer-client")
     try:
-        return await client_manager.get_client_by_id(client_id)
+        return await client_manager.get_client_by_id(client_id, organization_id=test_org.id)
     except Exception:
         return await client_manager.create_client(
             PydanticClient(
@@ -143,7 +143,7 @@ async def private_client(test_org, client_manager):
     """
     client_id = generate_test_id("private-client")
     try:
-        return await client_manager.get_client_by_id(client_id)
+        return await client_manager.get_client_by_id(client_id, organization_id=test_org.id)
     except Exception:
         return await client_manager.create_client(
             PydanticClient(
@@ -163,7 +163,7 @@ async def multi_read_client(test_org, client_manager):
     """
     client_id = generate_test_id("multi-read-client")
     try:
-        return await client_manager.get_client_by_id(client_id)
+        return await client_manager.get_client_by_id(client_id, organization_id=test_org.id)
     except Exception:
         return await client_manager.create_client(
             PydanticClient(
@@ -183,7 +183,7 @@ async def no_access_client(test_org, client_manager):
     """
     client_id = generate_test_id("no-access-client")
     try:
-        return await client_manager.get_client_by_id(client_id)
+        return await client_manager.get_client_by_id(client_id, organization_id=test_org.id)
     except Exception:
         return await client_manager.create_client(
             PydanticClient(

@@ -679,7 +679,7 @@ async def list_agents(
     """List all agents for the authenticated user."""
     server = get_server()
     client_id, org_id = await get_client_and_org(x_client_id, x_org_id)
-    client = await server.client_manager.get_client_by_id(client_id)
+    client = await server.client_manager.get_client_by_id(client_id, organization_id=org_id)
 
     tags_list = tags.split(",") if tags else None
 
@@ -721,7 +721,7 @@ async def create_agent(
     """Create a new agent."""
     server = get_server()
     client_id, org_id = await get_client_and_org(x_client_id, x_org_id)
-    client = await server.client_manager.get_client_by_id(client_id)
+    client = await server.client_manager.get_client_by_id(client_id, organization_id=org_id)
 
     # Create memory blocks if provided
     if request.memory:
@@ -768,7 +768,7 @@ async def get_agent(
 
     server = get_server()
     client_id, org_id = await get_client_and_org(x_client_id, x_org_id)
-    client = await server.client_manager.get_client_by_id(client_id)
+    client = await server.client_manager.get_client_by_id(client_id, organization_id=org_id)
 
     try:
         return await server.agent_manager.get_agent_by_id(agent_id, client)
@@ -785,7 +785,7 @@ async def delete_agent(
     """Delete an agent."""
     server = get_server()
     client_id, org_id = await get_client_and_org(x_client_id, x_org_id)
-    client = await server.client_manager.get_client_by_id(client_id)
+    client = await server.client_manager.get_client_by_id(client_id, organization_id=org_id)
     await server.agent_manager.delete_agent(agent_id, client)
     return {"status": "success", "message": f"Agent {agent_id} deleted"}
 
@@ -820,7 +820,7 @@ async def update_agent(
     """Update an agent."""
     server = get_server()
     client_id, org_id = await get_client_and_org(x_client_id, x_org_id)
-    client = await server.client_manager.get_client_by_id(client_id)
+    client = await server.client_manager.get_client_by_id(client_id, organization_id=org_id)
 
     # TODO: Implement update_agent in server
     raise HTTPException(status_code=501, detail="Update agent not yet implemented")
@@ -864,7 +864,7 @@ async def update_agent_system_prompt_by_name(
     """
     server = get_server()
     client_id, org_id = await get_client_and_org(x_client_id, x_org_id)
-    client = await server.client_manager.get_client_by_id(client_id)
+    client = await server.client_manager.get_client_by_id(client_id, organization_id=org_id)
 
     # List all top-level agents for this client
     top_level_agents = await server.agent_manager.list_agents(actor=client, limit=1000)
@@ -971,7 +971,7 @@ async def update_agent_system_prompt(
     """
     server = get_server()
     client_id, org_id = await get_client_and_org(x_client_id, x_org_id)
-    client = await server.client_manager.get_client_by_id(client_id)
+    client = await server.client_manager.get_client_by_id(client_id, organization_id=org_id)
 
     updated_agent = await server.agent_manager.update_system_prompt(
         agent_id,
@@ -1029,7 +1029,7 @@ async def send_message_to_agent(
     """
     server = get_server()
     client_id, org_id = await get_client_and_org(x_client_id, x_org_id)
-    client = await server.client_manager.get_client_by_id(client_id)
+    client = await server.client_manager.get_client_by_id(client_id, organization_id=org_id)
 
     if request.block_filter_tags is not None and not isinstance(request.block_filter_tags, dict):
         raise HTTPException(status_code=400, detail="block_filter_tags must be a dict when provided")
@@ -1086,7 +1086,7 @@ async def list_tools(
     """List all tools."""
     server = get_server()
     client_id, org_id = await get_client_and_org(x_client_id, x_org_id)
-    client = await server.client_manager.get_client_by_id(client_id)
+    client = await server.client_manager.get_client_by_id(client_id, organization_id=org_id)
     return await server.tool_manager.list_tools(cursor=cursor, limit=limit, actor=client)
 
 
@@ -1099,7 +1099,7 @@ async def get_tool(
     """Get a tool by ID."""
     server = get_server()
     client_id, org_id = await get_client_and_org(x_client_id, x_org_id)
-    client = await server.client_manager.get_client_by_id(client_id)
+    client = await server.client_manager.get_client_by_id(client_id, organization_id=org_id)
     return await server.tool_manager.get_tool_by_id(tool_id, actor=client)
 
 
@@ -1112,7 +1112,7 @@ async def create_tool(
     """Create a new tool."""
     server = get_server()
     client_id, org_id = await get_client_and_org(x_client_id, x_org_id)
-    client = await server.client_manager.get_client_by_id(client_id)
+    client = await server.client_manager.get_client_by_id(client_id, organization_id=org_id)
     return await server.tool_manager.create_tool(tool, actor=client)
 
 
@@ -1125,7 +1125,7 @@ async def delete_tool(
     """Delete a tool."""
     server = get_server()
     client_id, org_id = await get_client_and_org(x_client_id, x_org_id)
-    client = await server.client_manager.get_client_by_id(client_id)
+    client = await server.client_manager.get_client_by_id(client_id, organization_id=org_id)
     await server.tool_manager.delete_tool_by_id(tool_id, actor=client)
     return {"status": "success", "message": f"Tool {tool_id} deleted"}
 
@@ -1144,7 +1144,7 @@ async def list_blocks(
     """List all blocks (filtered by client's read_scopes)."""
     server = get_server()
     client_id, org_id = await get_client_and_org(x_client_id, x_org_id)
-    client = await server.client_manager.get_client_by_id(client_id)
+    client = await server.client_manager.get_client_by_id(client_id, organization_id=org_id)
     user = await server.user_manager.get_admin_user()
     return await server.block_manager.get_blocks(
         user=user,
@@ -1163,7 +1163,7 @@ async def get_block(
     """Get a block by ID."""
     server = get_server()
     client_id, org_id = await get_client_and_org(x_client_id, x_org_id)
-    client = await server.client_manager.get_client_by_id(client_id)
+    client = await server.client_manager.get_client_by_id(client_id, organization_id=org_id)
     # Get admin user for block queries (blocks are user-scoped, not client-scoped)
     user = await server.user_manager.get_admin_user()
     return await server.block_manager.get_block_by_id(block_id, user=user)
@@ -1179,7 +1179,7 @@ async def create_block(
     """Create a block."""
     server = get_server()
     client_id, org_id = await get_client_and_org(x_client_id, x_org_id)
-    client = await server.client_manager.get_client_by_id(client_id)
+    client = await server.client_manager.get_client_by_id(client_id, organization_id=org_id)
     return await server.block_manager.create_or_update_block(block, actor=client, user=user)
 
 
@@ -1192,7 +1192,7 @@ async def delete_block(
     """Delete a block."""
     server = get_server()
     client_id, org_id = await get_client_and_org(x_client_id, x_org_id)
-    client = await server.client_manager.get_client_by_id(client_id)
+    client = await server.client_manager.get_client_by_id(client_id, organization_id=org_id)
     await server.block_manager.delete_block(block_id, actor=client)
     return {"status": "success", "message": f"Block {block_id} deleted"}
 
@@ -1322,8 +1322,9 @@ async def get_user(
 ):
     """Get a user by ID."""
     server = get_server()
+    _, org_id = await get_client_and_org(x_client_id, x_org_id)
     try:
-        return await server.user_manager.get_user_by_id(user_id)
+        return await server.user_manager.get_user_by_id(user_id, organization_id=org_id)
     except NoResultFound:
         raise HTTPException(status_code=404, detail=f"User {user_id} not found")
 
@@ -1371,7 +1372,7 @@ async def create_or_get_user(
 
     try:
         # Try to get existing user
-        user = await server.user_manager.get_user_by_id(user_id)
+        user = await server.user_manager.get_user_by_id(user_id, organization_id=org_id)
         if user:
             return user
     except Exception:
@@ -1533,7 +1534,7 @@ async def create_or_get_client(
 
     try:
         # Try to get existing client
-        client = await server.client_manager.get_client_by_id(client_id)
+        client = await server.client_manager.get_client_by_id(client_id, organization_id=org_id)
 
         if client:
             if fail_if_exists:
@@ -1600,7 +1601,7 @@ async def get_client(
     get_current_admin(authorization)
 
     server = get_server()
-    client = await server.client_manager.get_client_by_id(client_id)
+    client = await server.client_manager._read_client_unscoped(client_id)
 
     if not client:
         raise HTTPException(status_code=404, detail=f"Client {client_id} not found")
@@ -1746,7 +1747,7 @@ async def create_client_api_key(
     server = get_server()
 
     # Verify client exists
-    client = await server.client_manager.get_client_by_id(client_id)
+    client = await server.client_manager._read_client_unscoped(client_id)
     if not client:
         raise HTTPException(status_code=404, detail=f"Client {client_id} not found")
 
@@ -1802,7 +1803,7 @@ async def list_client_api_keys(
     server = get_server()
 
     # Verify client exists
-    client = await server.client_manager.get_client_by_id(client_id)
+    client = await server.client_manager._read_client_unscoped(client_id)
     if not client:
         raise HTTPException(status_code=404, detail=f"Client {client_id} not found")
 
@@ -1840,7 +1841,7 @@ async def delete_client_api_key(
     server = get_server()
 
     # Verify client exists
-    client = await server.client_manager.get_client_by_id(client_id)
+    client = await server.client_manager._read_client_unscoped(client_id)
     if not client:
         raise HTTPException(status_code=404, detail=f"Client {client_id} not found")
 
@@ -1881,7 +1882,7 @@ async def initialize_meta_agent(
     """
     server = get_server()
     client_id, org_id = await get_client_and_org(x_client_id, x_org_id)
-    client = await server.client_manager.get_client_by_id(client_id)
+    client = await server.client_manager.get_client_by_id(client_id, organization_id=org_id)
 
     # Read-only clients (no write_scope) don't create agents — return null
     if not client.write_scope:
@@ -2073,7 +2074,7 @@ async def add_memory(
     """
     server = get_server()
     client_id, org_id = await get_client_and_org(x_client_id, x_org_id)
-    client = await server.client_manager.get_client_by_id(client_id)
+    client = await server.client_manager.get_client_by_id(client_id, organization_id=org_id)
 
     # If client doesn't exist, create the default client
     if client is None:
@@ -2281,7 +2282,7 @@ async def retrieve_memories_by_keywords(
     from mirix.orm.errors import NoResultFound
 
     try:
-        user = await server.user_manager.get_user_by_id(user_id)
+        user = await server.user_manager.get_user_by_id(user_id, organization_id=client.organization_id)
         timezone_str = user.timezone
     except NoResultFound:
         logger.info(
@@ -2573,7 +2574,7 @@ async def retrieve_memory_with_conversation(
 
     server = get_server()
     client_id, org_id = await get_client_and_org(x_client_id, x_org_id)
-    client = await server.client_manager.get_client_by_id(client_id)
+    client = await server.client_manager.get_client_by_id(client_id, organization_id=org_id)
 
     # If user_id is not provided, use the admin user for this client
     user_id = request.user_id
@@ -2660,7 +2661,7 @@ async def retrieve_memory_with_conversation(
 
         # Get user's timezone for accurate "today" interpretation
         try:
-            user = await server.user_manager.get_user_by_id(user_id)
+            user = await server.user_manager.get_user_by_id(user_id, organization_id=org_id)
             import pytz
 
             user_tz = pytz.timezone(user.timezone)
@@ -2743,7 +2744,7 @@ async def retrieve_memory_with_topic(
     """
     server = get_server()
     client_id, org_id = await get_client_and_org(x_client_id, x_org_id)
-    client = await server.client_manager.get_client_by_id(client_id)
+    client = await server.client_manager.get_client_by_id(client_id, organization_id=org_id)
 
     # If user_id is not provided, use the admin user for this client
     if not user_id:
@@ -2998,8 +2999,8 @@ async def search_memory(
 
     # Fallback to use the client_id and org_id passed in the method parameters.
     if not client and x_client_id:
-        client_id = x_client_id
-        client = await server.client_manager.get_client_by_id(client_id)
+        client_id, org_id = await get_client_and_org(x_client_id, x_org_id)
+        client = await server.client_manager.get_client_by_id(client_id, organization_id=org_id)
     else:
         if not client:
             raise HTTPException(
@@ -3035,7 +3036,7 @@ async def search_memory(
     from mirix.orm.errors import NoResultFound
 
     try:
-        user = await server.user_manager.get_user_by_id(user_id)
+        user = await server.user_manager.get_user_by_id(user_id, organization_id=client.organization_id)
         timezone_str = user.timezone
     except NoResultFound:
         logger.info(
@@ -3592,7 +3593,7 @@ async def search_memory_all_users(
     if client_id:
         # Use the provided client_id - fetch its org_id
         effective_client_id = client_id
-        client = await server.client_manager.get_client_by_id(effective_client_id)
+        client = await server.client_manager._read_client_unscoped(effective_client_id)
         effective_org_id = client.organization_id  # Use CLIENT's org_id
         logger.info(
             "Using provided client_id=%s with its organization_id=%s",
@@ -3602,7 +3603,7 @@ async def search_memory_all_users(
     else:
         # Fall back to headers
         effective_client_id, header_org_id = await get_client_and_org(x_client_id, x_org_id)
-        client = await server.client_manager.get_client_by_id(effective_client_id)
+        client = await server.client_manager._read_client_unscoped(effective_client_id)
         # Use org_id from query param if provided, otherwise use header org_id
         effective_org_id = org_id or header_org_id
         logger.info(
@@ -4157,7 +4158,7 @@ async def list_memory_components(
         user_id = ClientAuthManager.get_admin_user_id_for_client(client.id)
         logger.debug("No user_id provided, using admin user: %s", user_id)
 
-    user = await server.user_manager.get_user_by_id(user_id)
+    user = await server.user_manager.get_user_by_id(user_id, organization_id=client.organization_id)
     if not user:
         raise HTTPException(status_code=404, detail=f"User {user_id} not found")
 
@@ -4397,7 +4398,7 @@ async def get_client_from_jwt_or_api_key(
             admin_payload = get_current_admin(authorization)
             # Get client from JWT payload (sub contains client_id)
             client_id = admin_payload["sub"]
-            client = await server.client_manager.get_client_by_id(client_id)
+            client = await server.client_manager._read_client_unscoped(client_id)
             if not client:
                 raise HTTPException(status_code=404, detail=f"Client {client_id} not found")
             return client, "jwt"
@@ -4410,7 +4411,7 @@ async def get_client_from_jwt_or_api_key(
         org_id = request.headers.get("x-org-id")
         if client_id:
             client_id, org_id = await get_client_and_org(client_id, org_id)
-            client = await server.client_manager.get_client_by_id(client_id)
+            client = await server.client_manager.get_client_by_id(client_id, organization_id=org_id)
             if not client:
                 raise HTTPException(status_code=404, detail=f"Client {client_id} not found")
             return client, "api_key"
@@ -4456,7 +4457,7 @@ async def update_episodic_memory(
         logger.debug("No user_id provided, using admin user: %s", user_id)
 
     # Get user
-    user = await server.user_manager.get_user_by_id(user_id)
+    user = await server.user_manager.get_user_by_id(user_id, organization_id=client.organization_id)
     if not user:
         raise HTTPException(status_code=404, detail=f"User {user_id} not found")
 
@@ -4537,7 +4538,7 @@ async def update_semantic_memory(
         logger.debug("No user_id provided, using admin user: %s", user_id)
 
     # Get user
-    user = await server.user_manager.get_user_by_id(user_id)
+    user = await server.user_manager.get_user_by_id(user_id, organization_id=client.organization_id)
     if not user:
         raise HTTPException(status_code=404, detail=f"User {user_id} not found")
 
@@ -4624,7 +4625,7 @@ async def update_procedural_memory(
         logger.debug("No user_id provided, using admin user: %s", user_id)
 
     # Get user
-    user = await server.user_manager.get_user_by_id(user_id)
+    user = await server.user_manager.get_user_by_id(user_id, organization_id=client.organization_id)
     if not user:
         raise HTTPException(status_code=404, detail=f"User {user_id} not found")
 
@@ -4720,7 +4721,7 @@ async def create_raw_memory(
 
     # Resolve client: use provided client or fetch from client_id
     if not client and client_id:
-        client = await server.client_manager.get_client_by_id(client_id)
+        client = await server.client_manager._read_client_unscoped(client_id)
     if not client:
         raise HTTPException(status_code=401, detail="Client or client_id required")
 
@@ -4815,7 +4816,7 @@ async def get_raw_memory(
 
     # Resolve client: use provided client or fetch from client_id
     if not client and client_id:
-        client = await server.client_manager.get_client_by_id(client_id)
+        client = await server.client_manager._read_client_unscoped(client_id)
     if not client:
         raise HTTPException(status_code=401, detail="Client or client_id required")
 
@@ -4824,7 +4825,7 @@ async def get_raw_memory(
         try:
             from mirix.orm.errors import NoResultFound
 
-            await server.user_manager.get_user_by_id(user_id)
+            await server.user_manager.get_user_by_id(user_id, organization_id=client.organization_id)
         except NoResultFound:
             raise HTTPException(status_code=404, detail=f"User {user_id} not found")
 
@@ -4886,7 +4887,7 @@ async def update_raw_memory(
 
     # Resolve client: use provided client or fetch from client_id
     if not client and client_id:
-        client = await server.client_manager.get_client_by_id(client_id)
+        client = await server.client_manager._read_client_unscoped(client_id)
     if not client:
         raise HTTPException(status_code=401, detail="Client or client_id required")
 
@@ -4895,7 +4896,7 @@ async def update_raw_memory(
         try:
             from mirix.orm.errors import NoResultFound
 
-            await server.user_manager.get_user_by_id(user_id)
+            await server.user_manager.get_user_by_id(user_id, organization_id=client.organization_id)
         except NoResultFound:
             raise HTTPException(status_code=404, detail=f"User {user_id} not found")
 
@@ -4976,7 +4977,7 @@ async def delete_raw_memory(
 
     # Resolve client: use provided client or fetch from client_id
     if not client and client_id:
-        client = await server.client_manager.get_client_by_id(client_id)
+        client = await server.client_manager._read_client_unscoped(client_id)
     if not client:
         raise HTTPException(status_code=401, detail="Client or client_id required")
 
@@ -4985,7 +4986,7 @@ async def delete_raw_memory(
         try:
             from mirix.orm.errors import NoResultFound
 
-            await server.user_manager.get_user_by_id(user_id)
+            await server.user_manager.get_user_by_id(user_id, organization_id=client.organization_id)
         except NoResultFound:
             raise HTTPException(status_code=404, detail=f"User {user_id} not found")
 
@@ -5040,7 +5041,7 @@ async def search_raw_memory(
 
     # Resolve client: use provided client or fetch from client_id
     if not client and client_id:
-        client = await server.client_manager.get_client_by_id(client_id)
+        client = await server.client_manager._read_client_unscoped(client_id)
     if not client:
         raise HTTPException(status_code=401, detail="Client or client_id required")
 
@@ -5049,7 +5050,7 @@ async def search_raw_memory(
         try:
             from mirix.orm.errors import NoResultFound
 
-            await server.user_manager.get_user_by_id(user_id)
+            await server.user_manager.get_user_by_id(user_id, organization_id=client.organization_id)
         except NoResultFound:
             raise HTTPException(status_code=404, detail=f"User {user_id} not found")
 
@@ -5207,7 +5208,7 @@ async def cleanup_raw_memories(
 
     # Resolve client: use provided client or fetch from client_id
     if not client and client_id:
-        client = await server.client_manager.get_client_by_id(client_id)
+        client = await server.client_manager._read_client_unscoped(client_id)
     if not client:
         raise HTTPException(status_code=401, detail="Client or client_id required")
 
@@ -5269,7 +5270,7 @@ async def update_resource_memory(
         logger.debug("No user_id provided, using admin user: %s", user_id)
 
     # Get user
-    user = await server.user_manager.get_user_by_id(user_id)
+    user = await server.user_manager.get_user_by_id(user_id, organization_id=client.organization_id)
     if not user:
         raise HTTPException(status_code=404, detail=f"User {user_id} not found")
 
@@ -5685,7 +5686,7 @@ async def get_memory_source(
     """
     server = get_server()
     client_id, org_id = await get_client_and_org(x_client_id, x_org_id, x_api_key)
-    client = await server.client_manager.get_client_by_id(client_id)
+    client = await server.client_manager.get_client_by_id(client_id, organization_id=org_id)
 
     from mirix.services.memory_source_manager import MemorySourceManager
 
@@ -5722,7 +5723,7 @@ async def get_memory_source_messages(
     """
     server = get_server()
     client_id, org_id = await get_client_and_org(x_client_id, x_org_id, x_api_key)
-    client = await server.client_manager.get_client_by_id(client_id)
+    client = await server.client_manager.get_client_by_id(client_id, organization_id=org_id)
 
     from mirix.services.memory_source_manager import MemorySourceManager
     from mirix.services.source_message_manager import SourceMessageManager

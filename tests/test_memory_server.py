@@ -67,7 +67,7 @@ async def user(server):
 
     # Try to get existing user
     try:
-        user = await server.user_manager.get_user_by_id(user_id)
+        user = await server.user_manager.get_user_by_id(user_id, organization_id=org_id)
         if user:
             return user
     except Exception:
@@ -102,7 +102,7 @@ async def client(server, user):
 
     # Try to get existing client
     try:
-        client = await server.client_manager.get_client_by_id(client_id)
+        client = await server.client_manager.get_client_by_id(client_id, organization_id=user.organization_id)
         if client:
             return client
     except Exception:

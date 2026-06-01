@@ -92,7 +92,7 @@ async def main():
     # Create client
     client_id = "test-client-embeddings"
     try:
-        client = await client_mgr.get_client_by_id(client_id)
+        client = await client_mgr.get_client_by_id(client_id, organization_id=org_id)
         print(f"[OK] Using existing client: {client_id}")
     except Exception:
         client = await client_mgr.create_client(
@@ -109,7 +109,7 @@ async def main():
     # Create user
     user_id = "test-user-embeddings"
     try:
-        user = await user_mgr.get_user_by_id(user_id)
+        user = await user_mgr.get_user_by_id(user_id, organization_id=org_id)
         print(f"[OK] Using existing user: {user_id}")
     except Exception:
         user = await user_mgr.create_user(

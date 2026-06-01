@@ -1,10 +1,9 @@
 from datetime import datetime
 from typing import TYPE_CHECKING, List, Optional
 
-from sqlalchemy import JSON
+from sqlalchemy import JSON, ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from mirix.orm.mixins import OrganizationMixin
 from mirix.orm.sqlalchemy_base import SqlalchemyBase
 from mirix.schemas.client import Client as PydanticClient
 
@@ -13,11 +12,21 @@ if TYPE_CHECKING:
     from mirix.orm.client_api_key import ClientApiKey
 
 
-class Client(SqlalchemyBase, OrganizationMixin):
-    """Client ORM class - represents a client application"""
+class Client(SqlalchemyBase):
+    """Client ORM class - represents a client application.
+
+    Identity is the composite (organization_id, id): the same id may recur in
+    different organizations (e.g. the well-known default client id), so id alone
+    is not unique. organization_id is part of the primary key rather than a plain
+    OrganizationMixin column.
+    """
 
     __tablename__ = "clients"
     __pydantic_model__ = PydanticClient
+
+    organization_id: Mapped[str] = mapped_column(
+        String, ForeignKey("organizations.id"), primary_key=True
+    )
 
     # Basic fields
     name: Mapped[str] = mapped_column(nullable=False, doc="The display name of the client application.")
@@ -46,5 +55,13 @@ class Client(SqlalchemyBase, OrganizationMixin):
     # Relationships
     organization: Mapped["Organization"] = relationship("Organization", back_populates="clients")
     api_keys: Mapped[List["ClientApiKey"]] = relationship(
-        "ClientApiKey", back_populates="client", cascade="all, delete-orphan", lazy="selectin"
+        "ClientApiKey",
+        back_populates="client",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        foreign_keys="[ClientApiKey.organization_id, ClientApiKey.client_id]",
+        primaryjoin=(
+            "and_(Client.organization_id == foreign(ClientApiKey.organization_id), "
+            "Client.id == foreign(ClientApiKey.client_id))"
+        ),
     )

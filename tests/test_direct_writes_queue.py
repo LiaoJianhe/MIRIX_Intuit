@@ -92,6 +92,7 @@ async def test_worker_extracts_direct_writes_from_queue_message():
     server = MagicMock()
     server.client_manager = MagicMock()
     server.client_manager.get_client_by_id = AsyncMock(return_value=fake_actor)
+    server.client_manager._read_client_unscoped = AsyncMock(return_value=fake_actor)
     server.send_messages = AsyncMock(return_value=None)
 
     worker = QueueWorker.__new__(QueueWorker)
@@ -101,10 +102,10 @@ async def test_worker_extracts_direct_writes_from_queue_message():
     import mirix.queue.worker as worker_module
 
     class _FakeUserManager:
-        async def get_user_by_id(self, _):
+        async def get_user_by_id(self, _user_id, *, organization_id=None):
             return fake_user
 
-        async def get_admin_user(self):
+        async def get_admin_user(self, org_id=None):
             return fake_user
 
     original_user_manager = worker_module.UserManager

@@ -171,7 +171,7 @@ class LocalClient(AbstractClient):
     async def _ensure_client(self) -> None:
         """Ensure user, organization, and client are set. Call after __init__."""
         if self.user is None:
-            self.user = await self.server.user_manager.get_user_or_admin(self.user_id)
+            self.user = await self.server.user_manager.get_user_or_admin(self.user_id, organization_id=self.org_id)
         if self.organization is None:
             self.organization = await self.server.get_organization_or_default(self.org_id)
         if self.client is None:
@@ -817,7 +817,7 @@ class LocalClient(AbstractClient):
         # Determine which user to use
         target_user = None
         if user_id is not None:
-            target_user = await self.server.user_manager.get_user_by_id(user_id)
+            target_user = await self.server.user_manager.get_user_by_id(user_id, organization_id=self.org_id)
             if target_user is None:
                 from mirix.log import get_logger
 
@@ -989,7 +989,7 @@ class LocalClient(AbstractClient):
         target_user = None
         if user_id is not None:
             # Get or create the specified user
-            target_user = await self.server.user_manager.get_user_by_id(user_id)
+            target_user = await self.server.user_manager.get_user_by_id(user_id, organization_id=self.org_id)
             if target_user is None:
                 # User doesn't exist, fall back to default
                 from mirix.log import get_logger

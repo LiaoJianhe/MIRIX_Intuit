@@ -81,7 +81,7 @@ class RawMemoryManager:
         # Auto-create user if it doesn't exist (users are organization-scoped, not client-scoped)
         user_manager = UserManager()
         try:
-            await user_manager.get_user_by_id(user_id)
+            await user_manager.get_user_by_id(user_id, organization_id=actor.organization_id)
         except NoResultFound:
             logger.info(
                 "User with id=%s not found, auto-creating with organization_id=%s",

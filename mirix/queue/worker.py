@@ -190,17 +190,20 @@ class QueueWorker:
             user_id = message.user_id if message.HasField("user_id") else None
 
             async def _resolve_actor_and_user():
-                actor = await server.client_manager.get_client_by_id(client_id)
+                # The client_id is the org anchor — it is resolved before the org
+                # is known, so this lookup is intentionally org-agnostic. The
+                # resolved actor's organization_id scopes every subsequent lookup.
+                actor = await server.client_manager._read_client_unscoped(client_id)
                 if not actor:
                     raise ValueError(f"Client with id={client_id} not found in database")
 
                 user_manager = UserManager()
                 if user_id:
                     try:
-                        user = await user_manager.get_user_by_id(user_id)
+                        user = await user_manager.get_user_by_id(user_id, organization_id=actor.organization_id)
                     except Exception:
                         logger.info(
-                            "User with id=%s not found, auto-creating with organization_id=%s",
+                            "User with id=%s not found in organization_id=%s, auto-creating",
                             user_id,
                             actor.organization_id,
                         )
@@ -229,9 +232,9 @@ class QueueWorker:
                                 user_id,
                                 create_error,
                             )
-                            user = await user_manager.get_admin_user()
+                            user = await user_manager.get_admin_user(actor.organization_id)
                     return actor, user
-                user = await user_manager.get_admin_user()
+                user = await user_manager.get_admin_user(actor.organization_id)
                 return actor, user
 
             actor, user = await _resolve_actor_and_user()

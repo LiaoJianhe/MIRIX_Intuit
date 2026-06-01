@@ -31,7 +31,7 @@ async def _provision_org_client_and_user():
 
     user_mgr = UserManager()
     try:
-        await user_mgr.get_user_by_id(TEST_USER_ID)
+        await user_mgr.get_user_by_id(TEST_USER_ID, organization_id=TEST_ORG_ID)
     except Exception:
         await user_mgr.create_user(
             PydanticUser(
@@ -47,13 +47,13 @@ async def _provision_org_client_and_user():
 async def _get_actor():
     from mirix.services.client_manager import ClientManager
 
-    return await ClientManager().get_client_by_id(TEST_CLIENT_ID)
+    return await ClientManager().get_client_by_id(TEST_CLIENT_ID, organization_id=TEST_ORG_ID)
 
 
 async def _get_user():
     from mirix.services.user_manager import UserManager
 
-    return await UserManager().get_user_by_id(TEST_USER_ID)
+    return await UserManager().get_user_by_id(TEST_USER_ID, organization_id=TEST_ORG_ID)
 
 
 # ---------------------------------------------------------------------------

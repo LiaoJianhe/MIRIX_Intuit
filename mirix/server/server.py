@@ -913,13 +913,15 @@ class AsyncServer(Server):
     async def user_message(
         self,
         user_id: str,
+        *,
+        organization_id: str,
         agent_id: str,
         message: Union[str, Message],
         timestamp: Optional[datetime] = None,
     ) -> MirixUsageStatistics:
         """Process an incoming user message and feed it through the Mirix agent"""
         try:
-            actor = await self.user_manager.get_user_by_id(user_id=user_id)
+            actor = await self.user_manager.get_user_by_id(user_id=user_id, organization_id=organization_id)
         except NoResultFound:
             raise ValueError(f"User user_id={user_id} does not exist")
 
@@ -965,13 +967,15 @@ class AsyncServer(Server):
     async def system_message(
         self,
         user_id: str,
+        *,
+        organization_id: str,
         agent_id: str,
         message: Union[str, Message],
         timestamp: Optional[datetime] = None,
     ) -> MirixUsageStatistics:
         """Process an incoming system message and feed it through the Mirix agent"""
         try:
-            actor = await self.user_manager.get_user_by_id(user_id=user_id)
+            actor = await self.user_manager.get_user_by_id(user_id=user_id, organization_id=organization_id)
         except NoResultFound:
             raise ValueError(f"User user_id={user_id} does not exist")
 

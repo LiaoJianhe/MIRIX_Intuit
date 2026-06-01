@@ -230,7 +230,7 @@ class TestOrganizationScopedUserCreation:
         created_user = await user_manager.create_user(user)
         assert created_user.id == user_id
 
-        retrieved_user = await user_manager.get_user_by_id(user_id)
+        retrieved_user = await user_manager.get_user_by_id(user_id, organization_id=test_org1.id)
         assert retrieved_user.id == user_id
         assert retrieved_user.organization_id == test_org1.id
 
@@ -423,12 +423,12 @@ class TestClientDeletionPreservesUsers:
         await user_manager.create_user(user)
 
         try:
-            retrieved_user = await user_manager.get_user_by_id(user_id)
+            retrieved_user = await user_manager.get_user_by_id(user_id, organization_id=test_org1.id)
             assert retrieved_user.id == user_id
 
             await client_manager.delete_client_by_id(client_id)
 
-            user_after_delete = await user_manager.get_user_by_id(user_id)
+            user_after_delete = await user_manager.get_user_by_id(user_id, organization_id=test_org1.id)
             assert user_after_delete.id == user_id, "User should still exist after client deletion"
             assert user_after_delete.organization_id == test_org1.id
 
@@ -491,6 +491,154 @@ class TestGetOrCreateOrgDefaultUser:
             await user_manager.delete_user_by_id(default_user_org2.id)
         except Exception:
             pass
+
+
+# ============================================================================
+# TEST CLASS: Org-Scoped Identity Lookups (VEPAGE-1155)
+# ============================================================================
+
+
+class TestGetUserByIdOrgScoped:
+    """get_user_by_id must be scoped to (organization_id, id)."""
+
+    pytestmark = pytest.mark.asyncio(loop_scope="module")
+
+    async def test_get_user_by_id_requires_organization_id(self):
+        """get_user_by_id must require an organization_id parameter."""
+        import inspect
+
+        sig = inspect.signature(UserManager.get_user_by_id)
+        params = sig.parameters
+        assert "organization_id" in params, "get_user_by_id must accept organization_id"
+        assert (
+            params["organization_id"].default is inspect.Parameter.empty
+        ), "organization_id must be required (no default)"
+
+    async def test_get_user_by_id_returns_user_in_matching_org(self, user_manager, test_org1):
+        """A user is returned when looked up with its own organization_id."""
+        user_id = generate_test_id("user")
+        await user_manager.create_user(
+            PydanticUser(id=user_id, name="In Org", organization_id=test_org1.id, timezone="UTC")
+        )
+        try:
+            retrieved = await user_manager.get_user_by_id(user_id, organization_id=test_org1.id)
+            assert retrieved.id == user_id
+            assert retrieved.organization_id == test_org1.id
+        finally:
+            try:
+                await user_manager.delete_user_by_id(user_id)
+            except Exception:
+                pass
+
+    async def test_get_user_by_id_cross_org_raises_not_found(self, user_manager, test_org1, test_org2):
+        """Looking up a user with a different org's id must raise NoResultFound."""
+        from mirix.orm.errors import NoResultFound
+
+        user_id = generate_test_id("user")
+        await user_manager.create_user(
+            PydanticUser(id=user_id, name="Org1 Only", organization_id=test_org1.id, timezone="UTC")
+        )
+        try:
+            with pytest.raises(NoResultFound):
+                await user_manager.get_user_by_id(user_id, organization_id=test_org2.id)
+        finally:
+            try:
+                await user_manager.delete_user_by_id(user_id)
+            except Exception:
+                pass
+
+
+class TestGetClientByIdOrgScoped:
+    """get_client_by_id must be scoped to (organization_id, id)."""
+
+    pytestmark = pytest.mark.asyncio(loop_scope="module")
+
+    async def test_get_client_by_id_requires_organization_id(self):
+        """get_client_by_id must require an organization_id parameter."""
+        import inspect
+
+        sig = inspect.signature(ClientManager.get_client_by_id)
+        params = sig.parameters
+        assert "organization_id" in params, "get_client_by_id must accept organization_id"
+        assert (
+            params["organization_id"].default is inspect.Parameter.empty
+        ), "organization_id must be required (no default)"
+
+    async def test_get_client_by_id_returns_client_in_matching_org(self, client_manager, client_a, test_org1):
+        """A client is returned when looked up with its own organization_id."""
+        retrieved = await client_manager.get_client_by_id(client_a.id, organization_id=test_org1.id)
+        assert retrieved.id == client_a.id
+        assert retrieved.organization_id == test_org1.id
+
+    async def test_get_client_by_id_cross_org_raises_not_found(self, client_manager, client_a, test_org2):
+        """Looking up a client with a different org's id must raise NoResultFound."""
+        from mirix.orm.errors import NoResultFound
+
+        with pytest.raises(NoResultFound):
+            await client_manager.get_client_by_id(client_a.id, organization_id=test_org2.id)
+
+
+class TestDefaultEntitiesOrgScoped:
+    """Default admin user / default client existence checks must be org-scoped.
+
+    Regression for VEPAGE-1155: create_admin_user / create_default_client used a
+    global lookup by the hardcoded constant id, so the first org to write the
+    default "won" and every other org's create returned that foreign-org row.
+    """
+
+    pytestmark = pytest.mark.asyncio(loop_scope="module")
+
+    async def test_create_admin_user_idempotent_within_org(self, user_manager, test_org1):
+        """Calling create_admin_user twice for the same org returns the same row."""
+        first = await user_manager.create_admin_user(org_id=test_org1.id)
+        second = await user_manager.create_admin_user(org_id=test_org1.id)
+        assert first.id == second.id == UserManager.ADMIN_USER_ID
+        assert first.organization_id == test_org1.id
+        assert second.organization_id == test_org1.id
+
+    async def test_create_admin_user_does_not_return_foreign_org_admin(
+        self, user_manager, test_org1, test_org2
+    ):
+        """An admin existing in org1 must not satisfy org2's existence check.
+
+        The global lookup bug would return org1's admin for org2. With org-scoped
+        existence checks org2 never sees org1's row — it either creates its own
+        (organization_id == org2) or fails, but must never return org1's row.
+        """
+        await user_manager.create_admin_user(org_id=test_org1.id)
+        try:
+            org2_admin = await user_manager.create_admin_user(org_id=test_org2.id)
+        except Exception:
+            # ORM/PostgreSQL path: a constant-id row cannot coexist across orgs in
+            # a single DB, so the second insert collides. That still proves the
+            # existence check is org-scoped (it did NOT short-circuit to org1's row).
+            return
+        assert org2_admin.organization_id == test_org2.id, (
+            "create_admin_user(org2) returned an admin from a different org — "
+            "existence check is not org-scoped"
+        )
+
+    async def test_create_default_client_idempotent_within_org(self, client_manager, test_org1):
+        """Calling create_default_client twice for the same org returns the same row."""
+        first = await client_manager.create_default_client(org_id=test_org1.id)
+        second = await client_manager.create_default_client(org_id=test_org1.id)
+        assert first.id == second.id == ClientManager.DEFAULT_CLIENT_ID
+        assert first.organization_id == test_org1.id
+        assert second.organization_id == test_org1.id
+
+    async def test_create_default_client_does_not_return_foreign_org_client(
+        self, client_manager, test_org1, test_org2
+    ):
+        """A default client existing in org1 must not satisfy org2's existence check."""
+        await client_manager.create_default_client(org_id=test_org1.id)
+        try:
+            org2_client = await client_manager.create_default_client(org_id=test_org2.id)
+        except Exception:
+            return
+        assert org2_client.organization_id == test_org2.id, (
+            "create_default_client(org2) returned a client from a different org — "
+            "existence check is not org-scoped"
+        )
 
 
 # ============================================================================

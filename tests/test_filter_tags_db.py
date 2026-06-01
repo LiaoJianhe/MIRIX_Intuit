@@ -58,7 +58,7 @@ async def test_actor():
 
     client_id = f"test-filter-tags-client-{uuid.uuid4().hex[:8]}"
     try:
-        return await client_mgr.get_client_by_id(client_id)
+        return await client_mgr.get_client_by_id(client_id, organization_id=org_id)
     except Exception:
         return await client_mgr.create_client(
             PydanticClient(
@@ -78,7 +78,7 @@ async def test_user(test_actor):
     user_mgr = UserManager()
     user_id = f"test-filter-tags-user-{uuid.uuid4().hex[:8]}"
     try:
-        return await user_mgr.get_user_by_id(user_id)
+        return await user_mgr.get_user_by_id(user_id, organization_id=test_actor.organization_id)
     except Exception:
         return await user_mgr.create_user(
             PydanticUser(

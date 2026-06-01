@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, String, Text, text
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKeyConstraint, Index, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from mirix.orm.mixins import OrganizationMixin, UserMixin
@@ -41,7 +41,6 @@ class MemorySource(SqlalchemyBase, OrganizationMixin, UserMixin):
 
     client_id: Mapped[str] = mapped_column(
         String,
-        ForeignKey("clients.id", ondelete="CASCADE"),
         nullable=False,
         doc="ID of the client application",
     )
@@ -108,6 +107,15 @@ class MemorySource(SqlalchemyBase, OrganizationMixin, UserMixin):
         filter(
             None,
             [
+                ForeignKeyConstraint(
+                    ["organization_id", "user_id"],
+                    ["users.organization_id", "users.id"],
+                ),
+                ForeignKeyConstraint(
+                    ["organization_id", "client_id"],
+                    ["clients.organization_id", "clients.id"],
+                    ondelete="CASCADE",
+                ),
                 # Partial unique index: external_id dedup (PostgreSQL only)
                 (
                     Index(

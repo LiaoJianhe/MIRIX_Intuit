@@ -436,13 +436,8 @@ class ClientAuthManager:
 
         provider = get_relational_provider()
         if provider is not None:
-            rows = await provider.find_using_named_query(
-                "clients",
-                "client_manager.get_client_by_id",
-                params={"id": client_id},
-                page_size=1,
-            )
-            return PydanticClient(**rows[0]) if rows else None
+            client_data = await provider.read("clients", client_id)
+            return PydanticClient(**client_data) if client_data else None
 
         async with self.session_maker() as session:
             try:
@@ -603,15 +598,9 @@ class ClientAuthManager:
 
         provider = get_relational_provider()
         if provider is not None:
-            rows = await provider.find_using_named_query(
-                "clients",
-                "client_manager.get_client_by_id",
-                params={"id": client_id},
-                page_size=1,
-            )
-            if not rows:
+            client_data = await provider.read("clients", client_id)
+            if not client_data:
                 return False
-            client_data = rows[0]
             password_hash = client_data.get("password_hash")
             if not password_hash:
                 logger.warning(

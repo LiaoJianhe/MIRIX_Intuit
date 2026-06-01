@@ -2,7 +2,7 @@ import datetime as dt
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import JSON, Column, DateTime, ForeignKey, Index, String, text
+from sqlalchemy import JSON, Column, DateTime, ForeignKey, ForeignKeyConstraint, Index, String, text
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column, relationship
 
 from mirix.constants import MAX_EMBEDDING_DIM
@@ -46,7 +46,6 @@ class EpisodicEvent(SqlalchemyBase, OrganizationMixin, UserMixin):
     # Foreign key to client (for access control and filtering)
     client_id: Mapped[Optional[str]] = mapped_column(
         String,
-        ForeignKey("clients.id", ondelete="CASCADE"),
         nullable=True,
         doc="ID of the client application that created this event",
     )
@@ -106,6 +105,15 @@ class EpisodicEvent(SqlalchemyBase, OrganizationMixin, UserMixin):
         filter(
             None,
             [
+                ForeignKeyConstraint(
+                    ["organization_id", "user_id"],
+                    ["users.organization_id", "users.id"],
+                ),
+                ForeignKeyConstraint(
+                    ["organization_id", "client_id"],
+                    ["clients.organization_id", "clients.id"],
+                    ondelete="CASCADE",
+                ),
                 # PostgreSQL full-text search indexes
                 (
                     Index(
@@ -203,7 +211,15 @@ class EpisodicEvent(SqlalchemyBase, OrganizationMixin, UserMixin):
         """
         Relationship to the User that owns this episodic event.
         """
-        return relationship("User", lazy="selectin")
+        return relationship(
+            "User",
+            lazy="selectin",
+            primaryjoin=(
+                "and_(foreign(%s.organization_id) == User.organization_id, "
+                "foreign(%s.user_id) == User.id)" % (cls.__name__, cls.__name__)
+            ),
+            viewonly=True,
+        )
 
     def to_pydantic(self) -> PydanticEpisodicEvent:
         """

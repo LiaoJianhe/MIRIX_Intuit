@@ -384,11 +384,11 @@ class TestUserManagerRedis:
         """Test user cache hit is fast."""
         # test_user fixture already creates the user
         # First get (ensures cache is warm)
-        await user_manager.get_user_by_id(test_user.id)
+        await user_manager.get_user_by_id(test_user.id, organization_id=test_user.organization_id)
 
         # Second get (cache hit)
         start_time = time.time()
-        cached_user = await user_manager.get_user_by_id(test_user.id)
+        cached_user = await user_manager.get_user_by_id(test_user.id, organization_id=test_user.organization_id)
         cache_time = time.time() - start_time
 
         assert cached_user.id == test_user.id
@@ -853,7 +853,7 @@ class TestMessageManagerRedis:
         )
 
         # Create message (async)
-        created_message = await message_manager.create_message(message_data, test_client)
+        created_message = await message_manager.create_message(message_data, test_client, user_id=test_user.id)
 
         # Verify in Redis Hash
         redis_key = f"{redis_client.MESSAGE_PREFIX}{created_message.id}"
@@ -878,7 +878,7 @@ class TestMessageManagerRedis:
             content=[TextContent(text="Test response")],
             agent_id=test_agent.id,
         )
-        created_message = await message_manager.create_message(message_data, test_client)
+        created_message = await message_manager.create_message(message_data, test_client, user_id=test_user.id)
 
         # Warm up cache
         await message_manager.get_message_by_id(created_message.id, test_client)
@@ -1250,7 +1250,7 @@ class TestRedisPerformance:
             content=[TextContent(text="Performance test message")],
             agent_id=test_agent.id,
         )
-        created_message = await message_manager.create_message(message_data, test_client)
+        created_message = await message_manager.create_message(message_data, test_client, user_id=test_user.id)
 
         # Measure with Redis (warm cache)
         await message_manager.get_message_by_id(created_message.id, test_client)
@@ -1303,7 +1303,7 @@ class TestRedisIntegrationEnd2End:
         message = PydanticMessage(
             id=generate_test_id("message"), role="user", content=[TextContent(text="Hello!")], agent_id=test_agent.id
         )
-        created_message = await message_manager.create_message(message, test_client)
+        created_message = await message_manager.create_message(message, test_client, user_id=test_user.id)
 
         # 3. Create episodic memory (JSON) (async)
         event = PydanticEpisodicEvent(

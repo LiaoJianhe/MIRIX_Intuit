@@ -71,6 +71,7 @@ def mock_server(sample_client):
     )
     server.client_manager = Mock()
     server.client_manager.get_client_by_id = AsyncMock(return_value=sample_client)
+    server.client_manager._read_client_unscoped = AsyncMock(return_value=sample_client)
 
     mock_user = Mock(id="admin", organization_id=sample_client.organization_id)
 
@@ -388,6 +389,71 @@ class TestQueueWorker:
 
         assert mock_server.send_messages.call_count >= 1
 
+    @pytest.mark.asyncio
+    async def test_worker_resolves_user_scoped_to_actor_org(self, sample_client, sample_queue_message):
+        """The worker must look up the user by (actor.organization_id, user_id).
+
+        Regression for VEPAGE-1155: a global get_user_by_id(user_id) returned a
+        stale row from a different org, contaminating the actor's org context.
+        """
+        sample_queue_message.user_id = "external-user-42"
+
+        server = Mock()
+        server.send_messages = AsyncMock(
+            return_value=Mock(model_dump=Mock(return_value={"completion_tokens": 1, "prompt_tokens": 1}))
+        )
+        server.client_manager = Mock()
+        server.client_manager._read_client_unscoped = AsyncMock(return_value=sample_client)
+        server.client_manager.get_client_by_id = AsyncMock(return_value=sample_client)
+
+        resolved_user = Mock(id="external-user-42", organization_id=sample_client.organization_id)
+
+        with patch("mirix.queue.worker.UserManager") as MockUM:
+            um = MockUM.return_value
+            um.get_user_by_id = AsyncMock(return_value=resolved_user)
+            um.get_admin_user = AsyncMock(return_value=resolved_user)
+            um.create_user = AsyncMock(return_value=resolved_user)
+
+            worker = QueueWorker(MemoryQueue(), server=server)
+            await worker._process_message_async(sample_queue_message)
+
+            um.get_user_by_id.assert_awaited_once()
+            _, kwargs = um.get_user_by_id.call_args
+            assert kwargs.get("organization_id") == sample_client.organization_id, (
+                "worker must pass the actor's organization_id to get_user_by_id"
+            )
+
+    @pytest.mark.asyncio
+    async def test_worker_auto_creates_missing_user_in_actor_org(self, sample_client, sample_queue_message):
+        """On a user miss, the worker creates the user under the actor's org."""
+        sample_queue_message.user_id = "external-user-99"
+
+        server = Mock()
+        server.send_messages = AsyncMock(
+            return_value=Mock(model_dump=Mock(return_value={"completion_tokens": 1, "prompt_tokens": 1}))
+        )
+        server.client_manager = Mock()
+        server.client_manager._read_client_unscoped = AsyncMock(return_value=sample_client)
+        server.client_manager.get_client_by_id = AsyncMock(return_value=sample_client)
+
+        from mirix.orm.errors import NoResultFound
+
+        created_user = Mock(id="external-user-99", organization_id=sample_client.organization_id)
+
+        with patch("mirix.queue.worker.UserManager") as MockUM:
+            um = MockUM.return_value
+            um.get_user_by_id = AsyncMock(side_effect=NoResultFound("not found"))
+            um.create_user = AsyncMock(return_value=created_user)
+            um.get_admin_user = AsyncMock(return_value=created_user)
+            um.DEFAULT_TIME_ZONE = "UTC"
+
+            worker = QueueWorker(MemoryQueue(), server=server)
+            await worker._process_message_async(sample_queue_message)
+
+            um.create_user.assert_awaited_once()
+            (pydantic_user,) = um.create_user.call_args.kwargs.values() if um.create_user.call_args.kwargs else um.create_user.call_args.args
+            assert pydantic_user.organization_id == sample_client.organization_id
+
 
 # ============================================================================
 # QueueManager Tests
@@ -628,6 +694,7 @@ class TestWorkerPartitionAssignment:
             s.send_messages = AsyncMock(side_effect=lambda **kwargs: processed[worker_key].append(kwargs["agent_id"]))
             s.client_manager = Mock()
             s.client_manager.get_client_by_id = AsyncMock(return_value=sample_client)
+            s.client_manager._read_client_unscoped = AsyncMock(return_value=sample_client)
             return s
 
         mock_server_0 = make_server("worker-0")

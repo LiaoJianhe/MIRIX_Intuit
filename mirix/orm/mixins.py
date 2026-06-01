@@ -25,11 +25,16 @@ class OrganizationMixin(Base):
 
 
 class UserMixin(Base):
-    """Mixin for models that belong to a user."""
+    """Mixin for models that belong to a user.
+
+    The FK to users is composite (organization_id, user_id) -> (users.organization_id,
+    users.id) and cannot be declared here because it needs the consumer's
+    organization_id column. Each consumer adds a ForeignKeyConstraint in __table_args__.
+    """
 
     __abstract__ = True
 
-    user_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"))
+    user_id: Mapped[str] = mapped_column(String)
 
 
 class AgentMixin(Base):

@@ -60,7 +60,7 @@ async def test_user(test_org):
     user_mgr = UserManager()
     user_id = _test_id("scoped-blk-user")
     try:
-        return await user_mgr.get_user_by_id(user_id)
+        return await user_mgr.get_user_by_id(user_id, organization_id=test_org.id)
     except Exception:
         return await user_mgr.create_user(
             PydanticUser(
@@ -78,7 +78,7 @@ async def test_user_b(test_org):
     user_mgr = UserManager()
     user_id = _test_id("scoped-blk-user-b")
     try:
-        return await user_mgr.get_user_by_id(user_id)
+        return await user_mgr.get_user_by_id(user_id, organization_id=test_org.id)
     except Exception:
         return await user_mgr.create_user(
             PydanticUser(
@@ -101,7 +101,7 @@ async def client_scope1(test_org):
     mgr = ClientManager()
     client_id = _test_id("client-scope1")
     try:
-        return await mgr.get_client_by_id(client_id)
+        return await mgr.get_client_by_id(client_id, organization_id=test_org.id)
     except Exception:
         return await mgr.create_client(
             PydanticClient(
@@ -119,7 +119,7 @@ async def client_scope2(test_org):
     mgr = ClientManager()
     client_id = _test_id("client-scope2")
     try:
-        return await mgr.get_client_by_id(client_id)
+        return await mgr.get_client_by_id(client_id, organization_id=test_org.id)
     except Exception:
         return await mgr.create_client(
             PydanticClient(
@@ -137,7 +137,7 @@ async def client_reader(test_org):
     mgr = ClientManager()
     client_id = _test_id("client-reader")
     try:
-        return await mgr.get_client_by_id(client_id)
+        return await mgr.get_client_by_id(client_id, organization_id=test_org.id)
     except Exception:
         return await mgr.create_client(
             PydanticClient(
@@ -896,7 +896,7 @@ class TestWriteScopeGuards:
             )
         )
         server = AsyncServer()
-        client = await server.client_manager.get_client_by_id(reader_client_id)
+        client = await server.client_manager.get_client_by_id(reader_client_id, organization_id=test_org.id)
         # Simulate the REST endpoint guard: if not client.write_scope, return None
         if not client.write_scope:
             result = None

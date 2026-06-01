@@ -67,7 +67,7 @@ async def test_actor():
     # Create client if it doesn't exist
     client_id = "test-client-123"
     try:
-        return await client_mgr.get_client_by_id(client_id)
+        return await client_mgr.get_client_by_id(client_id, organization_id=org_id)
     except Exception:
         return await client_mgr.create_client(
             PydanticClient(
@@ -90,7 +90,7 @@ async def test_user():
     # Create user if it doesn't exist
     user_id = "test-user-789"
     try:
-        return await user_mgr.get_user_by_id(user_id)
+        return await user_mgr.get_user_by_id(user_id, organization_id="test-org-456")
     except Exception:
         return await user_mgr.create_user(
             PydanticUser(
@@ -180,7 +180,7 @@ async def test_manager_create_raw_memory_auto_creates_user(raw_memory_manager, t
 
     # Verify user does NOT exist yet
     try:
-        await user_mgr.get_user_by_id(user_id)
+        await user_mgr.get_user_by_id(user_id, organization_id=test_actor.organization_id)
         # If we get here, user exists - delete it for test
         pytest.fail(f"User {user_id} should not exist for this test")
     except NoResultFound:
@@ -208,7 +208,7 @@ async def test_manager_create_raw_memory_auto_creates_user(raw_memory_manager, t
     assert result.context == memory_data.context
 
     # Verify user was auto-created
-    created_user = await user_mgr.get_user_by_id(user_id)
+    created_user = await user_mgr.get_user_by_id(user_id, organization_id=test_actor.organization_id)
     assert created_user.id == user_id
     assert created_user.organization_id == test_actor.organization_id
     assert created_user.name == user_id  # Default name is user_id
@@ -733,7 +733,7 @@ async def api_client(server_check, test_actor):
     user_mgr = UserManager()
     admin_user_id = ClientAuthManager.get_admin_user_id_for_client(test_actor.id)
     try:
-        await user_mgr.get_user_by_id(admin_user_id)
+        await user_mgr.get_user_by_id(admin_user_id, organization_id=test_actor.organization_id)
     except NoResultFound:
         # Create admin user if it doesn't exist
         await user_mgr.create_user(
@@ -2133,7 +2133,7 @@ async def test_actor_different_scope():
     # Create client with DIFFERENT scope
     client_id = "test-client-different-scope"
     try:
-        return await client_mgr.get_client_by_id(client_id)
+        return await client_mgr.get_client_by_id(client_id, organization_id=org_id)
     except Exception:
         return await client_mgr.create_client(
             PydanticClient(
@@ -2358,7 +2358,7 @@ async def test_user_different():
     # Create a different user in the same organization
     user_id = "test-user-different-456"
     try:
-        return await user_mgr.get_user_by_id(user_id)
+        return await user_mgr.get_user_by_id(user_id, organization_id="test-org-456")
     except Exception:
         return await user_mgr.create_user(
             PydanticUser(

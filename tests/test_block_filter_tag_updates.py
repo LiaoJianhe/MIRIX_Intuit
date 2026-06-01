@@ -446,7 +446,7 @@ class TestBlockManagerUpdateFilterTags:
         user_mgr = UserManager()
         user_id = _test_id("bft-user")
         try:
-            user = await user_mgr.get_user_by_id(user_id)
+            user = await user_mgr.get_user_by_id(user_id, organization_id=org.id)
         except Exception:
             user = await user_mgr.create_user(
                 PydanticUser(id=user_id, name="BFT User", organization_id=org.id, timezone="UTC")
