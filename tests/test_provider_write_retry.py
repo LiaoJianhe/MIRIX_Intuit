@@ -84,6 +84,16 @@ class TestIsConflict:
         )
         assert is_conflict(exc)
 
+    def test_ipsr_primary_key_violation_is_conflict(self):
+        # A primary-key collision (VEPAGE-1155) is a duplicate-key conflict, just
+        # like a uq_ unique-index violation. IPS-Relational names PK constraints
+        # ``<table>_pkey`` (e.g. users_pkey), so the uq_-only matcher missed it and
+        # the unhandled BadRequestError crashed admin-user creation on startup.
+        exc = _IpsrBadRequestError(
+            "Client data violates a database constraint:  users_pkey"
+        )
+        assert is_conflict(exc)
+
     def test_ipsr_column_shape_mismatch_is_not_conflict(self):
         # Same DATABASE_CONSTRAINT_VIOLATION error_code is also raised for a
         # column-shape mismatch, which is a permanent error, NOT a conflict. It
