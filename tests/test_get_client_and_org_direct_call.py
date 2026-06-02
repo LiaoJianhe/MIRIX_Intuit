@@ -8,7 +8,7 @@ the sentinel instead of the default org, later failing @enforce_types
 deep in the call (500 on save).
 
 get_client_and_org normalizes any non-str sentinel back to None so the
-default-org fallback fires. Regression for VEPAGE-1155.
+default-org fallback fires. Regression test for that normalization.
 """
 
 from unittest.mock import MagicMock, patch

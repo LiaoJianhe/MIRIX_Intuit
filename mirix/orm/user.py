@@ -14,10 +14,10 @@ class User(SqlalchemyBase, OrganizationMixin):
     """User ORM class — IMPORTANT: users are GLOBAL, not per-org. Read this.
 
     Identity is the ``id`` column alone (no composite ``(organization_id, id)``
-    PK). This matches IPS-Relational's id-only PK invariant — the platform does
-    not support composite primary keys, so any design relying on "same id under
-    different orgs as separate rows" cannot work there. PostgreSQL is kept in
-    lockstep (id-only PK here too) so both backends behave identically.
+    PK). Some relational backends MIRIX can run against do not support composite
+    primary keys, so any design relying on "same id under different orgs as
+    separate rows" cannot work there. PostgreSQL is kept in lockstep (id-only PK
+    here too) so every backend behaves identically.
 
     What this means in practice
     ---------------------------

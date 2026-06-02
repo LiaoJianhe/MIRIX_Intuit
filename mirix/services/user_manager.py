@@ -32,10 +32,10 @@ class UserManager:
     async def create_admin_user(self, org_id: str = OrganizationManager.DEFAULT_ORG_ID) -> PydanticUser:
         """Create the admin user (async).
 
-        ``ADMIN_USER_ID`` is a global constant; under Option 1 the admin row
-        is a shared stub across orgs (see ``UserManager.create_user``). The
-        pre-check is the fast path; the catch-and-swallow handles startup
-        races where another process won between our read and our create.
+        ``ADMIN_USER_ID`` is a global constant; the admin row is a shared stub
+        across orgs (see ``UserManager.create_user``). The pre-check is the fast
+        path; the catch-and-swallow handles startup races where another process
+        won between our read and our create.
         """
         from mirix.database.provider_write_retry import is_conflict
         from mirix.database.relational_provider import get_relational_provider
@@ -104,7 +104,7 @@ class UserManager:
     async def create_user(self, pydantic_user: PydanticUser) -> PydanticUser:
         """Create a new user, or return the existing row if id is already taken.
 
-        ``users.id`` is globally unique on both PG and IPS-R (id-only PK). The
+        ``users.id`` is globally unique (id-only PK on every backend). The
         ``users`` row is a shared stub across orgs — per-org isolation lives on
         child tables (memories, blocks, messages), not on this row. Two callers
         using the same user id under different orgs share this row and that is

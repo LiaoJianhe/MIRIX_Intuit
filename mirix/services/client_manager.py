@@ -17,20 +17,23 @@ from mirix.utils import enforce_types
 class ClientManager:
     """Manager class to handle business logic related to Clients.
 
-    Identity model: clients have an id-only PK on both PG and IPS-R. Named
-    clients get random UUIDs at creation time, so collisions are impossible
-    by construction. The "default client" is the only client whose id would
-    otherwise be a constant — to keep each org's default-client row isolated
-    we derive it per-org via :func:`default_client_id` rather than using a
-    global constant.
+    Identity model: clients have an id-only primary key (no composite
+    ``(organization_id, id)``). Named clients get random UUIDs at creation time,
+    so collisions are impossible by construction. The "default client" is the
+    only client whose id would otherwise be a constant — to keep each org's
+    default-client row isolated we derive it per-org via :func:`default_client_id`
+    rather than using a single global id.
     """
 
     DEFAULT_CLIENT_NAME = "default_client"
-    # Legacy global constant. Pre-Option-1 code used this as the singleton id
-    # across all orgs, which caused clients_pkey collisions in IPS-R (id-only
-    # PK). Modern callers should use ``default_client_id(org_id)`` instead.
-    # Retained for standalone-MIRIX fallback callers (agent.py, local_client.py,
-    # rest_api.py) where no org context is available.
+    # Global default-client id, used only where there is no organization in
+    # scope to derive a per-org id from:
+    #   * agent.py — Agent fallback when constructed without an actor; the
+    #     agent_state's organization_id is optional and absent in standalone use.
+    #   * local_client.py / rest_api.py — single-org standalone-MIRIX paths.
+    # When an org IS available, callers must use ``default_client_id(org_id)``
+    # so each org gets its own default-client row (a single shared id would
+    # collide on the id-only primary key the first time a second org bootstraps).
     DEFAULT_CLIENT_ID = "client-00000000-0000-4000-8000-000000000000"
 
     @classmethod
@@ -39,8 +42,8 @@ class ClientManager:
 
         Mirrors the ``user-default-{org_id}`` pattern used elsewhere. Required
         because clients carry per-org-meaningful state (write_scope,
-        read_scopes) and so must be isolated per org, but IPS-R's id-only PK
-        cannot enforce ``(organization_id, id)`` composite identity. Deriving
+        read_scopes) and so must be isolated per org, but the id-only primary
+        key cannot enforce ``(organization_id, id)`` composite identity. Deriving
         the id from the org makes each org's default client a distinct row
         without composite PKs.
         """

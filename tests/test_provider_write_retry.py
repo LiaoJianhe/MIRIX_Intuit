@@ -63,8 +63,8 @@ class TestIsConflict:
         assert not is_conflict(_StatusCodeError(400, "bad request"))
 
     def test_ipsr_unique_constraint_violation_is_conflict(self):
-        # Real IPS-Relational unique-index violation (VEPAGE-1165): BadRequestError
-        # with no status_code, ambiguous DATABASE_CONSTRAINT_VIOLATION error_code,
+        # Real provider unique-index violation: a BadRequestError with no
+        # status_code, an ambiguous DATABASE_CONSTRAINT_VIOLATION error_code,
         # and the constraint name in the message. Must classify as a conflict so
         # the caller dedups instead of crashing.
         exc = _IpsrBadRequestError(
@@ -85,7 +85,7 @@ class TestIsConflict:
         assert is_conflict(exc)
 
     def test_ipsr_primary_key_violation_is_conflict(self):
-        # Primary-key collision (VEPAGE-1155). IPS-R names PK constraints
+        # Primary-key collision. The provider names PK constraints
         # ``<table>_pkey`` (e.g. users_pkey), so the uq_-only matcher missed it
         # and unhandled BadRequestError crashed admin-user creation on startup.
         exc = _IpsrBadRequestError(
