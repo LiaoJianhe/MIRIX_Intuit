@@ -2031,7 +2031,7 @@ class Agent(BaseAgent):
                 if is_owning_kv_agent
                 else []
             )
-            merged_knowledge_vault, recent_kv_appended = self._merge_recent_into_relevant(
+            merged_knowledge_vault = self._merge_recent_into_relevant(
                 current_knowledge_vault, recent_knowledge_vault
             )
 
@@ -2043,7 +2043,6 @@ class Agent(BaseAgent):
                 "total_number_of_items": await self.knowledge_vault_manager.get_total_number_of_items(user=self.user),
                 "current_count": len(merged_knowledge_vault),
                 "text": knowledge_vault_memory.strip(),
-                "recent_appended": recent_kv_appended,
             }
 
         # Retrieve episodic memory
@@ -2113,7 +2112,7 @@ class Agent(BaseAgent):
                 if is_owning_agent
                 else []
             )
-            merged_resource_memory, recent_resource_appended = self._merge_recent_into_relevant(
+            merged_resource_memory = self._merge_recent_into_relevant(
                 current_resource_memory, recent_resource_memory_items
             )
             resource_memory = ""
@@ -2128,7 +2127,6 @@ class Agent(BaseAgent):
                 "total_number_of_items": await self.resource_memory_manager.get_total_number_of_items(user=self.user),
                 "current_count": len(merged_resource_memory),
                 "text": resource_memory,
-                "recent_appended": recent_resource_appended,
             }
 
         # Retrieve procedural memory
@@ -2153,7 +2151,7 @@ class Agent(BaseAgent):
                 if is_owning_agent
                 else []
             )
-            merged_procedural_memory, recent_procedural_appended = self._merge_recent_into_relevant(
+            merged_procedural_memory = self._merge_recent_into_relevant(
                 current_procedural_memory, recent_procedural_memory_items
             )
             procedural_memory = ""
@@ -2170,7 +2168,6 @@ class Agent(BaseAgent):
                 "total_number_of_items": await self.procedural_memory_manager.get_total_number_of_items(user=self.user),
                 "current_count": len(merged_procedural_memory),
                 "text": procedural_memory,
-                "recent_appended": recent_procedural_appended,
             }
 
         # Retrieve semantic memory
@@ -2195,7 +2192,7 @@ class Agent(BaseAgent):
                 if is_owning_agent
                 else []
             )
-            merged_semantic_memory, recent_semantic_appended = self._merge_recent_into_relevant(
+            merged_semantic_memory = self._merge_recent_into_relevant(
                 current_semantic_memory, recent_semantic_memory_items
             )
             semantic_memory = ""
@@ -2213,7 +2210,6 @@ class Agent(BaseAgent):
                 "total_number_of_items": await self.semantic_memory_manager.get_total_number_of_items(user=self.user),
                 "current_count": len(merged_semantic_memory),
                 "text": semantic_memory,
-                "recent_appended": recent_semantic_appended,
             }
 
         # Build the complete system prompt
@@ -2278,7 +2274,7 @@ These keywords have been used to retrieve relevant memories from the database.
         knowledge_vault_text = knowledge_vault["text"] if knowledge_vault else ""
         knowledge_vault_count = knowledge_vault["current_count"] if knowledge_vault else 0
         system_prompt += (
-            f"\n<knowledge_vault> ({knowledge_vault_count} out of {knowledge_vault_total} Items{self._recent_dedup_note(knowledge_vault)}):\n"
+            f"\n<knowledge_vault> ({knowledge_vault_count} out of {knowledge_vault_total} Items):\n"
             + (knowledge_vault_text if knowledge_vault_text else "Empty")
             + "\n</knowledge_vault>\n"
         )
@@ -2287,7 +2283,7 @@ These keywords have been used to retrieve relevant memories from the database.
         semantic_text = semantic_memory["text"] if semantic_memory else ""
         semantic_count = semantic_memory["current_count"] if semantic_memory else 0
         system_prompt += (
-            f"\n<semantic_memory> ({semantic_count} out of {semantic_total} Items{self._recent_dedup_note(semantic_memory)}):\n"
+            f"\n<semantic_memory> ({semantic_count} out of {semantic_total} Items):\n"
             + (semantic_text if semantic_text else "Empty")
             + "\n</semantic_memory>\n"
         )
@@ -2296,7 +2292,7 @@ These keywords have been used to retrieve relevant memories from the database.
         resource_text = resource_memory["text"] if resource_memory else ""
         resource_count = resource_memory["current_count"] if resource_memory else 0
         system_prompt += (
-            f"\n<resource_memory> ({resource_count} out of {resource_total} Items{self._recent_dedup_note(resource_memory)}):\n"
+            f"\n<resource_memory> ({resource_count} out of {resource_total} Items):\n"
             + (resource_text if resource_text else "Empty")
             + "\n</resource_memory>\n"
         )
@@ -2305,7 +2301,7 @@ These keywords have been used to retrieve relevant memories from the database.
         procedural_text = procedural_memory["text"] if procedural_memory else ""
         procedural_count = procedural_memory["current_count"] if procedural_memory else 0
         system_prompt += (
-            f"\n<procedural_memory> ({procedural_count} out of {procedural_total} Items{self._recent_dedup_note(procedural_memory)}):\n"
+            f"\n<procedural_memory> ({procedural_count} out of {procedural_total} Items):\n"
             + (procedural_text if procedural_text else "Empty")
             + "\n</procedural_memory>"
         )
@@ -2313,20 +2309,7 @@ These keywords have been used to retrieve relevant memories from the database.
         return system_prompt
 
     @staticmethod
-    def _recent_dedup_note(memory_bucket: Optional[dict]) -> str:
-        """Return an inline header clause when just-written rows were unioned
-        into the ranked list, so the dedup-deciding owning sub-agent knows some
-        entries may not be indexed yet and should be checked before creating
-        new ones. Returns empty string when no recent rows were appended.
-        """
-        if not memory_bucket:
-            return ""
-        if memory_bucket.get("recent_appended", 0) > 0:
-            return " — includes recently-written entries that may not be indexed yet; check for duplicates before creating new ones"
-        return ""
-
-    @staticmethod
-    def _merge_recent_into_relevant(relevant: List[Any], recent: List[Any]) -> Tuple[List[Any], int]:
+    def _merge_recent_into_relevant(relevant: List[Any], recent: List[Any]) -> List[Any]:
         """Union just-written ``recent`` rows into the ranked ``relevant`` list.
 
         Preserves the Search-provider ranking of ``relevant`` and appends only
@@ -2334,13 +2317,10 @@ These keywords have been used to retrieve relevant memories from the database.
         The appended rows are the just-written candidates the Search provider
         may not have indexed yet, so the dedup-deciding owning sub-agent sees
         them alongside the ranked results in a single list.
-
-        Returns the merged list and the number of recent-only rows appended
-        (used to decide whether to surface the dedup note in the prompt).
         """
         relevant_ids = {item.id for item in relevant}
         appended = [item for item in recent if item.id not in relevant_ids]
-        return relevant + appended, len(appended)
+        return relevant + appended
 
     async def extract_memory_for_system_prompt(self, message: str) -> str:
         """
