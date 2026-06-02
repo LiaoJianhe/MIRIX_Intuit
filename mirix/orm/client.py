@@ -15,17 +15,16 @@ if TYPE_CHECKING:
 class Client(SqlalchemyBase):
     """Client ORM class - represents a client application.
 
-    Identity is the composite (organization_id, id): the same id may recur in
-    different organizations (e.g. the well-known default client id), so id alone
-    is not unique. organization_id is part of the primary key rather than a plain
-    OrganizationMixin column.
+    Identity is the auto-managed ``id`` alone (matches IPS-Relational's id-only
+    PK invariant). The client row is essentially a stub — per-org data lives on
+    child tables that each carry their own ``organization_id`` for scoping.
     """
 
     __tablename__ = "clients"
     __pydantic_model__ = PydanticClient
 
     organization_id: Mapped[str] = mapped_column(
-        String, ForeignKey("organizations.id"), primary_key=True
+        String, ForeignKey("organizations.id"), nullable=False
     )
 
     # Basic fields

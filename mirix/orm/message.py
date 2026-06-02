@@ -1,7 +1,7 @@
 from typing import TYPE_CHECKING, List, Optional
 
-from sqlalchemy import JSON, ForeignKey, ForeignKeyConstraint, Index
-from sqlalchemy.orm import Mapped, declared_attr, mapped_column, relationship
+from sqlalchemy import JSON, ForeignKey, Index
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from mirix.orm.custom_columns import (
     MessageContentColumn,
@@ -28,15 +28,6 @@ class Message(SqlalchemyBase, OrganizationMixin, UserMixin, AgentMixin):
 
     __tablename__ = "messages"
     __table_args__ = (
-        ForeignKeyConstraint(
-            ["organization_id", "user_id"],
-            ["users.organization_id", "users.id"],
-        ),
-        ForeignKeyConstraint(
-            ["organization_id", "client_id"],
-            ["clients.organization_id", "clients.id"],
-            ondelete="CASCADE",
-        ),
         Index("ix_messages_agent_created_at", "agent_id", "created_at"),
         Index("ix_messages_created_at", "created_at", "id"),
         Index("ix_messages_client_user", "client_id", "user_id"),
@@ -63,6 +54,7 @@ class Message(SqlalchemyBase, OrganizationMixin, UserMixin, AgentMixin):
 
     # Foreign key to client (for access control and filtering)
     client_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("clients.id"),
         nullable=True,
         doc="ID of the client application that created this message",
     )
@@ -98,20 +90,7 @@ class Message(SqlalchemyBase, OrganizationMixin, UserMixin, AgentMixin):
     organization: Mapped["Organization"] = relationship("Organization", back_populates="messages", lazy="selectin")
     step: Mapped["Step"] = relationship("Step", back_populates="messages", lazy="selectin")
 
-    @declared_attr
-    def user(cls) -> Mapped["User"]:
-        """
-        Relationship to the User that owns this message.
-        """
-        return relationship(
-            "User",
-            lazy="selectin",
-            primaryjoin=(
-                "and_(foreign(%s.organization_id) == User.organization_id, "
-                "foreign(%s.user_id) == User.id)" % (cls.__name__, cls.__name__)
-            ),
-            viewonly=True,
-        )
+    user: Mapped[Optional["User"]] = relationship("User", lazy="selectin", viewonly=True)
 
     def to_pydantic(self) -> PydanticMessage:
         """Custom pydantic conversion to handle data using legacy text field"""

@@ -27,14 +27,17 @@ class OrganizationMixin(Base):
 class UserMixin(Base):
     """Mixin for models that belong to a user.
 
-    The FK to users is composite (organization_id, user_id) -> (users.organization_id,
-    users.id) and cannot be declared here because it needs the consumer's
-    organization_id column. Each consumer adds a ForeignKeyConstraint in __table_args__.
+    FK targets ``users.id`` alone. The ``users`` row is a GLOBAL SHARED STUB
+    across orgs (see ``mirix/orm/user.py`` docstring for the full explanation).
+    Per-org isolation lives on the CONSUMER's own ``organization_id`` column
+    (via OrganizationMixin), NOT on the user row. Two callers in different
+    orgs can use the same ``user_id``; their consumer rows carry distinct
+    ``organization_id`` values and stay isolated.
     """
 
     __abstract__ = True
 
-    user_id: Mapped[str] = mapped_column(String)
+    user_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"))
 
 
 class AgentMixin(Base):

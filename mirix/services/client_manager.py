@@ -15,10 +15,33 @@ from mirix.utils import enforce_types
 
 
 class ClientManager:
-    """Manager class to handle business logic related to Clients."""
+    """Manager class to handle business logic related to Clients.
+
+    Identity model: clients have an id-only PK (no composite). Named clients
+    get random-UUID ids at creation time, so collisions are impossible by
+    construction. The well-known "default client" is the only client whose id
+    would otherwise be a constant — to keep each org's default-client row
+    isolated we derive it per-org via :func:`default_client_id` rather than
+    using a global constant.
+    """
 
     DEFAULT_CLIENT_NAME = "default_client"
+    # Legacy global constant. Pre-Option-1 code used this as the singleton id
+    # across all orgs, which caused users_pkey/clients_pkey collisions in
+    # IPS-Relational (id-only PK). Modern callers should use
+    # ``default_client_id(org_id)`` instead. Retained only for the PG fallback
+    # path used by legacy single-org tests and migration tooling.
     DEFAULT_CLIENT_ID = "client-00000000-0000-4000-8000-000000000000"
+
+    @classmethod
+    def default_client_id(cls, org_id: str) -> str:
+        """Per-org id for "the default client" — distinct per org by design.
+
+        Mirrors UserManager.get_or_create_org_default_user's deterministic
+        per-org id pattern so the well-known default client survives Option 1
+        (id-only PK on both PG and IPS-R) without collision.
+        """
+        return f"client-default-{org_id}"
 
     def __init__(self):
         # Fetching the db_context similarly as in OrganizationManager
@@ -38,32 +61,22 @@ class ClientManager:
             if org is None:
                 raise ValueError(f"No organization with {org_id} exists in the organization table.")
 
-            # Return existing default client if already present *in this org*.
-            # Identity is (organization_id, id); a global lookup would return
-            # another org's default client (first-write-wins across orgs).
-            existing_rows = await provider.find_using_named_query(
-                "clients",
-                "client_manager.get_client_by_id",
-                params={"id": self.DEFAULT_CLIENT_ID, "organizationId": org_id},
-                page_size=1,
-            )
-            if existing_rows:
-                return PydanticClient(**existing_rows[0])
+            # Per-org default client. The id is derived from org_id (see
+            # default_client_id classmethod) so each org gets its own
+            # default-client row with its own scopes — unlike the user row
+            # which is a shared stub. Clients are org-isolated by design.
+            client_id = self.default_client_id(org_id)
+            existing = await provider.read("clients", client_id)
+            if existing is not None:
+                return PydanticClient(**existing)
 
-            # IPS-Relational keys clients on the auto-generated id alone (no
-            # composite PK), so the well-known DEFAULT_CLIENT_ID can exist
-            # under only one organization at a time. If the org-scoped
-            # pre-check missed because the row lives under a different org,
-            # re-target it to the current org instead of crashing the
-            # service on clients_pkey (mirrors create_admin_user).
             from mirix.database.provider_write_retry import is_conflict
-            from mirix.log import get_logger
 
             try:
                 result = await provider.create(
                     "clients",
                     {
-                        "id": self.DEFAULT_CLIENT_ID,
+                        "id": client_id,
                         "name": self.DEFAULT_CLIENT_NAME,
                         "status": "active",
                         "write_scope": None,
@@ -73,29 +86,13 @@ class ClientManager:
                 )
                 return PydanticClient(**result)
             except Exception as exc:
+                # Concurrent caller raced us; the row exists now.
                 if not is_conflict(exc):
                     raise
-                existing = await provider.read("clients", self.DEFAULT_CLIENT_ID)
+                existing = await provider.read("clients", client_id)
                 if existing is None:
                     raise
-                if existing.get("organization_id") == org_id:
-                    return PydanticClient(**existing)
-                get_logger(__name__).info(
-                    "Re-targeting default client %s from org %s to %s",
-                    self.DEFAULT_CLIENT_ID,
-                    existing.get("organization_id"),
-                    org_id,
-                )
-                updated = await provider.update(
-                    "clients",
-                    self.DEFAULT_CLIENT_ID,
-                    {
-                        "organization_id": org_id,
-                        "name": self.DEFAULT_CLIENT_NAME,
-                        "status": "active",
-                    },
-                )
-                return PydanticClient(**updated)
+                return PydanticClient(**existing)
 
         async with self.session_maker() as session:
             try:
@@ -103,13 +100,14 @@ class ClientManager:
             except NoResultFound:
                 raise ValueError(f"No organization with {org_id} exists in the organization table.") from None
 
+            client_id = self.default_client_id(org_id)
             try:
                 client = await ClientModel.read(
-                    db_session=session, identifier=self.DEFAULT_CLIENT_ID, organization_id=org_id
+                    db_session=session, identifier=client_id
                 )
             except NoResultFound:
                 client = ClientModel(
-                    id=self.DEFAULT_CLIENT_ID,
+                    id=client_id,
                     name=self.DEFAULT_CLIENT_NAME,
                     status="active",
                     write_scope=None,
@@ -122,14 +120,27 @@ class ClientManager:
 
     @enforce_types
     async def create_client(self, pydantic_client: PydanticClient) -> PydanticClient:
-        """Create a new client if it doesn't already exist (with caching)."""
+        """Create a new client, or return the existing row if id is already taken.
+
+        clients.id is globally unique (id-only PK, matches IPS-R). Catch
+        conflicts and return the existing row.
+        """
+        from mirix.database.provider_write_retry import is_conflict
         from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
         if provider:
             client_data = pydantic_client.model_dump()
-            result = await provider.create("clients", client_data)
-            return PydanticClient(**result)
+            try:
+                result = await provider.create("clients", client_data)
+                return PydanticClient(**result)
+            except Exception as exc:
+                if not is_conflict(exc):
+                    raise
+                existing = await provider.read("clients", pydantic_client.id)
+                if existing is None:
+                    raise
+                return PydanticClient(**existing)
         async with self.session_maker() as session:
             new_client = ClientModel(**pydantic_client.model_dump())
             await new_client.create_with_redis(session, actor=None)  # Auto-caches to Redis

@@ -9,7 +9,7 @@ import datetime as dt
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import JSON, Column, ForeignKeyConstraint, Index, String, Text, text
+from sqlalchemy import JSON, Column, Index, String, Text, text
 from sqlalchemy.event import listens_for
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column, relationship
 
@@ -117,10 +117,6 @@ class RawMemory(SqlalchemyBase, OrganizationMixin, UserMixin):
         filter(
             None,
             [
-                ForeignKeyConstraint(
-                    ["organization_id", "user_id"],
-                    ["users.organization_id", "users.id"],
-                ),
                 # PostgreSQL indexes
                 Index("ix_raw_memory_organization_id", "organization_id") if settings.mirix_pg_uri_no_default else None,
                 (
@@ -170,18 +166,7 @@ class RawMemory(SqlalchemyBase, OrganizationMixin, UserMixin):
         """Relationship to the Organization."""
         return relationship("Organization", lazy="selectin")
 
-    @declared_attr
-    def user(cls) -> Mapped["User"]:
-        """Relationship to the User."""
-        return relationship(
-            "User",
-            lazy="selectin",
-            primaryjoin=(
-                "and_(foreign(%s.organization_id) == User.organization_id, "
-                "foreign(%s.user_id) == User.id)" % (cls.__name__, cls.__name__)
-            ),
-            viewonly=True,
-        )
+    user: Mapped[Optional["User"]] = relationship("User", lazy="selectin", viewonly=True)
 
 
 def _naive_utc(dt_val: Optional[datetime]) -> Optional[datetime]:

@@ -1,6 +1,6 @@
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import ForeignKeyConstraint, String
+from sqlalchemy import ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from mirix.orm.mixins import OrganizationMixin
@@ -17,21 +17,10 @@ class ClientApiKey(SqlalchemyBase, OrganizationMixin):
     __tablename__ = "client_api_keys"
     __pydantic_model__ = PydanticClientApiKey
 
-    __table_args__ = (
-        ForeignKeyConstraint(
-            ["organization_id", "client_id"],
-            ["clients.organization_id", "clients.id"],
-            ondelete="CASCADE",
-        ),
-        ForeignKeyConstraint(
-            ["organization_id", "user_id"],
-            ["users.organization_id", "users.id"],
-        ),
-    )
-
     # Foreign key to client
     client_id: Mapped[str] = mapped_column(
         String,
+        ForeignKey("clients.id", ondelete="CASCADE"),
         nullable=False,
         doc="The client this API key belongs to",
     )
@@ -52,6 +41,7 @@ class ClientApiKey(SqlalchemyBase, OrganizationMixin):
     # Optional user association
     user_id: Mapped[Optional[str]] = mapped_column(
         String,
+        ForeignKey("users.id"),
         nullable=True,
         doc="The user this API key is associated with (optional)",
     )
@@ -60,9 +50,5 @@ class ClientApiKey(SqlalchemyBase, OrganizationMixin):
     client: Mapped["Client"] = relationship(
         "Client",
         back_populates="api_keys",
-        foreign_keys="[ClientApiKey.organization_id, ClientApiKey.client_id]",
-        primaryjoin=(
-            "and_(foreign(ClientApiKey.organization_id) == Client.organization_id, "
-            "foreign(ClientApiKey.client_id) == Client.id)"
-        ),
+        lazy="selectin",
     )

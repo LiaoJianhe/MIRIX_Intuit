@@ -2,7 +2,7 @@ import datetime as dt
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import JSON, Column, ForeignKey, ForeignKeyConstraint, Index, String, text
+from sqlalchemy import JSON, Column, ForeignKey, Index, String, text
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column, relationship
 
 from mirix.constants import MAX_EMBEDDING_DIM
@@ -49,6 +49,7 @@ class ResourceMemoryItem(SqlalchemyBase, OrganizationMixin, UserMixin):
     # Foreign key to client (for access control and filtering)
     client_id: Mapped[Optional[str]] = mapped_column(
         String,
+        ForeignKey("clients.id"),
         nullable=True,
         doc="ID of the client application that created this item",
     )
@@ -97,15 +98,6 @@ class ResourceMemoryItem(SqlalchemyBase, OrganizationMixin, UserMixin):
         filter(
             None,
             [
-                ForeignKeyConstraint(
-                    ["organization_id", "user_id"],
-                    ["users.organization_id", "users.id"],
-                ),
-                ForeignKeyConstraint(
-                    ["organization_id", "client_id"],
-                    ["clients.organization_id", "clients.id"],
-                    ondelete="CASCADE",
-                ),
                 # Organization-level query optimization indexes
                 (
                     Index("ix_resource_memory_organization_id", "organization_id")
@@ -165,20 +157,7 @@ class ResourceMemoryItem(SqlalchemyBase, OrganizationMixin, UserMixin):
         """
         return relationship("Organization", back_populates="resource_memory", lazy="selectin")
 
-    @declared_attr
-    def user(cls) -> Mapped["User"]:
-        """
-        Relationship to the User that owns this resource memory item.
-        """
-        return relationship(
-            "User",
-            lazy="selectin",
-            primaryjoin=(
-                "and_(foreign(%s.organization_id) == User.organization_id, "
-                "foreign(%s.user_id) == User.id)" % (cls.__name__, cls.__name__)
-            ),
-            viewonly=True,
-        )
+    user: Mapped[Optional["User"]] = relationship("User", lazy="selectin", viewonly=True)
 
     def to_pydantic(self) -> "PydanticResourceMemoryItem":
         """

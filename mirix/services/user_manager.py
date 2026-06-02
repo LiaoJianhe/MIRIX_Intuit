@@ -40,24 +40,13 @@ class UserManager:
             if org is None:
                 raise ValueError(f"No organization with {org_id} exists in the organization table.")
 
-            # Return existing admin user if already present *in this org*.
-            # Identity is (organization_id, id); a global lookup would return
-            # another org's admin (first-write-wins across orgs).
-            existing_rows = await provider.find_using_named_query(
-                "users",
-                "user_manager.get_user_by_id",
-                params={"id": self.ADMIN_USER_ID, "organizationId": org_id},
-                page_size=1,
-            )
-            if existing_rows:
-                return PydanticUser(**existing_rows[0])
+            # users.id is globally unique (id-only PK, matches IPS-R). The user
+            # row is a shared stub across orgs — per-org data lives on child
+            # tables. Pre-check by id alone; if it exists, reuse it.
+            existing = await provider.read("users", self.ADMIN_USER_ID)
+            if existing is not None:
+                return PydanticUser(**existing)
 
-            # IPS-Relational keys users on the auto-generated id alone (no
-            # composite PK), so the well-known ADMIN_USER_ID can exist under
-            # only one organization at a time. The org-scoped pre-check above
-            # cannot see a row belonging to a different org, but the create
-            # will collide on users_pkey. Heal by re-targeting the colliding
-            # row to the current org rather than crashing the service.
             from mirix.database.provider_write_retry import is_conflict
 
             try:
@@ -74,31 +63,13 @@ class UserManager:
                 )
                 return PydanticUser(**result)
             except Exception as exc:
+                # Concurrent caller raced us; the row exists now.
                 if not is_conflict(exc):
                     raise
                 existing = await provider.read("users", self.ADMIN_USER_ID)
                 if existing is None:
                     raise
-                if existing.get("organization_id") == org_id:
-                    return PydanticUser(**existing)
-                logger.info(
-                    "Re-targeting admin user %s from org %s to %s",
-                    self.ADMIN_USER_ID,
-                    existing.get("organization_id"),
-                    org_id,
-                )
-                updated = await provider.update(
-                    "users",
-                    self.ADMIN_USER_ID,
-                    {
-                        "organization_id": org_id,
-                        "name": self.ADMIN_USER_NAME,
-                        "status": "active",
-                        "timezone": self.DEFAULT_TIME_ZONE,
-                        "is_admin": True,
-                    },
-                )
-                return PydanticUser(**updated)
+                return PydanticUser(**existing)
 
         async with self.session_maker() as session:
             try:
@@ -125,24 +96,46 @@ class UserManager:
 
     @enforce_types
     async def create_user(self, pydantic_user: PydanticUser) -> PydanticUser:
-        """Create a new user if it doesn't already exist (with Redis caching).
+        """Create a new user, or return the existing row if id is already taken.
+
+        users.id is globally unique (id-only PK on both PG and IPS-R). The user
+        row itself is a shared stub — per-org isolation lives on child tables,
+        not here — so two callers using the same user id under different orgs
+        share this row and that is correct. Catch the conflict and return the
+        existing row instead of erroring.
 
         Args:
             pydantic_user: The user data
         """
+        from mirix.database.provider_write_retry import is_conflict
         from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
         if provider:
             user_data = pydantic_user.model_dump()
-            result = await provider.create("users", user_data)
-            return PydanticUser(**result)
+            try:
+                result = await provider.create("users", user_data)
+                return PydanticUser(**result)
+            except Exception as exc:
+                if not is_conflict(exc):
+                    raise
+                existing = await provider.read("users", pydantic_user.id)
+                if existing is None:
+                    raise
+                return PydanticUser(**existing)
 
         async with self.session_maker() as session:
             user_data = pydantic_user.model_dump()
             new_user = UserModel(**user_data)
-            await new_user.create_with_redis(session, actor=None)
-            return new_user.to_pydantic()
+            try:
+                await new_user.create_with_redis(session, actor=None)
+                return new_user.to_pydantic()
+            except Exception as exc:
+                if not is_conflict(exc):
+                    raise
+            # Conflict — the row exists globally. Fetch and return it.
+            existing = await UserModel.read(db_session=session, identifier=pydantic_user.id)
+            return existing.to_pydantic()
 
     @enforce_types
     async def update_user(self, user_update: UserUpdate) -> PydanticUser:
@@ -543,11 +536,14 @@ class UserManager:
 
     @enforce_types
     async def get_user_by_id(self, user_id: str, *, organization_id: str) -> PydanticUser:
-        """Fetch a user by (organization_id, id) (with cache - Redis or Cache provider).
+        """Fetch a user by id (with cache - Redis or Cache provider).
 
-        Identity is (organization_id, id), not id alone. A lookup whose org does
-        not match the stored row raises NoResultFound — cross-org reads are not
-        allowed.
+        Users have an id-only identity (shared stub row across orgs). The
+        ``organization_id`` arg is retained for cache-key scoping and the PG
+        fallback path's API compatibility, but is NOT used to filter the
+        lookup — passing a non-matching org no longer raises NoResultFound.
+        Per-org data isolation lives on child tables (memories, blocks,
+        messages), not on the user row.
         """
         from mirix.log import get_logger
 
@@ -575,11 +571,11 @@ class UserManager:
             rows = await provider.find_using_named_query(
                 "users",
                 "user_manager.get_user_by_id",
-                params={"id": user_id, "organizationId": organization_id},
+                params={"id": user_id},
                 page_size=1,
             )
             if not rows:
-                raise NoResultFound(f"User {user_id} not found in organization {organization_id}")
+                raise NoResultFound(f"User {user_id} not found")
             pydantic_user = PydanticUser(**rows[0])
             try:
                 if cache_provider:
@@ -592,7 +588,7 @@ class UserManager:
             return pydantic_user
 
         async with self.session_maker() as session:
-            user = await UserModel.read(db_session=session, identifier=user_id, organization_id=organization_id)
+            user = await UserModel.read(db_session=session, identifier=user_id)
             pydantic_user = user.to_pydantic()
 
             try:

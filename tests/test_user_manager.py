@@ -498,21 +498,17 @@ class TestGetOrCreateOrgDefaultUser:
 # ============================================================================
 
 
-class TestGetUserByIdOrgScoped:
-    """get_user_by_id must be scoped to (organization_id, id)."""
+class TestGetUserByIdGlobal:
+    """get_user_by_id is GLOBAL (id-only) under Option 1.
+
+    Users have id-only identity (matches IPS-R's PK invariant). The
+    ``organization_id`` parameter to get_user_by_id is retained for cache-
+    key scoping but does NOT filter the lookup — cross-org reads succeed.
+    Per-org data isolation lives on child tables, not on the user row.
+    See mirix/orm/user.py docstring.
+    """
 
     pytestmark = pytest.mark.asyncio(loop_scope="module")
-
-    async def test_get_user_by_id_requires_organization_id(self):
-        """get_user_by_id must require an organization_id parameter."""
-        import inspect
-
-        sig = inspect.signature(UserManager.get_user_by_id)
-        params = sig.parameters
-        assert "organization_id" in params, "get_user_by_id must accept organization_id"
-        assert (
-            params["organization_id"].default is inspect.Parameter.empty
-        ), "organization_id must be required (no default)"
 
     async def test_get_user_by_id_returns_user_in_matching_org(self, user_manager, test_org1):
         """A user is returned when looked up with its own organization_id."""
@@ -530,17 +526,46 @@ class TestGetUserByIdOrgScoped:
             except Exception:
                 pass
 
-    async def test_get_user_by_id_cross_org_raises_not_found(self, user_manager, test_org1, test_org2):
-        """Looking up a user with a different org's id must raise NoResultFound."""
-        from mirix.orm.errors import NoResultFound
+    async def test_get_user_by_id_cross_org_returns_shared_row(self, user_manager, test_org1, test_org2):
+        """Cross-org lookup returns the same shared user row.
 
+        Under Option 1 the user row is global. A user created via org1 is
+        visible to lookups passing org2's id — the row is shared. Per-org
+        isolation happens on child tables (memories, blocks, etc.), not here.
+        """
         user_id = generate_test_id("user")
         await user_manager.create_user(
-            PydanticUser(id=user_id, name="Org1 Only", organization_id=test_org1.id, timezone="UTC")
+            PydanticUser(id=user_id, name="Shared", organization_id=test_org1.id, timezone="UTC")
         )
         try:
-            with pytest.raises(NoResultFound):
-                await user_manager.get_user_by_id(user_id, organization_id=test_org2.id)
+            retrieved = await user_manager.get_user_by_id(user_id, organization_id=test_org2.id)
+            assert retrieved.id == user_id
+            # The row's stored organization_id is org1's (whoever created it
+            # first) — but it's still returned to org2's caller.
+            assert retrieved.organization_id == test_org1.id
+        finally:
+            try:
+                await user_manager.delete_user_by_id(user_id)
+            except Exception:
+                pass
+
+    async def test_create_user_cross_org_id_reuse_returns_existing(
+        self, user_manager, test_org1, test_org2
+    ):
+        """create_user catches users_pkey on cross-org id reuse and returns
+        the existing row instead of erroring. Two devs using user_id="1234"
+        under different orgs do not collide."""
+        user_id = generate_test_id("user")
+        first = await user_manager.create_user(
+            PydanticUser(id=user_id, name="First", organization_id=test_org1.id, timezone="UTC")
+        )
+        try:
+            second = await user_manager.create_user(
+                PydanticUser(id=user_id, name="Second", organization_id=test_org2.id, timezone="UTC")
+            )
+            # Same row returned (catch-and-swallow), org stays as first writer's.
+            assert second.id == first.id == user_id
+            assert second.organization_id == test_org1.id
         finally:
             try:
                 await user_manager.delete_user_by_id(user_id)
@@ -619,10 +644,15 @@ class TestDefaultEntitiesOrgScoped:
         )
 
     async def test_create_default_client_idempotent_within_org(self, client_manager, test_org1):
-        """Calling create_default_client twice for the same org returns the same row."""
+        """Calling create_default_client twice for the same org returns the same row.
+
+        The id is org-derived (``client-default-{org_id}``), not the legacy
+        global constant. Each org gets its own default-client row.
+        """
         first = await client_manager.create_default_client(org_id=test_org1.id)
         second = await client_manager.create_default_client(org_id=test_org1.id)
-        assert first.id == second.id == ClientManager.DEFAULT_CLIENT_ID
+        expected_id = ClientManager.default_client_id(test_org1.id)
+        assert first.id == second.id == expected_id
         assert first.organization_id == test_org1.id
         assert second.organization_id == test_org1.id
 
@@ -639,107 +669,6 @@ class TestDefaultEntitiesOrgScoped:
             "create_default_client(org2) returned a client from a different org — "
             "existence check is not org-scoped"
         )
-
-
-class TestCreateAdminUserPkeyHeal:
-    """create_admin_user must heal IPS-Relational users_pkey collisions.
-
-    IPS-R keys ``users`` on the auto-generated ``id`` alone (no composite PK),
-    so the well-known ADMIN_USER_ID can exist under only ONE organization at
-    a time. The org-scoped pre-check NQ can't see a row that belongs to a
-    different org, but the subsequent create collides on users_pkey.
-    create_admin_user must re-target the existing row to the current org
-    rather than crashing the service.
-    """
-
-    pytestmark = pytest.mark.asyncio(loop_scope="module")
-
-    @staticmethod
-    def _ipsr_pkey_error():
-        class _BadRequestError(Exception):
-            def __init__(self, message):
-                super().__init__(message)
-                self.error_code = "DATABASE_CONSTRAINT_VIOLATION"
-
-        return _BadRequestError(
-            "Client data violates a database constraint:  users_pkey"
-        )
-
-    async def test_pkey_conflict_same_org_returns_existing(self, monkeypatch):
-        """A users_pkey conflict where the existing row is already in the
-        target org returns the row idempotently (race-with-self path)."""
-        from unittest.mock import AsyncMock, MagicMock
-
-        org_id = OrganizationManager.DEFAULT_ORG_ID
-        existing_row = {
-            "id": UserManager.ADMIN_USER_ID,
-            "name": UserManager.ADMIN_USER_NAME,
-            "status": "active",
-            "timezone": UserManager.DEFAULT_TIME_ZONE,
-            "organization_id": org_id,
-            "is_admin": True,
-        }
-        provider = MagicMock()
-        provider.read = AsyncMock(side_effect=[{"id": org_id}, existing_row])
-        provider.find_using_named_query = AsyncMock(return_value=[])
-        provider.create = AsyncMock(side_effect=self._ipsr_pkey_error())
-        provider.update = AsyncMock()
-
-        monkeypatch.setattr(
-            "mirix.database.relational_provider.get_relational_provider",
-            lambda: provider,
-        )
-
-        result = await UserManager().create_admin_user(org_id=org_id)
-
-        assert result.id == UserManager.ADMIN_USER_ID
-        assert result.organization_id == org_id
-        provider.update.assert_not_awaited()  # same-org -> no update needed
-
-    async def test_pkey_conflict_different_org_retargets_row(self, monkeypatch):
-        """A users_pkey conflict where the existing row is in a DIFFERENT
-        org re-targets it to the current org via provider.update."""
-        from unittest.mock import AsyncMock, MagicMock
-
-        target_org = "org-target-1234"
-        foreign_org = "org-foreign-9999"
-        foreign_row = {
-            "id": UserManager.ADMIN_USER_ID,
-            "name": "default_user",  # stale shape from older bootstrap
-            "status": "active",
-            "timezone": "UTC",
-            "organization_id": foreign_org,
-            "is_admin": False,
-        }
-        retargeted_row = {
-            **foreign_row,
-            "organization_id": target_org,
-            "name": UserManager.ADMIN_USER_NAME,
-            "timezone": UserManager.DEFAULT_TIME_ZONE,
-            "is_admin": True,
-        }
-        provider = MagicMock()
-        provider.read = AsyncMock(side_effect=[{"id": target_org}, foreign_row])
-        provider.find_using_named_query = AsyncMock(return_value=[])
-        provider.create = AsyncMock(side_effect=self._ipsr_pkey_error())
-        provider.update = AsyncMock(return_value=retargeted_row)
-
-        monkeypatch.setattr(
-            "mirix.database.relational_provider.get_relational_provider",
-            lambda: provider,
-        )
-
-        result = await UserManager().create_admin_user(org_id=target_org)
-
-        assert result.id == UserManager.ADMIN_USER_ID
-        assert result.organization_id == target_org
-        provider.update.assert_awaited_once()
-        update_args = provider.update.await_args
-        assert update_args.args[0] == "users"
-        assert update_args.args[1] == UserManager.ADMIN_USER_ID
-        assert update_args.args[2]["organization_id"] == target_org
-        assert update_args.args[2]["name"] == UserManager.ADMIN_USER_NAME
-        assert update_args.args[2]["is_admin"] is True
 
 
 # ============================================================================
