@@ -4,7 +4,7 @@ import json
 import logging
 import traceback
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -17,6 +17,7 @@ from mirix.constants import (
     ERROR_MESSAGE_PREFIX,
     FIRST_MESSAGE_ATTEMPTS,
     FUNC_FAILED_HEARTBEAT_MESSAGE,
+    HYBRID_READ_WINDOW_SECONDS,
     LLM_MAX_TOKENS,
     MAX_CHAINING_STEPS,
     MAX_EMBEDDING_DIM,
@@ -1906,36 +1907,41 @@ class Agent(BaseAgent):
     ) -> List[Any]:
         """Fetch rows written in the recent indexing-lag window for an owning sub-agent's dedup decision.
 
-        Uses ``fetch_and_dedup_candidates`` to issue the Search and Relational
-        DB provider calls in parallel; we discard the ranked Search bucket here
-        because the prompt builder already obtains it via the manager
-        ``list_*`` call (which preserves ``@update_timezone`` and the manager's
-        post-processing). Returns the ``recent`` (5s indexing-lag) bucket as
-        a list of Pydantic instances, capped at ``MAX_RETRIEVAL_LIMIT_IN_SYSTEM``.
+        Queries the Relational DB provider for rows whose ``created_at`` or
+        ``updated_at`` falls within ``HYBRID_READ_WINDOW_SECONDS``. These are
+        the just-written candidates the Search provider may not have indexed
+        yet. The ranked ("relevant") bucket is obtained separately by the
+        prompt builder via the manager ``list_*`` call (which preserves
+        ``@update_timezone`` and the manager's post-processing); the caller
+        unions these recent rows into that list. Returns the recent rows as
+        Pydantic instances, capped at ``MAX_RETRIEVAL_LIMIT_IN_SYSTEM``.
 
         Returns ``[]`` when either provider is unregistered (PG-only path):
         in that mode reads come from the canonical SQL store, so the
-        indexing-lag distinction does not exist.
+        indexing-lag distinction does not exist. Fail-closed: a raising
+        Relational call propagates.
         """
         from mirix.database.relational_provider import get_relational_provider
         from mirix.database.search_provider import get_search_provider
-        from mirix.services.hybrid_search_helper import fetch_and_dedup_candidates
 
         sp = get_search_provider()
         rp = get_relational_provider()
         if not (sp and rp):
             return []
 
-        candidates = await fetch_and_dedup_candidates(
-            table=table,
-            search_provider=sp,
-            relational_provider=rp,
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=HYBRID_READ_WINDOW_SECONDS)
+        recent_records = await rp.list(
+            table,
             user_id=self.user.id,
             organization_id=self.user.organization_id,
-            limit=1,
-            recent_cap=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
+            time_range={
+                "updated_at__gte": cutoff.isoformat(),
+                "created_at__gte": cutoff.isoformat(),
+            },
+            time_range_or_null_updated=True,
+            limit=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
         )
-        return [pydantic_cls(**r) for r in candidates.recent]
+        return [pydantic_cls(**r) for r in recent_records]
 
     async def build_system_prompt_with_memories(
         self,
@@ -2025,21 +2031,18 @@ class Agent(BaseAgent):
                 if is_owning_kv_agent
                 else []
             )
+            merged_knowledge_vault = self._merge_recent_into_relevant(
+                current_knowledge_vault, recent_knowledge_vault
+            )
 
             knowledge_vault_memory = ""
-            if len(current_knowledge_vault) > 0:
-                for idx, knowledge_vault_item in enumerate(current_knowledge_vault):
+            if len(merged_knowledge_vault) > 0:
+                for idx, knowledge_vault_item in enumerate(merged_knowledge_vault):
                     knowledge_vault_memory += f"[{idx}] Knowledge Vault Item ID: {knowledge_vault_item.id}; Caption: {knowledge_vault_item.caption}\n"
-            recent_knowledge_vault_text = ""
-            if len(recent_knowledge_vault) > 0:
-                for idx, knowledge_vault_item in enumerate(recent_knowledge_vault):
-                    recent_knowledge_vault_text += f"[Knowledge Vault Item ID: {knowledge_vault_item.id}] Caption: {knowledge_vault_item.caption}\n"
             retrieved_memories["knowledge_vault"] = {
                 "total_number_of_items": await self.knowledge_vault_manager.get_total_number_of_items(user=self.user),
-                "current_count": len(current_knowledge_vault),
-                "text": knowledge_vault_memory,
-                "recent_count": len(recent_knowledge_vault),
-                "recent_text": recent_knowledge_vault_text.strip(),
+                "current_count": len(merged_knowledge_vault),
+                "text": knowledge_vault_memory.strip(),
             }
 
         # Retrieve episodic memory
@@ -2109,24 +2112,21 @@ class Agent(BaseAgent):
                 if is_owning_agent
                 else []
             )
+            merged_resource_memory = self._merge_recent_into_relevant(
+                current_resource_memory, recent_resource_memory_items
+            )
             resource_memory = ""
-            if len(current_resource_memory) > 0:
-                for idx, resource in enumerate(current_resource_memory):
+            if len(merged_resource_memory) > 0:
+                for idx, resource in enumerate(merged_resource_memory):
                     if is_owning_agent:
                         resource_memory += f"[Resource ID: {resource.id}] Resource Title: {resource.title}; Resource Summary: {resource.summary} Resource Type: {resource.resource_type}\n"
                     else:
                         resource_memory += f"[{idx}] Resource Title: {resource.title}; Resource Summary: {resource.summary} Resource Type: {resource.resource_type}\n"
-            recent_resource_memory_text = ""
-            if len(recent_resource_memory_items) > 0:
-                for resource in recent_resource_memory_items:
-                    recent_resource_memory_text += f"[Resource ID: {resource.id}] Resource Title: {resource.title}; Resource Summary: {resource.summary} Resource Type: {resource.resource_type}\n"
             resource_memory = resource_memory.strip()
             retrieved_memories["resource"] = {
                 "total_number_of_items": await self.resource_memory_manager.get_total_number_of_items(user=self.user),
-                "current_count": len(current_resource_memory),
+                "current_count": len(merged_resource_memory),
                 "text": resource_memory,
-                "recent_count": len(recent_resource_memory_items),
-                "recent_text": recent_resource_memory_text.strip(),
             }
 
         # Retrieve procedural memory
@@ -2151,28 +2151,23 @@ class Agent(BaseAgent):
                 if is_owning_agent
                 else []
             )
+            merged_procedural_memory = self._merge_recent_into_relevant(
+                current_procedural_memory, recent_procedural_memory_items
+            )
             procedural_memory = ""
-            if len(current_procedural_memory) > 0:
-                for idx, procedure in enumerate(current_procedural_memory):
+            if len(merged_procedural_memory) > 0:
+                for idx, procedure in enumerate(merged_procedural_memory):
                     if is_owning_agent:
                         procedural_memory += f"[Procedure ID: {procedure.id}] Entry Type: {procedure.entry_type}; Summary: {procedure.summary}\n"
                     else:
                         procedural_memory += (
                             f"[{idx}] Entry Type: {procedure.entry_type}; Summary: {procedure.summary}\n"
                         )
-            recent_procedural_memory_text = ""
-            if len(recent_procedural_memory_items) > 0:
-                for procedure in recent_procedural_memory_items:
-                    recent_procedural_memory_text += (
-                        f"[Procedure ID: {procedure.id}] Entry Type: {procedure.entry_type}; Summary: {procedure.summary}\n"
-                    )
             procedural_memory = procedural_memory.strip()
             retrieved_memories["procedural"] = {
                 "total_number_of_items": await self.procedural_memory_manager.get_total_number_of_items(user=self.user),
-                "current_count": len(current_procedural_memory),
+                "current_count": len(merged_procedural_memory),
                 "text": procedural_memory,
-                "recent_count": len(recent_procedural_memory_items),
-                "recent_text": recent_procedural_memory_text.strip(),
             }
 
         # Retrieve semantic memory
@@ -2197,29 +2192,24 @@ class Agent(BaseAgent):
                 if is_owning_agent
                 else []
             )
+            merged_semantic_memory = self._merge_recent_into_relevant(
+                current_semantic_memory, recent_semantic_memory_items
+            )
             semantic_memory = ""
-            if len(current_semantic_memory) > 0:
-                for idx, semantic_memory_item in enumerate(current_semantic_memory):
+            if len(merged_semantic_memory) > 0:
+                for idx, semantic_memory_item in enumerate(merged_semantic_memory):
                     if is_owning_agent:
                         semantic_memory += f"[Semantic Memory ID: {semantic_memory_item.id}] Name: {semantic_memory_item.name}; Summary: {semantic_memory_item.summary}\n"
                     else:
                         semantic_memory += (
                             f"[{idx}] Name: {semantic_memory_item.name}; Summary: {semantic_memory_item.summary}\n"
                         )
-            recent_semantic_memory_text = ""
-            if len(recent_semantic_memory_items) > 0:
-                for semantic_memory_item in recent_semantic_memory_items:
-                    recent_semantic_memory_text += (
-                        f"[Semantic Memory ID: {semantic_memory_item.id}] Name: {semantic_memory_item.name}; Summary: {semantic_memory_item.summary}\n"
-                    )
 
             semantic_memory = semantic_memory.strip()
             retrieved_memories["semantic"] = {
                 "total_number_of_items": await self.semantic_memory_manager.get_total_number_of_items(user=self.user),
-                "current_count": len(current_semantic_memory),
+                "current_count": len(merged_semantic_memory),
                 "text": semantic_memory,
-                "recent_count": len(recent_semantic_memory_items),
-                "recent_text": recent_semantic_memory_text.strip(),
             }
 
         # Build the complete system prompt
@@ -2288,7 +2278,6 @@ These keywords have been used to retrieve relevant memories from the database.
             + (knowledge_vault_text if knowledge_vault_text else "Empty")
             + "\n</knowledge_vault>\n"
         )
-        system_prompt += self._render_recent_window_block("knowledge_vault", knowledge_vault)
 
         semantic_total = semantic_memory["total_number_of_items"] if semantic_memory else 0
         semantic_text = semantic_memory["text"] if semantic_memory else ""
@@ -2298,7 +2287,6 @@ These keywords have been used to retrieve relevant memories from the database.
             + (semantic_text if semantic_text else "Empty")
             + "\n</semantic_memory>\n"
         )
-        system_prompt += self._render_recent_window_block("semantic_memory", semantic_memory)
 
         resource_total = resource_memory["total_number_of_items"] if resource_memory else 0
         resource_text = resource_memory["text"] if resource_memory else ""
@@ -2308,7 +2296,6 @@ These keywords have been used to retrieve relevant memories from the database.
             + (resource_text if resource_text else "Empty")
             + "\n</resource_memory>\n"
         )
-        system_prompt += self._render_recent_window_block("resource_memory", resource_memory)
 
         procedural_total = procedural_memory["total_number_of_items"] if procedural_memory else 0
         procedural_text = procedural_memory["text"] if procedural_memory else ""
@@ -2318,30 +2305,22 @@ These keywords have been used to retrieve relevant memories from the database.
             + (procedural_text if procedural_text else "Empty")
             + "\n</procedural_memory>"
         )
-        system_prompt += self._render_recent_window_block("procedural_memory", procedural_memory)
 
         return system_prompt
 
     @staticmethod
-    def _render_recent_window_block(tag: str, memory_bucket: Optional[dict]) -> str:
-        """Render the labeled ``recent`` (5s indexing-lag) bucket for the
-        dedup-deciding owning sub-agent. Returns empty string when the bucket
-        is absent (non-owning agent) or empty (no rows written in the recent
-        window). The block is rendered as a separate ``<{tag}>`` section with
-        a "Recently Written" header so the LLM can reason about just-written
-        rows separately from the ranked relevance results.
+    def _merge_recent_into_relevant(relevant: List[Any], recent: List[Any]) -> List[Any]:
+        """Union just-written ``recent`` rows into the ranked ``relevant`` list.
+
+        Preserves the Search-provider ranking of ``relevant`` and appends only
+        the ``recent`` rows whose ``id`` is not already present (de-dup by id).
+        The appended rows are the just-written candidates the Search provider
+        may not have indexed yet, so the dedup-deciding owning sub-agent sees
+        them alongside the ranked results in a single list.
         """
-        if not memory_bucket:
-            return ""
-        recent_text = memory_bucket.get("recent_text", "")
-        recent_count = memory_bucket.get("recent_count", 0)
-        if not recent_text or recent_count == 0:
-            return ""
-        return (
-            f"\n<{tag}> Recently Written ({recent_count} rows in the last few seconds, "
-            "may not be indexed yet — review for duplicates before creating new entries):\n"
-            f"{recent_text}\n</{tag}>\n"
-        )
+        relevant_ids = {item.id for item in relevant}
+        appended = [item for item in recent if item.id not in relevant_ids]
+        return relevant + appended
 
     async def extract_memory_for_system_prompt(self, message: str) -> str:
         """
