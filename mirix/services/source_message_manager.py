@@ -27,7 +27,9 @@ def compute_content_hash(role: str, content: Any) -> str:
     h.update(len(role_bytes).to_bytes(4, "big"))
     h.update(role_bytes)
 
-    content_bytes = json.dumps(content, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    content_bytes = json.dumps(content, sort_keys=True, ensure_ascii=False).encode(
+        "utf-8"
+    )
     h.update(len(content_bytes).to_bytes(4, "big"))
     h.update(content_bytes)
 
@@ -50,7 +52,10 @@ def compute_batch_hash(
         h.update(len(encoded).to_bytes(4, "big"))
         h.update(encoded)
     for msg in messages:
-        for part in [msg["role"], json.dumps(msg["content"], sort_keys=True, ensure_ascii=False)]:
+        for part in [
+            msg["role"],
+            json.dumps(msg["content"], sort_keys=True, ensure_ascii=False),
+        ]:
             encoded = part.encode("utf-8")
             h.update(len(encoded).to_bytes(4, "big"))
             h.update(encoded)
@@ -169,7 +174,9 @@ class SourceMessageManager:
                 external_message_id=msg.get("external_message_id"),
                 role=role,
                 content=content if isinstance(content, dict) else {"text": content},
-                occurred_at=parse_occurred_at(msg.get("occurred_at") or fallback_occurred_at),
+                occurred_at=parse_occurred_at(
+                    msg.get("occurred_at") or fallback_occurred_at
+                ),
                 sequence_num=seq,
                 content_hash=content_hash,
                 message_metadata=msg.get("metadata"),
@@ -180,6 +187,78 @@ class SourceMessageManager:
                 is_deleted=False,
             )
             rows.append(row)
+
+        # Relational provider delegation — no bulk_create endpoint, so loop create() per row.
+        # uq_source_messages_hash and uq_source_messages_ext_id catch duplicates.
+        # Per-row classification: conflict (silent no-op), transient (retry then warn),
+        # permanent (re-raise — these are real bugs, not data we want to drop).
+        from mirix.database.provider_write_retry import (
+            is_conflict,
+            is_transient,
+            retry_transient,
+        )
+        from mirix.database.relational_provider import get_relational_provider
+        from mirix.observability.skip_spans import emit_idempotency_skip_span
+
+        provider = get_relational_provider()
+        if provider:
+            inserted = 0
+            for row in rows:
+                # Provider expects ISO strings, not datetime objects
+                row_payload = {
+                    **row,
+                    "occurred_at": (
+                        row["occurred_at"].isoformat() if row["occurred_at"] else None
+                    ),
+                    "created_at": row["created_at"].isoformat(),
+                    "updated_at": row["updated_at"].isoformat(),
+                }
+                try:
+                    await retry_transient(
+                        lambda payload=row_payload: provider.create(
+                            "source_messages", payload
+                        ),
+                        op=f"source_messages.create({row['content_hash'][:8]}...)",
+                    )
+                    inserted += 1
+                except Exception as e:
+                    if is_conflict(e):
+                        logger.debug(
+                            "source_messages conflict for content_hash=%s — no-op",
+                            row["content_hash"],
+                        )
+                        continue
+                    if is_transient(e):
+                        logger.warning(
+                            "source_messages write failed after retries (source=%s, hash=%s): %s",
+                            memory_source_id,
+                            row["content_hash"],
+                            e,
+                        )
+                        emit_idempotency_skip_span(
+                            name="Source message write failed",
+                            reason="source-message-write-failed",
+                            metadata={
+                                "memory_source_id": memory_source_id,
+                                "content_hash": row["content_hash"],
+                                "error": str(e),
+                            },
+                        )
+                        continue
+                    logger.error(
+                        "source_messages write failed permanently (source=%s, hash=%s): %s",
+                        memory_source_id,
+                        row["content_hash"],
+                        e,
+                    )
+                    raise
+            logger.info(
+                "Bulk inserted %d/%d source messages for source %s (via provider)",
+                inserted,
+                len(rows),
+                memory_source_id,
+            )
+            return inserted
 
         async with self.session_maker() as session:
             inserted = await SourceMessageModel.bulk_create_or_ignore(
@@ -222,6 +301,41 @@ class SourceMessageManager:
 
         Returns a PaginatedResponse with next_cursor and has_more.
         """
+        # Relational provider delegation
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            # VEPAGE-1107: route through named query. The generic
+            # ``provider.list`` against source_messages was failing with
+            # ``Unable to Construct Filter Query`` (relationship logical
+            # name resolution) and the response also dropped the FK
+            # column needed for PydanticSourceMessage construction. The
+            # NQ projects ``memorysource_id`` explicitly via SELECT *.
+            records = await provider.find_using_named_query(
+                "source_messages",
+                "source_message_manager.get_messages_by_source_id",
+                params={"memorySourceId": memory_source_id},
+                page_size=1500,
+            )
+            records.sort(key=lambda r: r.get("sequence_num") or 0)
+            if cursor:
+                # cursor is a row id; skip until we pass that row's sequence_num
+                cur = next((r for r in records if r.get("id") == cursor), None)
+                if cur is not None:
+                    cur_seq = cur.get("sequence_num") or 0
+                    records = [
+                        r for r in records if (r.get("sequence_num") or 0) > cur_seq
+                    ]
+            has_more = len(records) > limit
+            records = records[:limit]
+            items = [PydanticSourceMessage(**r) for r in records]
+            return PaginatedResponse(
+                items=items,
+                next_cursor=items[-1].id if has_more and items else None,
+                has_more=has_more,
+            )
+
         async with self.session_maker() as session:
             query = (
                 select(SourceMessageModel)
@@ -233,10 +347,14 @@ class SourceMessageManager:
             )
 
             if cursor:
-                cursor_result = await session.execute(select(SourceMessageModel).where(SourceMessageModel.id == cursor))
+                cursor_result = await session.execute(
+                    select(SourceMessageModel).where(SourceMessageModel.id == cursor)
+                )
                 cursor_obj = cursor_result.scalar_one_or_none()
                 if cursor_obj:
-                    query = query.where(SourceMessageModel.sequence_num > cursor_obj.sequence_num)
+                    query = query.where(
+                        SourceMessageModel.sequence_num > cursor_obj.sequence_num
+                    )
 
             # Fetch limit+1 to determine has_more
             query = query.limit(limit + 1)

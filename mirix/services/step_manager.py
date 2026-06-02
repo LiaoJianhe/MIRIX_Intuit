@@ -69,6 +69,7 @@ class StepManager:
             )
             if not rows:
                 from mirix.orm.errors import NoResultFound
+
                 raise NoResultFound(f"Step {step_id} not found")
             return PydanticStep(**rows[0])
         async with self.session_maker() as session:

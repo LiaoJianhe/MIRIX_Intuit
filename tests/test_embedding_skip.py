@@ -107,9 +107,10 @@ async def test_insert_event_with_provider_does_not_call_embedding_model():
     manager = EpisodicMemoryManager()
     _manager_no_session(manager)
 
-    with patch("mirix.database.relational_provider.get_relational_provider", return_value=provider), patch(
-        "mirix.services.episodic_memory_manager.embedding_model", new_callable=AsyncMock
-    ) as mock_embedding_model:
+    with (
+        patch("mirix.database.relational_provider.get_relational_provider", return_value=provider),
+        patch("mirix.services.episodic_memory_manager.embedding_model", new_callable=AsyncMock) as mock_embedding_model,
+    ):
         await manager.insert_event(
             actor=actor,
             agent_state=agent_state,
@@ -135,8 +136,9 @@ async def test_insert_event_with_provider_create_has_no_embedding_keys():
     manager = EpisodicMemoryManager()
     _manager_no_session(manager)
 
-    with patch("mirix.database.relational_provider.get_relational_provider", return_value=provider), patch(
-        "mirix.services.episodic_memory_manager.embedding_model", new_callable=AsyncMock
+    with (
+        patch("mirix.database.relational_provider.get_relational_provider", return_value=provider),
+        patch("mirix.services.episodic_memory_manager.embedding_model", new_callable=AsyncMock),
     ):
         await manager.insert_event(
             actor=actor,
@@ -165,13 +167,14 @@ async def test_insert_event_without_provider_calls_embedding_model_when_build_en
     mock_embed = AsyncMock()
     mock_embed.get_text_embedding = AsyncMock(return_value=[0.01] * 16)
 
-    with patch("mirix.database.relational_provider.get_relational_provider", return_value=None), patch(
-        "mirix.services.episodic_memory_manager.BUILD_EMBEDDINGS_FOR_MEMORY", True
-    ), patch(
-        "mirix.services.episodic_memory_manager.embedding_model", new_callable=AsyncMock, return_value=mock_embed
-    ) as mock_embedding_model_factory, mock.patch.object(
-        EpisodicMemoryManager, "create_episodic_memory", new_callable=AsyncMock
-    ) as mock_create:
+    with (
+        patch("mirix.database.relational_provider.get_relational_provider", return_value=None),
+        patch("mirix.services.episodic_memory_manager.BUILD_EMBEDDINGS_FOR_MEMORY", True),
+        patch(
+            "mirix.services.episodic_memory_manager.embedding_model", new_callable=AsyncMock, return_value=mock_embed
+        ) as mock_embedding_model_factory,
+        mock.patch.object(EpisodicMemoryManager, "create_episodic_memory", new_callable=AsyncMock) as mock_create,
+    ):
         await manager.insert_event(
             actor=actor,
             agent_state=agent_state,
@@ -230,9 +233,10 @@ async def test_insert_semantic_item_with_provider_does_not_call_embedding_model(
     manager = SemanticMemoryManager()
     _manager_no_session(manager)
 
-    with patch("mirix.database.relational_provider.get_relational_provider", return_value=provider), patch(
-        "mirix.services.semantic_memory_manager.embedding_model", new_callable=AsyncMock
-    ) as mock_embedding_model:
+    with (
+        patch("mirix.database.relational_provider.get_relational_provider", return_value=provider),
+        patch("mirix.services.semantic_memory_manager.embedding_model", new_callable=AsyncMock) as mock_embedding_model,
+    ):
         await manager.insert_semantic_item(
             actor=actor,
             agent_state=agent_state,
@@ -257,8 +261,9 @@ async def test_insert_semantic_item_with_provider_create_has_no_embedding_keys()
     manager = SemanticMemoryManager()
     _manager_no_session(manager)
 
-    with patch("mirix.database.relational_provider.get_relational_provider", return_value=provider), patch(
-        "mirix.services.semantic_memory_manager.embedding_model", new_callable=AsyncMock
+    with (
+        patch("mirix.database.relational_provider.get_relational_provider", return_value=provider),
+        patch("mirix.services.semantic_memory_manager.embedding_model", new_callable=AsyncMock),
     ):
         await manager.insert_semantic_item(
             actor=actor,
@@ -286,13 +291,14 @@ async def test_insert_semantic_item_without_provider_calls_embedding_model_when_
     mock_embed = AsyncMock()
     mock_embed.get_text_embedding = AsyncMock(return_value=[0.02] * 16)
 
-    with patch("mirix.database.relational_provider.get_relational_provider", return_value=None), patch(
-        "mirix.services.semantic_memory_manager.BUILD_EMBEDDINGS_FOR_MEMORY", True
-    ), patch(
-        "mirix.services.semantic_memory_manager.embedding_model", new_callable=AsyncMock, return_value=mock_embed
-    ) as mock_embedding_model_factory, mock.patch.object(
-        SemanticMemoryManager, "create_item", new_callable=AsyncMock
-    ) as mock_create_item:
+    with (
+        patch("mirix.database.relational_provider.get_relational_provider", return_value=None),
+        patch("mirix.services.semantic_memory_manager.BUILD_EMBEDDINGS_FOR_MEMORY", True),
+        patch(
+            "mirix.services.semantic_memory_manager.embedding_model", new_callable=AsyncMock, return_value=mock_embed
+        ) as mock_embedding_model_factory,
+        mock.patch.object(SemanticMemoryManager, "create_item", new_callable=AsyncMock) as mock_create_item,
+    ):
         await manager.insert_semantic_item(
             actor=actor,
             agent_state=agent_state,

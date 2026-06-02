@@ -563,7 +563,7 @@ class MessageManager:
 
         rprovider = get_relational_provider()
         if rprovider is not None:
-            from common.ipsr.named_query_results import CountResult
+            from mirix.database.named_query_results import CountResult
 
             role_value = role.value if role is not None else None
             rows = await rprovider.find_using_named_query(
