@@ -360,7 +360,7 @@ class TestEpisodicMemoryManagerDelegation:
         """After the labeled-bucket refactor, the manager surface is
         Search-only — no contextvar branching, no hybrid_search call. The
         recent (5s indexing-lag) bucket is fetched separately from the
-        save-flow prompt builder via fetch_recent_window."""
+        save-flow prompt builder's _fetch_recent_indexing_lag_window."""
         row = _episodic_row_dict()
         mock_search = MagicMock()
         mock_search.search = AsyncMock(return_value=([row], None))

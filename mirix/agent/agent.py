@@ -4,7 +4,7 @@ import json
 import logging
 import traceback
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -17,6 +17,7 @@ from mirix.constants import (
     ERROR_MESSAGE_PREFIX,
     FIRST_MESSAGE_ATTEMPTS,
     FUNC_FAILED_HEARTBEAT_MESSAGE,
+    HYBRID_READ_WINDOW_SECONDS,
     LLM_MAX_TOKENS,
     MAX_CHAINING_STEPS,
     MAX_EMBEDDING_DIM,
@@ -1906,35 +1907,41 @@ class Agent(BaseAgent):
     ) -> List[Any]:
         """Fetch rows written in the recent indexing-lag window for an owning sub-agent's dedup decision.
 
-        Delegates to ``fetch_recent_window``, which queries the Relational DB
-        provider for rows written within the configured window. The ranked
-        ("relevant") bucket is obtained separately by the prompt builder via
-        the manager ``list_*`` call (which preserves ``@update_timezone`` and
-        the manager's post-processing); the caller unions these recent rows
-        into that list. Returns the recent rows as a list of Pydantic
-        instances, capped at ``MAX_RETRIEVAL_LIMIT_IN_SYSTEM``.
+        Queries the Relational DB provider for rows whose ``created_at`` or
+        ``updated_at`` falls within ``HYBRID_READ_WINDOW_SECONDS``. These are
+        the just-written candidates the Search provider may not have indexed
+        yet. The ranked ("relevant") bucket is obtained separately by the
+        prompt builder via the manager ``list_*`` call (which preserves
+        ``@update_timezone`` and the manager's post-processing); the caller
+        unions these recent rows into that list. Returns the recent rows as
+        Pydantic instances, capped at ``MAX_RETRIEVAL_LIMIT_IN_SYSTEM``.
 
         Returns ``[]`` when either provider is unregistered (PG-only path):
         in that mode reads come from the canonical SQL store, so the
-        indexing-lag distinction does not exist.
+        indexing-lag distinction does not exist. Fail-closed: a raising
+        Relational call propagates.
         """
         from mirix.database.relational_provider import get_relational_provider
         from mirix.database.search_provider import get_search_provider
-        from mirix.services.hybrid_search_helper import fetch_recent_window
 
         sp = get_search_provider()
         rp = get_relational_provider()
         if not (sp and rp):
             return []
 
-        recent = await fetch_recent_window(
-            table=table,
-            relational_provider=rp,
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=HYBRID_READ_WINDOW_SECONDS)
+        recent_records = await rp.list(
+            table,
             user_id=self.user.id,
             organization_id=self.user.organization_id,
-            recent_cap=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
+            time_range={
+                "updated_at__gte": cutoff.isoformat(),
+                "created_at__gte": cutoff.isoformat(),
+            },
+            time_range_or_null_updated=True,
+            limit=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
         )
-        return [pydantic_cls(**r) for r in recent]
+        return [pydantic_cls(**r) for r in recent_records]
 
     async def build_system_prompt_with_memories(
         self,
