@@ -2023,13 +2023,9 @@ class Agent(BaseAgent):
                 timezone_str=timezone_str,
                 sensitivity=None if is_owning_kv_agent else ["low", "medium"],
             )
-            recent_knowledge_vault = (
-                await self._fetch_recent_indexing_lag_window(
-                    table="knowledge_vault",
-                    pydantic_cls=PydanticKnowledgeVaultItem,
-                )
-                if is_owning_kv_agent
-                else []
+            recent_knowledge_vault = await self._fetch_recent_indexing_lag_window(
+                table="knowledge_vault",
+                pydantic_cls=PydanticKnowledgeVaultItem,
             )
             merged_knowledge_vault = self._merge_recent_into_relevant(
                 current_knowledge_vault, recent_knowledge_vault
@@ -2104,13 +2100,9 @@ class Agent(BaseAgent):
                 limit=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
                 timezone_str=timezone_str,
             )
-            recent_resource_memory_items = (
-                await self._fetch_recent_indexing_lag_window(
-                    table="resource_memory",
-                    pydantic_cls=PydanticResourceMemoryItem,
-                )
-                if is_owning_agent
-                else []
+            recent_resource_memory_items = await self._fetch_recent_indexing_lag_window(
+                table="resource_memory",
+                pydantic_cls=PydanticResourceMemoryItem,
             )
             merged_resource_memory = self._merge_recent_into_relevant(
                 current_resource_memory, recent_resource_memory_items
@@ -2143,13 +2135,9 @@ class Agent(BaseAgent):
                 limit=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
                 timezone_str=timezone_str,
             )
-            recent_procedural_memory_items = (
-                await self._fetch_recent_indexing_lag_window(
-                    table="procedural_memory",
-                    pydantic_cls=PydanticProceduralMemoryItem,
-                )
-                if is_owning_agent
-                else []
+            recent_procedural_memory_items = await self._fetch_recent_indexing_lag_window(
+                table="procedural_memory",
+                pydantic_cls=PydanticProceduralMemoryItem,
             )
             merged_procedural_memory = self._merge_recent_into_relevant(
                 current_procedural_memory, recent_procedural_memory_items
@@ -2184,13 +2172,9 @@ class Agent(BaseAgent):
                 limit=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
                 timezone_str=timezone_str,
             )
-            recent_semantic_memory_items = (
-                await self._fetch_recent_indexing_lag_window(
-                    table="semantic_memory",
-                    pydantic_cls=PydanticSemanticMemoryItem,
-                )
-                if is_owning_agent
-                else []
+            recent_semantic_memory_items = await self._fetch_recent_indexing_lag_window(
+                table="semantic_memory",
+                pydantic_cls=PydanticSemanticMemoryItem,
             )
             merged_semantic_memory = self._merge_recent_into_relevant(
                 current_semantic_memory, recent_semantic_memory_items
