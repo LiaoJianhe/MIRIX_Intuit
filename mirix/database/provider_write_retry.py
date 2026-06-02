@@ -1,8 +1,9 @@
 """Retry + classification helpers for relational-provider writes.
 
-The provider interface is duck-typed (no IPSR import in MIRIX), so exception
-classification is structural — we look at attributes (status_code, error_code,
-class name) rather than isinstance checks against IPSR-specific classes.
+The provider interface is duck-typed (the provider's exception classes are not
+imported here), so classification is structural — we look at attributes
+(status_code, error_code, class name) rather than isinstance checks against
+provider-specific classes.
 
 Three failure classes:
 
@@ -37,18 +38,25 @@ def _exc_status_code(exc: BaseException) -> int | None:
 def is_conflict(exc: BaseException) -> bool:
     """True if the exception looks like a unique-constraint violation.
 
-    We don't have a single canonical IPSR error code for unique conflicts yet;
-    treat 409 plus any error_code/message containing CONFLICT/DUPLICATE/UNIQUE
-    as a conflict. Conservative — false positives just skip a retry, not data loss.
+    There is no single canonical error code for unique conflicts across the
+    providers we support; treat 409 plus any error_code/message containing
+    CONFLICT/DUPLICATE/UNIQUE as a conflict. Conservative — false positives just
+    skip a retry, not data loss.
 
-    IPS-Relational does not surface unique-index violations as a 409 nor with a
-    CONFLICT/DUPLICATE/UNIQUE token. It raises ``BadRequestError`` (no
-    ``status_code``) with the message
+    Some relational providers do not surface unique-index violations as a 409
+    nor with a CONFLICT/DUPLICATE/UNIQUE token. One such provider raises a
+    ``BadRequestError`` (no ``status_code``) with the message
     ``"Client data violates a database constraint:  uq_<index>"`` and an ambiguous
     ``DATABASE_CONSTRAINT_VIOLATION`` error_code that is *also* used for
     column-shape mismatches. We therefore key off the unique-index name prefix
     (``uq_``) which only appears for genuine uniqueness conflicts — the
     column-shape variant of the same error carries no constraint name.
+
+    Primary-key collisions (``<table>_pkey``) are the same class of duplicate-key
+    conflict; PG/asyncpg surfaces them as ``UniqueConstraintViolationError`` with
+    a message containing ``"users_pkey"`` etc. Match ``_PKEY`` too. The
+    column-shape variant still carries no constraint name, so this does not
+    widen the false-positive surface.
     """
     status = _exc_status_code(exc)
     if status == 409:
@@ -57,7 +65,7 @@ def is_conflict(exc: BaseException) -> bool:
     msg = (str(exc) or "").upper()
     if any(hint in code or hint in msg for hint in _CONFLICT_HINTS):
         return True
-    return "VIOLATES A DATABASE CONSTRAINT" in msg and "UQ_" in msg
+    return "VIOLATES A DATABASE CONSTRAINT" in msg and ("UQ_" in msg or "_PKEY" in msg)
 
 
 def is_transient(exc: BaseException) -> bool:

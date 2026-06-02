@@ -30,7 +30,14 @@ class UserManager:
 
     @enforce_types
     async def create_admin_user(self, org_id: str = OrganizationManager.DEFAULT_ORG_ID) -> PydanticUser:
-        """Create the admin user (async)."""
+        """Create the admin user (async).
+
+        ``ADMIN_USER_ID`` is a global constant; the admin row is a shared stub
+        across orgs (see ``UserManager.create_user``). The pre-check is the fast
+        path; the catch-and-swallow handles startup races where another process
+        won between our read and our create.
+        """
+        from mirix.database.provider_write_retry import is_conflict
         from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
@@ -45,18 +52,27 @@ class UserManager:
             if existing:
                 return PydanticUser(**existing)
 
-            result = await provider.create(
-                "users",
-                {
-                    "id": self.ADMIN_USER_ID,
-                    "name": self.ADMIN_USER_NAME,
-                    "status": "active",
-                    "timezone": self.DEFAULT_TIME_ZONE,
-                    "organization_id": org_id,
-                    "is_admin": True,
-                },
-            )
-            return PydanticUser(**result)
+            try:
+                result = await provider.create(
+                    "users",
+                    {
+                        "id": self.ADMIN_USER_ID,
+                        "name": self.ADMIN_USER_NAME,
+                        "status": "active",
+                        "timezone": self.DEFAULT_TIME_ZONE,
+                        "organization_id": org_id,
+                        "is_admin": True,
+                    },
+                )
+                return PydanticUser(**result)
+            except Exception as exc:
+                if not is_conflict(exc):
+                    raise
+                # Lost the race; another caller created the row. Return it.
+                existing = await provider.read("users", self.ADMIN_USER_ID)
+                if existing is None:
+                    raise
+                return PydanticUser(**existing)
 
         async with self.session_maker() as session:
             try:
@@ -75,30 +91,57 @@ class UserManager:
                     organization_id=org_id,
                     is_admin=True,
                 )
-                await user.create(session)
+                try:
+                    await user.create(session)
+                except Exception as exc:
+                    if not is_conflict(exc):
+                        raise
+                    user = await UserModel.read(db_session=session, identifier=self.ADMIN_USER_ID)
 
             return user.to_pydantic()
 
     @enforce_types
     async def create_user(self, pydantic_user: PydanticUser) -> PydanticUser:
-        """Create a new user if it doesn't already exist (with Redis caching).
+        """Create a new user, or return the existing row if id is already taken.
+
+        ``users.id`` is globally unique (id-only PK on every backend). The
+        ``users`` row is a shared stub across orgs — per-org isolation lives on
+        child tables (memories, blocks, messages), not on this row. Two callers
+        using the same user id under different orgs share this row and that is
+        the intended behavior. Catch the PK conflict and return the existing
+        row instead of erroring.
 
         Args:
             pydantic_user: The user data
         """
+        from mirix.database.provider_write_retry import is_conflict
         from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
         if provider:
             user_data = pydantic_user.model_dump()
-            result = await provider.create("users", user_data)
-            return PydanticUser(**result)
+            try:
+                result = await provider.create("users", user_data)
+                return PydanticUser(**result)
+            except Exception as exc:
+                if not is_conflict(exc):
+                    raise
+                existing = await provider.read("users", pydantic_user.id)
+                if existing is None:
+                    raise
+                return PydanticUser(**existing)
 
         async with self.session_maker() as session:
             user_data = pydantic_user.model_dump()
             new_user = UserModel(**user_data)
-            await new_user.create_with_redis(session, actor=None)
-            return new_user.to_pydantic()
+            try:
+                await new_user.create_with_redis(session, actor=None)
+                return new_user.to_pydantic()
+            except Exception as exc:
+                if not is_conflict(exc):
+                    raise
+            existing = await UserModel.read(db_session=session, identifier=pydantic_user.id)
+            return existing.to_pydantic()
 
     @enforce_types
     async def update_user(self, user_update: UserUpdate) -> PydanticUser:
