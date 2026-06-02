@@ -50,18 +50,52 @@ class ClientManager:
             if existing_rows:
                 return PydanticClient(**existing_rows[0])
 
-            result = await provider.create(
-                "clients",
-                {
-                    "id": self.DEFAULT_CLIENT_ID,
-                    "name": self.DEFAULT_CLIENT_NAME,
-                    "status": "active",
-                    "write_scope": None,
-                    "read_scopes": [],
-                    "organization_id": org_id,
-                },
-            )
-            return PydanticClient(**result)
+            # IPS-Relational keys clients on the auto-generated id alone (no
+            # composite PK), so the well-known DEFAULT_CLIENT_ID can exist
+            # under only one organization at a time. If the org-scoped
+            # pre-check missed because the row lives under a different org,
+            # re-target it to the current org instead of crashing the
+            # service on clients_pkey (mirrors create_admin_user).
+            from mirix.database.provider_write_retry import is_conflict
+            from mirix.log import get_logger
+
+            try:
+                result = await provider.create(
+                    "clients",
+                    {
+                        "id": self.DEFAULT_CLIENT_ID,
+                        "name": self.DEFAULT_CLIENT_NAME,
+                        "status": "active",
+                        "write_scope": None,
+                        "read_scopes": [],
+                        "organization_id": org_id,
+                    },
+                )
+                return PydanticClient(**result)
+            except Exception as exc:
+                if not is_conflict(exc):
+                    raise
+                existing = await provider.read("clients", self.DEFAULT_CLIENT_ID)
+                if existing is None:
+                    raise
+                if existing.get("organization_id") == org_id:
+                    return PydanticClient(**existing)
+                get_logger(__name__).info(
+                    "Re-targeting default client %s from org %s to %s",
+                    self.DEFAULT_CLIENT_ID,
+                    existing.get("organization_id"),
+                    org_id,
+                )
+                updated = await provider.update(
+                    "clients",
+                    self.DEFAULT_CLIENT_ID,
+                    {
+                        "organization_id": org_id,
+                        "name": self.DEFAULT_CLIENT_NAME,
+                        "status": "active",
+                    },
+                )
+                return PydanticClient(**updated)
 
         async with self.session_maker() as session:
             try:

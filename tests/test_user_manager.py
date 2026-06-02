@@ -641,6 +641,107 @@ class TestDefaultEntitiesOrgScoped:
         )
 
 
+class TestCreateAdminUserPkeyHeal:
+    """create_admin_user must heal IPS-Relational users_pkey collisions.
+
+    IPS-R keys ``users`` on the auto-generated ``id`` alone (no composite PK),
+    so the well-known ADMIN_USER_ID can exist under only ONE organization at
+    a time. The org-scoped pre-check NQ can't see a row that belongs to a
+    different org, but the subsequent create collides on users_pkey.
+    create_admin_user must re-target the existing row to the current org
+    rather than crashing the service.
+    """
+
+    pytestmark = pytest.mark.asyncio(loop_scope="module")
+
+    @staticmethod
+    def _ipsr_pkey_error():
+        class _BadRequestError(Exception):
+            def __init__(self, message):
+                super().__init__(message)
+                self.error_code = "DATABASE_CONSTRAINT_VIOLATION"
+
+        return _BadRequestError(
+            "Client data violates a database constraint:  users_pkey"
+        )
+
+    async def test_pkey_conflict_same_org_returns_existing(self, monkeypatch):
+        """A users_pkey conflict where the existing row is already in the
+        target org returns the row idempotently (race-with-self path)."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        org_id = OrganizationManager.DEFAULT_ORG_ID
+        existing_row = {
+            "id": UserManager.ADMIN_USER_ID,
+            "name": UserManager.ADMIN_USER_NAME,
+            "status": "active",
+            "timezone": UserManager.DEFAULT_TIME_ZONE,
+            "organization_id": org_id,
+            "is_admin": True,
+        }
+        provider = MagicMock()
+        provider.read = AsyncMock(side_effect=[{"id": org_id}, existing_row])
+        provider.find_using_named_query = AsyncMock(return_value=[])
+        provider.create = AsyncMock(side_effect=self._ipsr_pkey_error())
+        provider.update = AsyncMock()
+
+        monkeypatch.setattr(
+            "mirix.database.relational_provider.get_relational_provider",
+            lambda: provider,
+        )
+
+        result = await UserManager().create_admin_user(org_id=org_id)
+
+        assert result.id == UserManager.ADMIN_USER_ID
+        assert result.organization_id == org_id
+        provider.update.assert_not_awaited()  # same-org -> no update needed
+
+    async def test_pkey_conflict_different_org_retargets_row(self, monkeypatch):
+        """A users_pkey conflict where the existing row is in a DIFFERENT
+        org re-targets it to the current org via provider.update."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        target_org = "org-target-1234"
+        foreign_org = "org-foreign-9999"
+        foreign_row = {
+            "id": UserManager.ADMIN_USER_ID,
+            "name": "default_user",  # stale shape from older bootstrap
+            "status": "active",
+            "timezone": "UTC",
+            "organization_id": foreign_org,
+            "is_admin": False,
+        }
+        retargeted_row = {
+            **foreign_row,
+            "organization_id": target_org,
+            "name": UserManager.ADMIN_USER_NAME,
+            "timezone": UserManager.DEFAULT_TIME_ZONE,
+            "is_admin": True,
+        }
+        provider = MagicMock()
+        provider.read = AsyncMock(side_effect=[{"id": target_org}, foreign_row])
+        provider.find_using_named_query = AsyncMock(return_value=[])
+        provider.create = AsyncMock(side_effect=self._ipsr_pkey_error())
+        provider.update = AsyncMock(return_value=retargeted_row)
+
+        monkeypatch.setattr(
+            "mirix.database.relational_provider.get_relational_provider",
+            lambda: provider,
+        )
+
+        result = await UserManager().create_admin_user(org_id=target_org)
+
+        assert result.id == UserManager.ADMIN_USER_ID
+        assert result.organization_id == target_org
+        provider.update.assert_awaited_once()
+        update_args = provider.update.await_args
+        assert update_args.args[0] == "users"
+        assert update_args.args[1] == UserManager.ADMIN_USER_ID
+        assert update_args.args[2]["organization_id"] == target_org
+        assert update_args.args[2]["name"] == UserManager.ADMIN_USER_NAME
+        assert update_args.args[2]["is_admin"] is True
+
+
 # ============================================================================
 # TEST CLASS: UserManager API Signature Verification
 # ============================================================================

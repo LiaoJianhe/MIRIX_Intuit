@@ -52,18 +52,53 @@ class UserManager:
             if existing_rows:
                 return PydanticUser(**existing_rows[0])
 
-            result = await provider.create(
-                "users",
-                {
-                    "id": self.ADMIN_USER_ID,
-                    "name": self.ADMIN_USER_NAME,
-                    "status": "active",
-                    "timezone": self.DEFAULT_TIME_ZONE,
-                    "organization_id": org_id,
-                    "is_admin": True,
-                },
-            )
-            return PydanticUser(**result)
+            # IPS-Relational keys users on the auto-generated id alone (no
+            # composite PK), so the well-known ADMIN_USER_ID can exist under
+            # only one organization at a time. The org-scoped pre-check above
+            # cannot see a row belonging to a different org, but the create
+            # will collide on users_pkey. Heal by re-targeting the colliding
+            # row to the current org rather than crashing the service.
+            from mirix.database.provider_write_retry import is_conflict
+
+            try:
+                result = await provider.create(
+                    "users",
+                    {
+                        "id": self.ADMIN_USER_ID,
+                        "name": self.ADMIN_USER_NAME,
+                        "status": "active",
+                        "timezone": self.DEFAULT_TIME_ZONE,
+                        "organization_id": org_id,
+                        "is_admin": True,
+                    },
+                )
+                return PydanticUser(**result)
+            except Exception as exc:
+                if not is_conflict(exc):
+                    raise
+                existing = await provider.read("users", self.ADMIN_USER_ID)
+                if existing is None:
+                    raise
+                if existing.get("organization_id") == org_id:
+                    return PydanticUser(**existing)
+                logger.info(
+                    "Re-targeting admin user %s from org %s to %s",
+                    self.ADMIN_USER_ID,
+                    existing.get("organization_id"),
+                    org_id,
+                )
+                updated = await provider.update(
+                    "users",
+                    self.ADMIN_USER_ID,
+                    {
+                        "organization_id": org_id,
+                        "name": self.ADMIN_USER_NAME,
+                        "status": "active",
+                        "timezone": self.DEFAULT_TIME_ZONE,
+                        "is_admin": True,
+                    },
+                )
+                return PydanticUser(**updated)
 
         async with self.session_maker() as session:
             try:
