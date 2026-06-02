@@ -25,6 +25,30 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+def reconcile_user_org_to_actor(user, actor):
+    """Return ``user`` with its org corrected to the actor's (client's) org.
+
+    The ``users`` row is a global, id-only-PK shared stub (VEPAGE-1155): its
+    ``organization_id`` records whichever org first created the user, and
+    per-org isolation lives on the child tables (blocks, memories). On the save
+    path the resolved user therefore carries its *first-seen* org, not the org
+    this save is for. Block scoping (``block_manager.get_blocks`` keys off
+    ``user.organization_id``) and the temporal guard then operate against the
+    stale org. The save's authoritative org is the client/actor's org, so
+    correct it here, at the single point where the stub becomes the live user
+    for this save.
+
+    Returns a copy (never mutates the input). No-op when ``user`` is None, the
+    actor has no org, or the orgs already match.
+    """
+    if user is None:
+        return None
+    actor_org = getattr(actor, "organization_id", None)
+    if not actor_org or user.organization_id == actor_org:
+        return user
+    return user.model_copy(update={"organization_id": actor_org})
+
+
 class QueueWorker:
     """Background worker that processes messages from the queue as an asyncio.Task"""
 
@@ -230,9 +254,9 @@ class QueueWorker:
                                 create_error,
                             )
                             user = await user_manager.get_admin_user()
-                    return actor, user
+                    return actor, reconcile_user_org_to_actor(user, actor)
                 user = await user_manager.get_admin_user()
-                return actor, user
+                return actor, reconcile_user_org_to_actor(user, actor)
 
             actor, user = await _resolve_actor_and_user()
 
