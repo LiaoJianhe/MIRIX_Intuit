@@ -353,6 +353,20 @@ async def get_client_and_org(
     Returns:
         tuple[str, str]: (client_id, org_id)
     """
+    # ECMS imports these route handlers and calls them as plain async
+    # functions (not through FastAPI's HTTP layer), so FastAPI never resolves
+    # ``Header(None)`` defaults — direct callers that omit a Header arg pass
+    # the ``Header(None)`` FieldInfo sentinel instead of ``None``. That object
+    # is truthy, so ``x_org_id or DEFAULT_ORG_ID`` would yield the sentinel
+    # and later fail @enforce_types deep in the call. Normalize any non-str
+    # value back to None so the default-org fallback fires.
+    if not isinstance(x_org_id, str):
+        x_org_id = None
+    if not isinstance(x_client_id, str):
+        x_client_id = None
+    if not isinstance(x_api_key, str):
+        x_api_key = None
+
     server = get_server()
 
     if x_api_key:

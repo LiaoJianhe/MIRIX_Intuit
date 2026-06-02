@@ -49,6 +49,12 @@ def is_conflict(exc: BaseException) -> bool:
     column-shape mismatches. We therefore key off the unique-index name prefix
     (``uq_``) which only appears for genuine uniqueness conflicts — the
     column-shape variant of the same error carries no constraint name.
+
+    Primary-key collisions (``<table>_pkey``) are the same class of duplicate-key
+    conflict; PG/asyncpg surfaces them as ``UniqueConstraintViolationError`` with
+    a message containing ``"users_pkey"`` etc. Match ``_PKEY`` too. The
+    column-shape variant still carries no constraint name, so this does not
+    widen the false-positive surface.
     """
     status = _exc_status_code(exc)
     if status == 409:
@@ -57,7 +63,7 @@ def is_conflict(exc: BaseException) -> bool:
     msg = (str(exc) or "").upper()
     if any(hint in code or hint in msg for hint in _CONFLICT_HINTS):
         return True
-    return "VIOLATES A DATABASE CONSTRAINT" in msg and "UQ_" in msg
+    return "VIOLATES A DATABASE CONSTRAINT" in msg and ("UQ_" in msg or "_PKEY" in msg)
 
 
 def is_transient(exc: BaseException) -> bool:
