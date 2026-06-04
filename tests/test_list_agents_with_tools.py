@@ -123,6 +123,36 @@ async def test_agent_with_no_tools_is_returned():
 
 
 @pytest.mark.asyncio
+async def test_stray_null_tool_row_does_not_create_phantom_empty():
+    """Grouping is robust to a null-tool row arriving alongside a real tool row
+    for the same agent.
+
+    Post-VEPAGE-1228-fix the NQ's INNER-wrapped LEFT JOIN should not emit a
+    null-tool row for an agent that has at least one in-scope tool (a
+    soft-deleted/cross-org mapping yields no row at all). This test pins the
+    client-side grouping contract defensively: even if such a row did arrive,
+    the agent must end with exactly its real tool, not a phantom empty entry.
+    """
+    am = AgentManager()
+    real = _agent_row("agent-epi", "episodic_memory_agent", "tool-aaaaaaaa", "episodic_memory_insert")
+    stray = _agent_row("agent-epi", "episodic_memory_agent", None, None)
+    stray["tool_id"] = None
+    stray["tool_name"] = None
+    stray["tool_json_schema"] = None
+    fake_rp = AsyncMock()
+    fake_rp.find_using_named_query = AsyncMock(return_value=[real, stray])
+
+    with patch(
+        "mirix.database.relational_provider.get_relational_provider",
+        return_value=fake_rp,
+    ):
+        agents = await am.list_agents_with_tools(parent_id="meta-1", actor=_make_actor())
+
+    assert len(agents) == 1
+    assert [t.name for t in agents[0].tools] == ["episodic_memory_insert"]
+
+
+@pytest.mark.asyncio
 async def test_no_relational_provider_falls_back_to_list_agents():
     am = AgentManager()
     sentinel = [object()]
