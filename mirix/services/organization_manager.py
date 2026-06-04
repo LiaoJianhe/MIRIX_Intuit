@@ -14,9 +14,7 @@ class OrganizationManager:
     # MIRIX_DEFAULT_ORG_ID / MIRIX_DEFAULT_ORG_NAME before importing any
     # mirix.* module to override these. Unset = today's hardcoded default,
     # so existing deployments are unaffected.
-    DEFAULT_ORG_ID = os.environ.get(
-        "MIRIX_DEFAULT_ORG_ID", "org-00000000-0000-4000-8000-000000000000"
-    )
+    DEFAULT_ORG_ID = os.environ.get("MIRIX_DEFAULT_ORG_ID", "org-00000000-0000-4000-8000-000000000000")
     DEFAULT_ORG_NAME = os.environ.get("MIRIX_DEFAULT_ORG_NAME", "default_org")
 
     def __init__(self):

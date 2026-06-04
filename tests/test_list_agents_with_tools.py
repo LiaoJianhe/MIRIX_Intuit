@@ -7,6 +7,7 @@ followed by one ``list_tools_by_ids`` per agent. Rows come back from the
 dicts (skip_entity_mapping=True) and are grouped agent-side into
 ``PydanticAgentState`` objects with their ``tools`` populated.
 """
+
 import json
 from unittest.mock import AsyncMock, patch
 
@@ -125,10 +126,13 @@ async def test_agent_with_no_tools_is_returned():
 async def test_no_relational_provider_falls_back_to_list_agents():
     am = AgentManager()
     sentinel = [object()]
-    with patch(
-        "mirix.database.relational_provider.get_relational_provider",
-        return_value=None,
-    ), patch.object(am, "list_agents", new=AsyncMock(return_value=sentinel)) as la:
+    with (
+        patch(
+            "mirix.database.relational_provider.get_relational_provider",
+            return_value=None,
+        ),
+        patch.object(am, "list_agents", new=AsyncMock(return_value=sentinel)) as la,
+    ):
         result = await am.list_agents_with_tools(parent_id="meta-1", actor=_make_actor())
 
     la.assert_awaited_once()

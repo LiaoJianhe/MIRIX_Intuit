@@ -100,11 +100,7 @@ async def process_external_message(raw_message: bytes) -> None:
 
     queue_message = deserialize_queue_message(raw_message, format=KAFKA_SERIALIZATION_FORMAT)
 
-    memory_source_id = (
-        queue_message.memory_source_id
-        if queue_message.HasField("memory_source_id")
-        else None
-    )
+    memory_source_id = queue_message.memory_source_id if queue_message.HasField("memory_source_id") else None
 
     logger.debug(
         "Processing external message (%s format): agent_id=%s, user_id=%s, memory_source_id=%s",

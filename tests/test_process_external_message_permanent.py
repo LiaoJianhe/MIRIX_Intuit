@@ -30,9 +30,7 @@ async def test_permanent_failure_marks_processing_complete_and_does_not_raise(mo
     )
 
     worker = Mock()
-    worker.process_external_message = AsyncMock(
-        side_effect=LLMUnprocessableEntityError("rejected by risk screening")
-    )
+    worker.process_external_message = AsyncMock(side_effect=LLMUnprocessableEntityError("rejected by risk screening"))
 
     fake_manager = Mock()
     fake_manager.is_initialized = True

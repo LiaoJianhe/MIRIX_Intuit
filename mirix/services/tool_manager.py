@@ -203,9 +203,7 @@ class ToolManager:
             return [tool.to_pydantic() for tool in tools]
 
     @enforce_types
-    async def list_tools_by_names(
-        self, tool_names: List[str], actor: PydanticClient
-    ) -> List[PydanticTool]:
+    async def list_tools_by_names(self, tool_names: List[str], actor: PydanticClient) -> List[PydanticTool]:
         """Batch-fetch tools by name.
 
         Returns the tools whose ``name`` is in ``tool_names`` and whose
@@ -265,9 +263,7 @@ class ToolManager:
         return results
 
     @enforce_types
-    async def list_tools_by_ids(
-        self, tool_ids: List[str], actor: PydanticClient
-    ) -> List[PydanticTool]:
+    async def list_tools_by_ids(self, tool_ids: List[str], actor: PydanticClient) -> List[PydanticTool]:
         """Batch-fetch tools by id (used by the ECMS provider's M2M
         post-create resolution). Same shape as ``list_tools_by_names``."""
         unique_ids = list({i for i in tool_ids if i})
@@ -448,9 +444,7 @@ class ToolManager:
         return tools
 
     @enforce_types
-    async def ensure_base_tools_exist(
-        self, actor: PydanticClient
-    ) -> List[PydanticTool]:
+    async def ensure_base_tools_exist(self, actor: PydanticClient) -> List[PydanticTool]:
         """Lightweight request-path base-tool verification.
 
         Used by ``agent_manager.create_meta_agent`` on every cold-start init

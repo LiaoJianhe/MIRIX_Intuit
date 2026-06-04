@@ -24,7 +24,6 @@ from mirix.errors import (
 from mirix.queue import error_policy as ep
 from mirix.queue.error_policy import Bucket, Outcome, OutcomeKind, classify, process_with_policy
 
-
 # ---------- classify() ----------
 
 
@@ -32,9 +31,9 @@ from mirix.queue.error_policy import Bucket, Outcome, OutcomeKind, classify, pro
     "exc_cls",
     [
         LLMUnprocessableEntityError,  # 422
-        LLMBadRequestError,           # 400
-        LLMAuthenticationError,       # 401
-        LLMPermissionDeniedError,     # 403
+        LLMBadRequestError,  # 400
+        LLMAuthenticationError,  # 401
+        LLMPermissionDeniedError,  # 403
     ],
 )
 def test_classify_permanent(exc_cls):
@@ -44,9 +43,9 @@ def test_classify_permanent(exc_cls):
 @pytest.mark.parametrize(
     "exc_cls",
     [
-        LLMRateLimitError,    # 429
-        LLMServerError,       # 5xx
-        LLMConnectionError,   # network
+        LLMRateLimitError,  # 429
+        LLMServerError,  # 5xx
+        LLMConnectionError,  # network
     ],
 )
 def test_classify_transient(exc_cls):
@@ -105,9 +104,7 @@ async def test_process_with_policy_permanent_path_invokes_callback_and_short_cir
     assert out.bucket is Bucket.PERMANENT
     assert isinstance(out.cause, LLMUnprocessableEntityError)
     # Single attempt — Permanent does not retry.
-    assert perm_calls == [
-        ("src-422", "LLMUnprocessableEntityError: content rejected", "LLMUnprocessableEntityError")
-    ]
+    assert perm_calls == [("src-422", "LLMUnprocessableEntityError: content rejected", "LLMUnprocessableEntityError")]
 
 
 @pytest.mark.asyncio

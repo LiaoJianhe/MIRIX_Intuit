@@ -522,9 +522,7 @@ class ResourceMemoryManager:
             update_data = item_update.model_dump(exclude_unset=True)
             update_data.pop("id", None)
             update_data.pop("updated_at", None)
-            result = await provider.update(
-                "resource_memory", item_update.id, update_data, actor=actor
-            )
+            result = await provider.update("resource_memory", item_update.id, update_data, actor=actor)
             try:
                 from mirix.services.memory_manager_helpers import invalidate_memory_cache
 
@@ -562,10 +560,7 @@ class ResourceMemoryManager:
         object as the second positional arg to ``create_item(i, user)`` which
         broke at runtime (``create_item`` expected an actor).
         """
-        return [
-            await self.create_item(i, actor, client_id=client_id, user_id=user_id)
-            for i in items
-        ]
+        return [await self.create_item(i, actor, client_id=client_id, user_id=user_id) for i in items]
 
     async def get_total_number_of_items(self, user: PydanticUser) -> int:
         """Get the total number of items in the resource memory for the user."""

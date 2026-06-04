@@ -54,13 +54,9 @@ class TestRowHydration:
 class TestGetCitationsForMemoriesNQ:
     async def test_routes_through_named_query_not_provider_list(self):
         mock_provider = MagicMock()
-        mock_provider.find_using_named_query = AsyncMock(
-            return_value=[_well_formed_row()]
-        )
+        mock_provider.find_using_named_query = AsyncMock(return_value=[_well_formed_row()])
         mock_provider.list = AsyncMock(
-            side_effect=AssertionError(
-                "get_citations_for_memories must use find_using_named_query"
-            )
+            side_effect=AssertionError("get_citations_for_memories must use find_using_named_query")
         )
 
         with patch(
@@ -68,9 +64,7 @@ class TestGetCitationsForMemoriesNQ:
             return_value=mock_provider,
         ):
             mgr = MemoryCitationManager()
-            result = await mgr.get_citations_for_memories(
-                [("episodic", "ep-abcdef01")]
-            )
+            result = await mgr.get_citations_for_memories([("episodic", "ep-abcdef01")])
 
         mock_provider.find_using_named_query.assert_awaited_once()
         call = mock_provider.find_using_named_query.await_args
@@ -82,25 +76,18 @@ class TestGetCitationsForMemoriesNQ:
         }
         assert ("episodic", "ep-abcdef01") in result
         assert len(result[("episodic", "ep-abcdef01")]) == 1
-        assert (
-            result[("episodic", "ep-abcdef01")][0].memory_source_id
-            == "src-abcdef01-2345-6789-abcd-ef0123456789"
-        )
+        assert result[("episodic", "ep-abcdef01")][0].memory_source_id == "src-abcdef01-2345-6789-abcd-ef0123456789"
 
     async def test_fans_out_per_memory_key(self):
         mock_provider = MagicMock()
-        mock_provider.find_using_named_query = AsyncMock(
-            return_value=[_well_formed_row()]
-        )
+        mock_provider.find_using_named_query = AsyncMock(return_value=[_well_formed_row()])
 
         with patch(
             "mirix.database.relational_provider.get_relational_provider",
             return_value=mock_provider,
         ):
             mgr = MemoryCitationManager()
-            await mgr.get_citations_for_memories(
-                [("episodic", "ep-1"), ("semantic", "sem-1"), ("core", "block-1")]
-            )
+            await mgr.get_citations_for_memories([("episodic", "ep-1"), ("semantic", "sem-1"), ("core", "block-1")])
 
         assert mock_provider.find_using_named_query.await_count == 3
 

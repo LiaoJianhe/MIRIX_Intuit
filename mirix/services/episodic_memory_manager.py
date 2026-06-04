@@ -151,9 +151,7 @@ class EpisodicMemoryManager:
             from mirix.services.memory_manager_helpers import actor_from_user
 
             actor = actor_from_user(user)
-            result = await provider.read(
-                "episodic_memory", episodic_memory_id, actor=actor
-            )
+            result = await provider.read("episodic_memory", episodic_memory_id, actor=actor)
             if result is None:
                 raise NoResultFound(f"Episodic memory {episodic_memory_id} not found")
             return PydanticEpisodicEvent(**result)
@@ -379,9 +377,7 @@ class EpisodicMemoryManager:
 
                 await invalidate_memory_cache("episodic_memory", [id])
             except Exception as exc:
-                logger.warning(
-                    "Cache invalidation skipped for episodic_memory %s: %s", id, exc
-                )
+                logger.warning("Cache invalidation skipped for episodic_memory %s: %s", id, exc)
             return
 
         async with self.session_maker() as session:
@@ -410,8 +406,8 @@ class EpisodicMemoryManager:
         Returns:
             Number of records deleted
         """
-        from mirix.database.relational_provider import get_relational_provider
         from mirix.database.redis_client import get_redis_client
+        from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
         if provider:
@@ -459,8 +455,8 @@ class EpisodicMemoryManager:
         Returns:
             Number of records soft deleted
         """
-        from mirix.database.relational_provider import get_relational_provider
         from mirix.database.redis_client import get_redis_client
+        from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
         if provider:
@@ -518,8 +514,8 @@ class EpisodicMemoryManager:
         import datetime as dt
         from datetime import datetime
 
-        from mirix.database.relational_provider import get_relational_provider
         from mirix.database.redis_client import get_redis_client
+        from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
         if provider:
@@ -588,8 +584,8 @@ class EpisodicMemoryManager:
         Returns:
             Number of records deleted
         """
-        from mirix.database.relational_provider import get_relational_provider
         from mirix.database.redis_client import get_redis_client
+        from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
         if provider:
@@ -787,7 +783,9 @@ class EpisodicMemoryManager:
         search_provider = get_search_provider()
         if search_provider:
             return await search_provider.count(
-                "episodic_memory", user_id=user.id, organization_id=user.organization_id,
+                "episodic_memory",
+                user_id=user.id,
+                organization_id=user.organization_id,
             )
 
         async with self.session_maker() as session:
@@ -1491,9 +1489,7 @@ class EpisodicMemoryManager:
             if agent_state is not None:
                 update_data["embedding_config"] = agent_state.embedding_config
 
-            result = await provider.update(
-                "episodic_memory", event_id, update_data, actor=actor
-            )
+            result = await provider.update("episodic_memory", event_id, update_data, actor=actor)
             try:
                 from mirix.services.memory_manager_helpers import invalidate_memory_cache
 

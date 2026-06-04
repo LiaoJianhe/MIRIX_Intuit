@@ -423,17 +423,13 @@ class RawMemoryManager:
             if actor:
                 existing["_last_updated_by_id"] = actor.id
 
-            updated = await provider.update(
-                "raw_memory", memory_id, existing, actor=actor
-            )
+            updated = await provider.update("raw_memory", memory_id, existing, actor=actor)
             try:
                 from mirix.services.memory_manager_helpers import invalidate_memory_cache
 
                 await invalidate_memory_cache("raw_memory", [memory_id])
             except Exception as exc:
-                logger.warning(
-                    "Cache invalidation skipped for raw_memory %s: %s", memory_id, exc
-                )
+                logger.warning("Cache invalidation skipped for raw_memory %s: %s", memory_id, exc)
             return PydanticRawMemoryItem(**updated)
 
         async with self.session_maker() as session:
@@ -594,9 +590,7 @@ class RawMemoryManager:
 
                 await invalidate_memory_cache("raw_memory", [memory_id])
             except Exception as exc:
-                logger.warning(
-                    "Cache invalidation skipped for raw_memory %s: %s", memory_id, exc
-                )
+                logger.warning("Cache invalidation skipped for raw_memory %s: %s", memory_id, exc)
             logger.info("Raw memory deleted: id=%s", memory_id)
             return True
 

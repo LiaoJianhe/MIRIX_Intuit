@@ -143,9 +143,7 @@ class AgentManager:
 
         tool_ids = list(agent_create.tool_ids or [])
         if tool_names:
-            resolved = await self.tool_manager.list_tools_by_names(
-                tool_names=tool_names, actor=actor
-            )
+            resolved = await self.tool_manager.list_tools_by_names(tool_names=tool_names, actor=actor)
             by_name = {t.name: t for t in resolved}
             for tool_name in tool_names:
                 tool = by_name.get(tool_name)
@@ -613,9 +611,7 @@ class AgentManager:
         names_to_resolve = list(set(new_tool_names) | set(tool_names_to_remove))
         resolved_by_name: dict = {}
         if names_to_resolve:
-            resolved = await self.tool_manager.list_tools_by_names(
-                tool_names=names_to_resolve, actor=actor
-            )
+            resolved = await self.tool_manager.list_tools_by_names(tool_names=names_to_resolve, actor=actor)
             resolved_by_name = {t.name: t for t in resolved}
 
         # Add new tools
@@ -681,9 +677,7 @@ class AgentManager:
                 "organization_id": actor.organization_id,
                 "tools": tool_ids,
                 "tool_rules": (
-                    [tr.model_dump() if hasattr(tr, "model_dump") else tr for tr in tool_rules]
-                    if tool_rules
-                    else None
+                    [tr.model_dump() if hasattr(tr, "model_dump") else tr for tr in tool_rules] if tool_rules else None
                 ),
                 "parent_id": parent_id,
                 # Pass the client UUID so the Relational DB provider can store it
@@ -839,13 +833,9 @@ class AgentManager:
             # Re-read with ``include_relationships=["tools"]`` to get a fully
             # hydrated agent dict. Matches the pattern used by ``list_agents``
             # against the relational provider.
-            result = await provider.read(
-                "agents", agent_id, include_relationships=["tools"]
-            )
+            result = await provider.read("agents", agent_id, include_relationships=["tools"])
             if result is None:
-                raise ValueError(
-                    f"Agent {agent_id} disappeared between update and read-back"
-                )
+                raise ValueError(f"Agent {agent_id} disappeared between update and read-back")
             agent_state = PydanticAgentState(**result)
 
             # Invalidate cache if available
@@ -1296,11 +1286,7 @@ class AgentManager:
 
         # A-3: default provider list path — choose ascending vs descending NQ based on sort_desc
         if rel_provider and parent_id is None and not query_text and not kwargs:
-            query_name = (
-                "agent_manager.list_agents_desc"
-                if sort_desc
-                else "agent_manager.list_agents_asc"
-            )
+            query_name = "agent_manager.list_agents_desc" if sort_desc else "agent_manager.list_agents_asc"
             results = await rel_provider.find_using_named_query(
                 "agents",
                 query_name,
@@ -1396,9 +1382,7 @@ class AgentManager:
 
             return agent_states
 
-    async def list_agents_with_tools(
-        self, parent_id: str, actor: PydanticClient
-    ) -> List[PydanticAgentState]:
+    async def list_agents_with_tools(self, parent_id: str, actor: PydanticClient) -> List[PydanticAgentState]:
         """Fetch all child agents of ``parent_id`` WITH their tools in a single
         IPS-R roundtrip (VEPAGE-1228).
 
@@ -1468,9 +1452,7 @@ class AgentManager:
                     parent_id=row.get("agent_parent_id"),
                     organization_id=row.get("agent_organization_id"),
                     llm_config=LLMConfig(**_parse_json(row.get("agent_llm_config"))),
-                    embedding_config=EmbeddingConfig(
-                        **_parse_json(row.get("agent_embedding_config"))
-                    ),
+                    embedding_config=EmbeddingConfig(**_parse_json(row.get("agent_embedding_config"))),
                     tool_rules=_parse_json(row.get("agent_tool_rules")),
                     mcp_tools=_parse_json(row.get("agent_mcp_tools")),
                     tools=[],
@@ -1807,9 +1789,7 @@ class AgentManager:
 
                 cache_provider = get_cache_provider()
                 if cache_provider:
-                    await cache_provider.delete(
-                        f"{cache_provider.AGENT_PREFIX}{agent_id}"
-                    )
+                    await cache_provider.delete(f"{cache_provider.AGENT_PREFIX}{agent_id}")
             except Exception:
                 pass
             if parent_id:

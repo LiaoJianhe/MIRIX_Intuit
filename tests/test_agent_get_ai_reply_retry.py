@@ -29,7 +29,6 @@ from mirix.errors import (
     LLMUnprocessableEntityError,
 )
 
-
 # ---------- signature contract ----------
 
 
@@ -95,9 +94,7 @@ async def test_get_ai_reply_422_propagates_on_first_attempt(monkeypatch):
     sleep_mock = AsyncMock()
     monkeypatch.setattr("mirix.agent.agent.asyncio.sleep", sleep_mock)
 
-    stub, llm_client = _build_stub_agent(
-        send_side_effect=LLMUnprocessableEntityError("content rejected")
-    )
+    stub, llm_client = _build_stub_agent(send_side_effect=LLMUnprocessableEntityError("content rejected"))
 
     with pytest.raises(LLMUnprocessableEntityError):
         await Agent._get_ai_reply(
@@ -106,9 +103,9 @@ async def test_get_ai_reply_422_propagates_on_first_attempt(monkeypatch):
             llm_client=llm_client,
         )
 
-    assert llm_client.send_llm_request.await_count == 1, (
-        "_get_ai_reply must call the LLM exactly once on a Permanent error"
-    )
+    assert (
+        llm_client.send_llm_request.await_count == 1
+    ), "_get_ai_reply must call the LLM exactly once on a Permanent error"
     sleep_mock.assert_not_called()
 
 
@@ -123,9 +120,7 @@ async def test_get_ai_reply_transient_retries_to_budget_then_propagates(monkeypa
 
     expected_total = settings.llm_inline_retry_max_attempts + 1  # initial + retries
 
-    stub, llm_client = _build_stub_agent(
-        send_side_effect=LLMRateLimitError("429 still")
-    )
+    stub, llm_client = _build_stub_agent(send_side_effect=LLMRateLimitError("429 still"))
 
     with pytest.raises(LLMRateLimitError):
         await Agent._get_ai_reply(
