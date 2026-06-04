@@ -942,9 +942,19 @@ async def trigger_memory_update(self: "Agent", user_message: object, memory_type
     # list_agents_with_tools joins agents -> tools so each returned state already
     # carries .tools; constructing the sub-agent from this state means its step
     # does not re-resolve tools from the provider (no per-agent list_tools_by_ids).
-    child_agent_states = await self.agent_manager.list_agents_with_tools(
-        parent_id=self.agent_state.id, actor=self.actor
-    )
+    #
+    # Spanned (VEPAGE-1220) so the trace attributes how much of the
+    # trigger_memory_update -> first sub-agent gap is this child resolution
+    # (the part this NQ change targets) vs. elsewhere in the dispatch.
+    from mirix.observability.timed_spans import timed_span
+
+    async with timed_span(
+        "Resolve Child Agents",
+        metadata={"meta_agent_id": self.agent_state.id},
+    ):
+        child_agent_states = await self.agent_manager.list_agents_with_tools(
+            parent_id=self.agent_state.id, actor=self.actor
+        )
 
     # Map agent types to agent states (key by string so lookup works for enum or deserialized string)
     def _agent_type_key(at):
