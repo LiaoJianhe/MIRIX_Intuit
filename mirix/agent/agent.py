@@ -1303,10 +1303,16 @@ class Agent(BaseAgent):
         summary_task: Optional[asyncio.Task] = None
         if self.agent_state.is_type(AgentType.meta_memory_agent) and self.memory_source_id:
             self._source_deduped = False
-            await self._persist_memory_source(
-                memory_source_id=self.memory_source_id,
-                input_messages=raw_input_messages,
-            )
+            from mirix.observability.timed_spans import timed_span
+
+            async with timed_span(
+                "Persist Memory Source",
+                metadata={"memory_source_id": self.memory_source_id},
+            ):
+                await self._persist_memory_source(
+                    memory_source_id=self.memory_source_id,
+                    input_messages=raw_input_messages,
+                )
 
             # Source was deduped at DB level (external_id or batch_hash conflict).
             # A prior submission already created the source and was processed.
