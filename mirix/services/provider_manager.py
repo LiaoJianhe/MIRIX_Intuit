@@ -134,9 +134,7 @@ class ProviderManager:
             return [provider.to_pydantic() for provider in providers]
 
     @enforce_types
-    async def get_provider_by_id(
-        self, provider_id: str, actor: Optional[PydanticClient] = None
-    ) -> PydanticProvider:
+    async def get_provider_by_id(self, provider_id: str, actor: Optional[PydanticClient] = None) -> PydanticProvider:
         """Fetch a provider by ID, scoped by actor.organization_id when available."""
         from mirix.database.relational_provider import get_relational_provider
         from mirix.orm.errors import NoResultFound as _NRF
@@ -155,9 +153,7 @@ class ProviderManager:
             return PydanticProvider(**rows[0])
 
         async with self.session_maker() as session:
-            provider = await ProviderModel.read(
-                db_session=session, identifier=provider_id, actor=actor
-            )
+            provider = await ProviderModel.read(db_session=session, identifier=provider_id, actor=actor)
             return provider.to_pydantic()
 
     @enforce_types

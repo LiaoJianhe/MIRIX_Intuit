@@ -547,9 +547,7 @@ class ClientManager:
 
                 cache_provider = get_cache_provider()
                 if cache_provider:
-                    await cache_provider.delete(
-                        f"{cache_provider.CLIENT_PREFIX}{client_id}"
-                    )
+                    await cache_provider.delete(f"{cache_provider.CLIENT_PREFIX}{client_id}")
             except Exception as e:
                 logger.warning(
                     "Failed to invalidate cache for soft-deleted client %s: %s",
@@ -703,14 +701,17 @@ class ClientManager:
 
         provider = get_relational_provider()
         if provider:
-            logger.info(
-                "Bulk deleting memories via Relational DB provider for client %s", client_id
-            )
+            logger.info("Bulk deleting memories via Relational DB provider for client %s", client_id)
             # raw_memory is included here; messages is handled separately below
             # via mutate_using_named_query (messages is an engine table, not IEDM).
             memory_tables = [
-                "episodic_memory", "semantic_memory", "procedural_memory",
-                "resource_memory", "knowledge_vault", "raw_memory", "block",
+                "episodic_memory",
+                "semantic_memory",
+                "procedural_memory",
+                "resource_memory",
+                "knowledge_vault",
+                "raw_memory",
+                "block",
             ]
             total = 0
             for table in memory_tables:
@@ -723,9 +724,7 @@ class ClientManager:
                 if rows:
                     ids = [r.get("id", "") for r in rows if r.get("id")]
                     if ids:
-                        result = await provider.bulk_delete(
-                            table, ids, soft=False
-                        )
+                        result = await provider.bulk_delete(table, ids, soft=False)
                         deleted = int(result.get("success", 0) or 0)
                         total += deleted
                         logger.debug("Bulk deleted %d %s records", deleted, table)

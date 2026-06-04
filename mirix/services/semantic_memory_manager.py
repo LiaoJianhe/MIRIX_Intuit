@@ -429,9 +429,7 @@ class SemanticMemoryManager:
             from mirix.services.memory_manager_helpers import actor_from_user
 
             actor = actor_from_user(user)
-            result = await provider.read(
-                "semantic_memory", semantic_memory_id, actor=actor
-            )
+            result = await provider.read("semantic_memory", semantic_memory_id, actor=actor)
             if result is None:
                 raise NoResultFound(f"Semantic memory item with id {semantic_memory_id} not found.")
             return PydanticSemanticMemoryItem(**result)
@@ -610,9 +608,7 @@ class SemanticMemoryManager:
         if provider:
             update_data = item_update.model_dump(exclude_unset=True)
             update_data.pop("id", None)
-            result = await provider.update(
-                "semantic_memory", item_update.id, update_data, actor=actor
-            )
+            result = await provider.update("semantic_memory", item_update.id, update_data, actor=actor)
             try:
                 from mirix.services.memory_manager_helpers import invalidate_memory_cache
 
@@ -653,10 +649,7 @@ class SemanticMemoryManager:
         ``PydanticClient``). Now both single- and many-create entry points
         accept the same ``actor`` arg and optional ``client_id`` / ``user_id``.
         """
-        return [
-            await self.create_item(i, actor, client_id=client_id, user_id=user_id)
-            for i in items
-        ]
+        return [await self.create_item(i, actor, client_id=client_id, user_id=user_id) for i in items]
 
     async def get_total_number_of_items(self, user: PydanticUser) -> int:
         """Get the total number of items in the semantic memory for the user."""

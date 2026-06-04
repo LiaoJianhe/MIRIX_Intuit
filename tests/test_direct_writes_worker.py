@@ -231,9 +231,7 @@ async def test_worker_direct_writes_writes_source_and_citation_to_db(monkeypatch
 
         # 1 memory_source row for this external_id
         source_mgr = MemorySourceManager()
-        page = await source_mgr.list_sources(
-            organization_id=TEST_ORG_ID, client_id=TEST_CLIENT_ID, limit=100
-        )
+        page = await source_mgr.list_sources(organization_id=TEST_ORG_ID, client_id=TEST_CLIENT_ID, limit=100)
         matching = [s for s in page.items if s.external_id == external_id]
         assert len(matching) == 1, (
             f"Expected exactly 1 memory_source for external_id={external_id}, " f"got {len(matching)}: {matching}"
@@ -351,9 +349,7 @@ async def test_worker_direct_writes_is_idempotent_on_duplicate_external_id(monke
 
         # Exactly 1 memory_source row for the external_id (ON CONFLICT DO NOTHING)
         source_mgr = MemorySourceManager()
-        page = await source_mgr.list_sources(
-            organization_id=TEST_ORG_ID, client_id=TEST_CLIENT_ID, limit=100
-        )
+        page = await source_mgr.list_sources(organization_id=TEST_ORG_ID, client_id=TEST_CLIENT_ID, limit=100)
         matching = [s for s in page.items if s.external_id == external_id]
         assert len(matching) == 1, f"Expected exactly 1 memory_source after duplicate submission, got {len(matching)}"
 

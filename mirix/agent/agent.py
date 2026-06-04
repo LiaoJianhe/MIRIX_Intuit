@@ -49,14 +49,14 @@ from mirix.schemas.embedding_config import EmbeddingConfig
 from mirix.schemas.enums import MessageRole, ToolType
 from mirix.schemas.knowledge_vault import KnowledgeVaultItem as PydanticKnowledgeVaultItem
 from mirix.schemas.memory import Memory
-from mirix.schemas.procedural_memory import ProceduralMemoryItem as PydanticProceduralMemoryItem
-from mirix.schemas.resource_memory import ResourceMemoryItem as PydanticResourceMemoryItem
-from mirix.schemas.semantic_memory import SemanticMemoryItem as PydanticSemanticMemoryItem
 from mirix.schemas.message import Message, MessageCreate
 from mirix.schemas.mirix_message_content import CloudFileContent, FileContent, ImageContent, TextContent
 from mirix.schemas.openai.chat_completion_response import ChatCompletionResponse
 from mirix.schemas.openai.chat_completion_response import Message as ChatCompletionMessage
 from mirix.schemas.openai.chat_completion_response import UsageStatistics
+from mirix.schemas.procedural_memory import ProceduralMemoryItem as PydanticProceduralMemoryItem
+from mirix.schemas.resource_memory import ResourceMemoryItem as PydanticResourceMemoryItem
+from mirix.schemas.semantic_memory import SemanticMemoryItem as PydanticSemanticMemoryItem
 from mirix.schemas.tool import Tool
 from mirix.schemas.tool_rule import TerminalToolRule
 from mirix.schemas.usage import MirixUsageStatistics
@@ -2021,9 +2021,7 @@ class Agent(BaseAgent):
             core_memory = current_persisted_memory.compile()
             retrieved_memories["core"] = core_memory
 
-        is_owning_kv_agent = self.agent_state.is_type(
-            AgentType.knowledge_vault_memory_agent, AgentType.reflexion_agent
-        )
+        is_owning_kv_agent = self.agent_state.is_type(AgentType.knowledge_vault_memory_agent, AgentType.reflexion_agent)
         if (
             self.agent_state.is_type(AgentType.knowledge_vault_memory_agent)
             or "knowledge_vault" not in retrieved_memories
@@ -2043,9 +2041,7 @@ class Agent(BaseAgent):
                 table="knowledge_vault",
                 pydantic_cls=PydanticKnowledgeVaultItem,
             )
-            merged_knowledge_vault = self._merge_recent_into_relevant(
-                current_knowledge_vault, recent_knowledge_vault
-            )
+            merged_knowledge_vault = self._merge_recent_into_relevant(current_knowledge_vault, recent_knowledge_vault)
 
             knowledge_vault_memory = ""
             if len(merged_knowledge_vault) > 0:

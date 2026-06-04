@@ -393,9 +393,7 @@ class UserManager:
                         user_id,
                     )
         except Exception as e:
-            logger.warning(
-                "Failed to invalidate agent cache for user %s: %s", user_id, e
-            )
+            logger.warning("Failed to invalidate agent cache for user %s: %s", user_id, e)
 
     async def delete_memories_by_user_id(self, user_id: str):
         """

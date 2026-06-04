@@ -290,9 +290,8 @@ class MessageManager:
             Number of records deleted
         """
         from mirix.database.redis_client import get_redis_client
-        from mirix.schemas.message import MessageRole
-
         from mirix.database.relational_provider import get_relational_provider
+        from mirix.schemas.message import MessageRole
 
         rel_provider = get_relational_provider()
         if rel_provider:

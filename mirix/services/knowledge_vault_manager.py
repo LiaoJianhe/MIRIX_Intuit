@@ -591,10 +591,7 @@ class KnowledgeVaultManager:
         object as the second positional arg to ``create_item(k, user)`` which
         broke at runtime (``create_item`` expects an actor).
         """
-        return [
-            await self.create_item(k, actor, client_id=client_id, user_id=user_id)
-            for k in knowledge_vault
-        ]
+        return [await self.create_item(k, actor, client_id=client_id, user_id=user_id) for k in knowledge_vault]
 
     @enforce_types
     async def insert_knowledge(
