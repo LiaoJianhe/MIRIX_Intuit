@@ -736,6 +736,12 @@ class AgentManager:
     async def update_llm_config(
         self, agent_id: str, llm_config: LLMConfig, actor: PydanticClient
     ) -> PydanticAgentState:
+        # Skip the write when the persisted config already matches (VEPAGE-1228).
+        # Callers on the registration / initialize-meta-agent path invoke this
+        # per agent; an unchanged config otherwise produces a needless write.
+        current = await self.get_agent_by_id(agent_id=agent_id, actor=actor)
+        if current.llm_config == llm_config:
+            return current
         return await self.update_agent(
             agent_id=agent_id,
             agent_update=UpdateAgent(llm_config=llm_config),
