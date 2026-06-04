@@ -640,9 +640,15 @@ class AsyncServer(Server):
         user: Optional[User] = None,
     ) -> Agent:
         """Updated method to load agents from persisted storage."""
+        from mirix.observability.timed_spans import timed_span
+
         agent_lock = self.per_agent_lock_manager.get_lock(agent_id)
         async with agent_lock:
-            agent_state = await self.agent_manager.get_agent_by_id(agent_id=agent_id, actor=actor)
+            async with timed_span(
+                "Load Agent State",
+                metadata={"agent_id": agent_id},
+            ):
+                agent_state = await self.agent_manager.get_agent_by_id(agent_id=agent_id, actor=actor)
 
             common_kwargs = dict(
                 interface=interface or self.default_interface_factory(),
@@ -719,16 +725,22 @@ class AsyncServer(Server):
             raise ValueError("AsyncServer._step requires a non-null user.")
         mirix_agent = None
         try:
-            mirix_agent = await self.load_agent(
-                agent_id=agent_id,
-                interface=None,
-                actor=actor,
-                filter_tags=filter_tags,
-                block_filter_tags=block_filter_tags,
-                block_filter_tags_update_mode=block_filter_tags_update_mode,
-                use_cache=use_cache,
-                user=user,
-            )
+            from mirix.observability.timed_spans import timed_span
+
+            async with timed_span(
+                "Load Agent",
+                metadata={"agent_id": agent_id},
+            ):
+                mirix_agent = await self.load_agent(
+                    agent_id=agent_id,
+                    interface=None,
+                    actor=actor,
+                    filter_tags=filter_tags,
+                    block_filter_tags=block_filter_tags,
+                    block_filter_tags_update_mode=block_filter_tags_update_mode,
+                    use_cache=use_cache,
+                    user=user,
+                )
 
             if mirix_agent is None:
                 raise KeyError(f"Agent (user={actor.id}, agent={agent_id}) is not loaded")

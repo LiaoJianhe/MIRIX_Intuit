@@ -1278,12 +1278,18 @@ class Agent(BaseAgent):
         should_write_retention = retention > 0 and is_meta_agent and self.actor and self.user_id
         retained_input_sets: List[Message] = []
         if should_read_retention:
-            retained_input_sets = await self.message_manager.get_messages_for_agent_user(
-                agent_id=retention_agent_id,
-                user_id=self.user_id,
-                actor=self.actor,
-                limit=retention,
-            )
+            from mirix.observability.timed_spans import timed_span
+
+            async with timed_span(
+                "Load Retained History",
+                metadata={"agent_id": retention_agent_id, "limit": retention},
+            ):
+                retained_input_sets = await self.message_manager.get_messages_for_agent_user(
+                    agent_id=retention_agent_id,
+                    user_id=self.user_id,
+                    actor=self.actor,
+                    limit=retention,
+                )
 
         # Chaining accumulator for the active agent loop only.
         accumulated: List[Message] = list(retained_input_sets)
@@ -1327,7 +1333,11 @@ class Agent(BaseAgent):
                 return MirixUsageStatistics(step_count=0)
 
             # Skip processing if this source was already fully processed (redelivery case).
-            source = await self.memory_source_manager.get_by_id(self.memory_source_id)
+            async with timed_span(
+                "Check Source Processing State",
+                metadata={"memory_source_id": self.memory_source_id},
+            ):
+                source = await self.memory_source_manager.get_by_id(self.memory_source_id)
             if source and source.processing_complete:
                 logger.info("Source %s already processed, skipping", self.memory_source_id)
                 emit_idempotency_skip_span(
@@ -2673,11 +2683,20 @@ These keywords have been used to retrieve relevant memories from the database.
             raw_system = self.agent_state.system or ""
 
             # Build the complete system prompt with memories
-            complete_system_prompt, retrieved_memories = await self.build_system_prompt_with_memories(
-                raw_system=raw_system,
-                topics=topics,
-                retrieved_memories=retrieved_memories,
-            )
+            from mirix.observability.timed_spans import timed_span
+
+            async with timed_span(
+                "Build System Prompt With Memories",
+                metadata={
+                    "agent_type": str(self.agent_state.agent_type),
+                    "step_count": step_count,
+                },
+            ):
+                complete_system_prompt, retrieved_memories = await self.build_system_prompt_with_memories(
+                    raw_system=raw_system,
+                    topics=topics,
+                    retrieved_memories=retrieved_memories,
+                )
 
             system_msg = Message.dict_to_message(
                 agent_id=self.agent_state.id,
