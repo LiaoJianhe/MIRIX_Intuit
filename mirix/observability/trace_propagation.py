@@ -8,9 +8,9 @@ from typing import Any
 
 from mirix.log import get_logger
 from mirix.observability.context import (
-    get_intuit_tid,
+    get_tid,
     get_trace_context,
-    set_intuit_tid,
+    set_tid,
     set_trace_context,
 )
 
@@ -33,13 +33,13 @@ def add_trace_to_queue_message(message: Any) -> Any:
     Returns:
         The same message with trace fields populated
     """
-    # Propagate the Intuit transaction ID (TID) UNCONDITIONALLY — independent of
+    # Propagate the transaction id (TID) UNCONDITIONALLY — independent of
     # whether there is an active LangFuse trace. The TID is request-correlation
     # identity that must reach the worker even when tracing is disabled, so it is
     # copied before the trace early-return below.
-    intuit_tid = get_intuit_tid()
-    if intuit_tid and hasattr(message, "intuit_tid"):
-        message.intuit_tid = intuit_tid
+    tid = get_tid()
+    if tid and hasattr(message, "tid"):
+        message.tid = tid
 
     context = get_trace_context()
 
@@ -79,11 +79,11 @@ def restore_trace_from_queue_message(message: Any) -> bool:
         True if LangFuse trace context was restored, False otherwise. (The TID,
         if present, is always restored regardless of this return value.)
     """
-    # Restore the Intuit transaction ID (TID) FIRST and unconditionally — it is
+    # Restore the transaction id (TID) FIRST and unconditionally — it is
     # independent of LangFuse trace context and must be re-established even when
     # there is no trace (so worker/agent log lines carry it when tracing is off).
-    if hasattr(message, "intuit_tid") and message.HasField("intuit_tid") and message.intuit_tid:
-        set_intuit_tid(message.intuit_tid)
+    if hasattr(message, "tid") and message.HasField("tid") and message.tid:
+        set_tid(message.tid)
 
     # Check if message has trace fields
     if not hasattr(message, "langfuse_trace_id"):

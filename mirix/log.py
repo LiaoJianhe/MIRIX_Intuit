@@ -29,9 +29,9 @@ selected_log_level = get_log_level()
 
 
 class _TidLogFilter(logging.Filter):
-    """Inject the current request's Intuit transaction ID (TID) onto each record.
+    """Inject the current request's transaction id (TID) onto each record.
 
-    Reads the ``current_intuit_tid`` contextvar (set on the request path and
+    Reads the ``current_tid`` contextvar (set on the request path and
     re-established in the queue worker via trace propagation) so that every log
     line can be correlated by TID — including worker/agent logs that run outside
     any HTTP request context. When no TID is set, a stable ``-`` placeholder is
@@ -44,12 +44,12 @@ class _TidLogFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         tid = None
         try:
-            from mirix.observability.context import current_intuit_tid
+            from mirix.observability.context import current_tid
 
-            tid = current_intuit_tid.get()
+            tid = current_tid.get()
         except Exception:
             tid = None
-        record.intuit_tid = tid or "-"
+        record.tid = tid or "-"
         return True
 
 
@@ -139,10 +139,10 @@ def get_logger(name: Optional[str] = None) -> "logging.Logger":
     # Handlers control WHERE logs go (console/file), not WHAT level they use
     if not logger.handlers:
         # Create a single formatter for consistency across all handlers.
-        # ``tid=`` carries the Intuit transaction ID for cross-signal correlation
+        # ``tid=`` carries the transaction id for cross-signal correlation
         # (populated by _TidLogFilter; "-" when no request context).
         formatter = logging.Formatter(
-            "%(asctime)s - %(name)s - %(levelname)s [tid=%(intuit_tid)s] - %(message)s",
+            "%(asctime)s - %(name)s - %(levelname)s [tid=%(tid)s] - %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         )
 

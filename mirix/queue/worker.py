@@ -12,9 +12,9 @@ from google.protobuf.json_format import MessageToDict
 from mirix.log import get_logger
 from mirix.observability import get_langfuse_client, mark_observation_as_child, restore_trace_from_queue_message
 from mirix.observability.context import (
-    clear_intuit_tid,
+    clear_tid,
     clear_trace_context,
-    get_intuit_tid,
+    get_tid,
     get_trace_context,
 )
 from mirix.queue.message_pb2 import QueueMessage
@@ -394,7 +394,7 @@ class QueueWorker:
                         "source": "queue_worker",
                         # TID on the root worker span so every span in this
                         # save's tree can be correlated back to the request.
-                        "intuit_tid": get_intuit_tid(),
+                        "tid": get_tid(),
                     },
                 ) as span:
                     mark_observation_as_child(span)
@@ -404,12 +404,12 @@ class QueueWorker:
                     # trace shows its TID for a log pivot. This is the worker
                     # trace, decoupled from the HTTP-entry trace, so it needs its
                     # own trace-level TID independent of the span metadata above.
-                    _worker_tid = get_intuit_tid()
+                    _worker_tid = get_tid()
                     if _worker_tid:
                         try:
                             langfuse.update_current_trace(
                                 tags=[f"tid:{_worker_tid}"],
-                                metadata={"intuit_tid": _worker_tid},
+                                metadata={"tid": _worker_tid},
                             )
                         except Exception as e:
                             logger.debug("Failed to set TID on worker trace: %s", e)
@@ -443,7 +443,7 @@ class QueueWorker:
             clear_trace_context()
             # TID is tracked independently of trace context; clear it too so it
             # never leaks from one message into the next on a reused worker task.
-            clear_intuit_tid()
+            clear_tid()
 
     async def _consume_loop(self) -> None:
         """Async consume loop running as an asyncio.Task in the main event loop."""

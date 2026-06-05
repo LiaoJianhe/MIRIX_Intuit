@@ -225,7 +225,7 @@ def with_langfuse_tracing(func):
     from langfuse.types import TraceContext
 
     from mirix.observability import get_langfuse_client, is_langfuse_enabled
-    from mirix.observability.context import clear_trace_context, get_intuit_tid, set_trace_context
+    from mirix.observability.context import clear_trace_context, get_tid, set_trace_context
 
     @functools.wraps(func)
     async def wrapper(*args, **kwargs):
@@ -265,11 +265,11 @@ def with_langfuse_tracing(func):
                     f"LangFuse trace created: trace_id={trace_id}, observation_id={observation_id}, path={path}"
                 )
 
-                # Intuit transaction ID (TID): gateway-provided request id. Put it
+                # Transaction id (TID): caller/gateway-provided request id. Put it
                 # in trace metadata (visible) AND tags (filterable in the Langfuse
                 # dashboard) so a broken trace surfaces its TID for a log pivot.
-                intuit_tid = get_intuit_tid()
-                trace_tags = [f"tid:{intuit_tid}"] if intuit_tid else None
+                tid = get_tid()
+                trace_tags = [f"tid:{tid}"] if tid else None
                 langfuse.update_current_trace(
                     name=f"{method} {path}",
                     user_id=user_id or client_id,
@@ -281,7 +281,7 @@ def with_langfuse_tracing(func):
                         "client_id": client_id,
                         "org_id": org_id,
                         "user_agent": request.headers.get("user-agent"),
-                        "intuit_tid": intuit_tid,
+                        "tid": tid,
                     },
                 )
 

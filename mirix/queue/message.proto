@@ -93,13 +93,13 @@ message QueueMessage {
   repeated DirectMemoryWrite direct_writes = 25;
 
   // ========== REQUEST CORRELATION (TID) ==========
-  // Intuit transaction ID, propagated independently of the LangFuse trace
-  // fields above. Unlike trace context, the TID is gateway-provided request
+  // Transaction id, propagated independently of the LangFuse trace fields
+  // above. Unlike trace context, the TID is caller/gateway-provided request
   // identity and must reach the worker even when LangFuse is disabled, so it
   // is carried in its own field and copied unconditionally (not gated on an
   // active trace). The worker re-enters the logging context with this value
   // so all worker/agent log lines carry it, and stamps it as a span attribute.
-  optional string intuit_tid = 26;
+  optional string tid = 26;
 }
 
 // User representation
