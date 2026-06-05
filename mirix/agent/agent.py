@@ -2783,14 +2783,16 @@ These keywords have been used to retrieve relevant memories from the database.
                             pass
 
                 if failed_messages:
-                    printv(
-                        f"[Mirix.Agent.{self.agent_state.name}] ERROR: One or more functions failed:\n"
-                        + "\n".join(failed_messages)
+                    # A memory function genuinely failed — log at ERROR (not the
+                    # prior printv->INFO, which hid real failures from error-level
+                    # alerting/grep and only *said* "ERROR" in the message text).
+                    self.logger.error(
+                        "One or more functions failed:\n" + "\n".join(failed_messages)
                     )
                 else:
                     # Fallback if we can't parse the messages
-                    printv(
-                        f"[Mirix.Agent.{self.agent_state.name}] ERROR: Function execution encountered errors (see logs above for details)"
+                    self.logger.error(
+                        "Function execution encountered errors (see logs above for details)"
                     )
 
             # Step 6: extend the message history
