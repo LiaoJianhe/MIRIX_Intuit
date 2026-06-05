@@ -11,7 +11,12 @@ from google.protobuf.json_format import MessageToDict
 
 from mirix.log import get_logger
 from mirix.observability import get_langfuse_client, mark_observation_as_child, restore_trace_from_queue_message
-from mirix.observability.context import clear_trace_context, get_trace_context
+from mirix.observability.context import (
+    clear_intuit_tid,
+    clear_trace_context,
+    get_intuit_tid,
+    get_trace_context,
+)
 from mirix.queue.message_pb2 import QueueMessage
 from mirix.services.user_manager import UserManager
 
@@ -203,7 +208,7 @@ class QueueWorker:
             trace_context = get_trace_context()
             trace_id = trace_context.get("trace_id") if trace_context else None
             parent_span_id = trace_context.get("observation_id") if trace_context else None
-            logger.debug(f"Queue worker trace context: trace_id={trace_id}, " f"parent_span_id={parent_span_id}")
+            logger.debug(f"Queue worker trace context: trace_id={trace_id}, parent_span_id={parent_span_id}")
 
             client_id = message.client_id if message.client_id else None
             if not client_id:
@@ -249,7 +254,7 @@ class QueueWorker:
                             )
                         except Exception as create_error:
                             logger.error(
-                                "Failed to auto-create user with id=%s: %s. " "Falling back to admin user.",
+                                "Failed to auto-create user with id=%s: %s. Falling back to admin user.",
                                 user_id,
                                 create_error,
                             )
@@ -387,6 +392,9 @@ class QueueWorker:
                         "agent_id": message.agent_id,
                         "message_count": len(input_messages),
                         "source": "queue_worker",
+                        # TID on the root worker span so every span in this
+                        # save's tree can be correlated back to the request.
+                        "intuit_tid": get_intuit_tid(),
                     },
                 ) as span:
                     mark_observation_as_child(span)
@@ -418,6 +426,9 @@ class QueueWorker:
             )
         finally:
             clear_trace_context()
+            # TID is tracked independently of trace context; clear it too so it
+            # never leaks from one message into the next on a reused worker task.
+            clear_intuit_tid()
 
     async def _consume_loop(self) -> None:
         """Async consume loop running as an asyncio.Task in the main event loop."""

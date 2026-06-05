@@ -7,7 +7,12 @@ Works with both in-memory queues and Kafka using Protocol Buffer fields.
 from typing import Any
 
 from mirix.log import get_logger
-from mirix.observability.context import get_trace_context, set_trace_context
+from mirix.observability.context import (
+    get_intuit_tid,
+    get_trace_context,
+    set_intuit_tid,
+    set_trace_context,
+)
 
 logger = get_logger(__name__)
 
@@ -28,9 +33,17 @@ def add_trace_to_queue_message(message: Any) -> Any:
     Returns:
         The same message with trace fields populated
     """
+    # Propagate the Intuit transaction ID (TID) UNCONDITIONALLY — independent of
+    # whether there is an active LangFuse trace. The TID is request-correlation
+    # identity that must reach the worker even when tracing is disabled, so it is
+    # copied before the trace early-return below.
+    intuit_tid = get_intuit_tid()
+    if intuit_tid and hasattr(message, "intuit_tid"):
+        message.intuit_tid = intuit_tid
+
     context = get_trace_context()
 
-    # Only add if we have an active trace
+    # Only add the LangFuse trace fields if we have an active trace.
     if not context.get("trace_id"):
         logger.debug("No active trace context when queueing message - LangFuse tracing will not propagate to worker")
         return message
@@ -63,8 +76,15 @@ def restore_trace_from_queue_message(message: Any) -> bool:
         message: QueueMessage protobuf instance
 
     Returns:
-        True if trace context was restored, False otherwise
+        True if LangFuse trace context was restored, False otherwise. (The TID,
+        if present, is always restored regardless of this return value.)
     """
+    # Restore the Intuit transaction ID (TID) FIRST and unconditionally — it is
+    # independent of LangFuse trace context and must be re-established even when
+    # there is no trace (so worker/agent log lines carry it when tracing is off).
+    if hasattr(message, "intuit_tid") and message.HasField("intuit_tid") and message.intuit_tid:
+        set_intuit_tid(message.intuit_tid)
+
     # Check if message has trace fields
     if not hasattr(message, "langfuse_trace_id"):
         logger.debug("Message does not have trace fields (old schema version?)")

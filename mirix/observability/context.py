@@ -16,6 +16,25 @@ current_observation_id: ContextVar[Optional[str]] = ContextVar("current_observat
 current_session_id: ContextVar[Optional[str]] = ContextVar("current_session_id", default=None)
 current_user_id: ContextVar[Optional[str]] = ContextVar("current_user_id", default=None)
 
+# Request correlation: the Intuit transaction ID (TID). Tracked separately from
+# the LangFuse trace context above because it is gateway-provided request
+# identity that must exist and propagate even when tracing is disabled. It is
+# carried across the queue independently of any active trace (see
+# trace_propagation.py) and re-established in the worker so all worker/agent
+# log lines and spans can be correlated by it.
+current_intuit_tid: ContextVar[Optional[str]] = ContextVar("current_intuit_tid", default=None)
+
+
+def set_intuit_tid(intuit_tid: Optional[str]) -> None:
+    """Set the current request's Intuit transaction ID (TID)."""
+    if intuit_tid:
+        current_intuit_tid.set(intuit_tid)
+
+
+def get_intuit_tid() -> Optional[str]:
+    """Get the current request's Intuit transaction ID (TID), if any."""
+    return current_intuit_tid.get()
+
 
 def set_trace_context(
     trace_id: Optional[str] = None,
@@ -65,6 +84,11 @@ def clear_trace_context() -> None:
     current_observation_id.set(None)
     current_session_id.set(None)
     current_user_id.set(None)
+
+
+def clear_intuit_tid() -> None:
+    """Clear the current request's Intuit transaction ID (TID)."""
+    current_intuit_tid.set(None)
 
 
 def mark_observation_as_child(observation: Any) -> None:

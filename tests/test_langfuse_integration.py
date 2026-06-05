@@ -188,3 +188,110 @@ def test_context_isolation():
 
     set_trace_context(trace_id="trace-2")
     assert get_trace_context()["trace_id"] == "trace-2"
+
+
+# ============================================================================
+# Intuit TID (request correlation) propagation
+#
+# The TID is propagated independently of LangFuse trace context: it must reach
+# the worker even when tracing is disabled (no active trace_id). These tests
+# pin that behavior on the protobuf path used by the real Kafka queue.
+# ============================================================================
+
+
+@pytest.fixture(autouse=True)
+def _clear_tid():
+    """Keep TID state clean around each test in this module."""
+    from mirix.observability.context import clear_intuit_tid
+
+    clear_intuit_tid()
+    yield
+    clear_intuit_tid()
+
+
+def test_tid_propagates_to_queue_message_without_active_trace():
+    """TID is copied onto the protobuf message even when there is NO trace."""
+    from mirix.observability.context import clear_trace_context, set_intuit_tid
+    from mirix.observability.trace_propagation import add_trace_to_queue_message
+    from mirix.queue.message_pb2 import QueueMessage
+
+    clear_trace_context()  # ensure no active trace -> trace fields skip
+    set_intuit_tid("tid-no-trace")
+
+    msg = add_trace_to_queue_message(QueueMessage())
+
+    assert msg.HasField("intuit_tid")
+    assert msg.intuit_tid == "tid-no-trace"
+    # And the trace early-return held: no trace fields were populated.
+    assert not msg.HasField("langfuse_trace_id")
+
+
+def test_tid_restored_from_queue_message_without_trace_fields():
+    """TID is restored into context independent of trace fields presence."""
+    from mirix.observability.context import get_intuit_tid
+    from mirix.observability.trace_propagation import restore_trace_from_queue_message
+    from mirix.queue.message_pb2 import QueueMessage
+
+    msg = QueueMessage()
+    msg.intuit_tid = "tid-restore"
+
+    # No trace fields set -> returns False for trace, but TID still restored.
+    trace_restored = restore_trace_from_queue_message(msg)
+
+    assert trace_restored is False
+    assert get_intuit_tid() == "tid-restore"
+
+
+def test_tid_and_trace_propagate_together():
+    """When both are present, both make the round trip onto the message."""
+    from mirix.observability.context import clear_trace_context, get_intuit_tid, set_intuit_tid, set_trace_context
+    from mirix.observability.trace_propagation import add_trace_to_queue_message, restore_trace_from_queue_message
+    from mirix.queue.message_pb2 import QueueMessage
+
+    clear_trace_context()
+    set_trace_context(trace_id="trace-xyz", user_id="user-1")
+    set_intuit_tid("tid-both")
+
+    msg = add_trace_to_queue_message(QueueMessage())
+    assert msg.intuit_tid == "tid-both"
+    assert msg.langfuse_trace_id == "trace-xyz"
+
+    # Fresh worker side: clear, then restore.
+    clear_trace_context()
+    from mirix.observability.context import clear_intuit_tid
+
+    clear_intuit_tid()
+    restore_trace_from_queue_message(msg)
+    assert get_intuit_tid() == "tid-both"
+
+
+def test_tid_isolation():
+    """TID does not leak between operations once cleared."""
+    from mirix.observability.context import clear_intuit_tid, get_intuit_tid, set_intuit_tid
+
+    set_intuit_tid("tid-1")
+    assert get_intuit_tid() == "tid-1"
+
+    clear_intuit_tid()
+    assert get_intuit_tid() is None
+
+    set_intuit_tid("tid-2")
+    assert get_intuit_tid() == "tid-2"
+
+
+def test_log_filter_injects_tid():
+    """The logging filter stamps the current TID onto records ('-' when unset)."""
+    import logging
+
+    from mirix.log import _tid_log_filter
+    from mirix.observability.context import clear_intuit_tid, set_intuit_tid
+
+    set_intuit_tid("tid-log")
+    rec = logging.LogRecord("Mirix", logging.INFO, "/tmp/x.py", 1, "msg", None, None)
+    _tid_log_filter.filter(rec)
+    assert rec.intuit_tid == "tid-log"
+
+    clear_intuit_tid()
+    rec2 = logging.LogRecord("Mirix", logging.INFO, "/tmp/x.py", 1, "msg", None, None)
+    _tid_log_filter.filter(rec2)
+    assert rec2.intuit_tid == "-"
