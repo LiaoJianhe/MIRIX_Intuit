@@ -375,6 +375,51 @@ class QueueWorker:
                     direct_writes=direct_writes,
                 )
 
+            # Run the agent step under the SAME error policy as the external
+            # (Kafka/Numaflow) consumer path (process_external_message). Without
+            # this, the in-process worker simply logged-and-swallowed any save
+            # failure and never marked the source processing_complete — so the
+            # source hung "in progress" forever and SDK wait_for_save() polled to
+            # its timeout. The policy classifies Permanent vs Transient and, on a
+            # Permanent failure, marks the source complete (short-circuiting
+            # redeliveries / unblocking waiters).
+            #
+            # Key difference from the Kafka path: the in-process worker has no
+            # redelivery mechanism behind it, so TRANSIENT_EXHAUSTED must ALSO
+            # finalize the source here (the Kafka path re-raises so its consumer
+            # redelivers; we have nothing to redeliver to). Either way a failed
+            # save ends in a finalized source rather than a permanent hang.
+            from mirix.queue.error_policy import OutcomeKind, process_with_policy
+
+            async def _mark_complete_on_failure(source_id: str, _error_message: str, exc: BaseException) -> None:
+                from mirix.services.memory_source_manager import MemorySourceManager
+
+                try:
+                    await MemorySourceManager().mark_processing_complete(source_id)
+                    logger.info(
+                        "Marked memory_source=%s processing_complete after %s on the "
+                        "in-process worker (no redelivery path).",
+                        source_id,
+                        type(exc).__name__,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to mark memory_source=%s processing_complete after failure",
+                        source_id,
+                    )
+
+            async def _run_under_policy():
+                outcome = await process_with_policy(
+                    _do_send_messages,
+                    memory_source_id=memory_source_id,
+                    on_permanent=(_mark_complete_on_failure if memory_source_id else None),
+                )
+                # No redelivery behind the in-process worker: a transient-exhausted
+                # failure must finalize the source too, else wait_for_save hangs.
+                if outcome.kind is OutcomeKind.TRANSIENT_EXHAUSTED and memory_source_id and outcome.cause is not None:
+                    await _mark_complete_on_failure(memory_source_id, str(outcome.cause), outcome.cause)
+                return None
+
             if langfuse and trace_id:
                 from typing import cast
 
@@ -422,14 +467,13 @@ class QueueWorker:
                             user_id=trace_context.get("user_id"),
                             session_id=trace_context.get("session_id"),
                         )
-                    usage = await _do_send_messages()
+                    await _run_under_policy()
             else:
-                usage = await _do_send_messages()
+                await _run_under_policy()
 
             logger.debug(
-                "Successfully processed message: agent_id=%s, usage=%s",
+                "Finished processing message (under error policy): agent_id=%s",
                 message.agent_id,
-                usage.model_dump() if usage else "None",
             )
 
         except Exception as e:
