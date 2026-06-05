@@ -164,8 +164,13 @@ async def test_flush_langfuse_with_timeout():
         mock_settings.langfuse_debug = False
         mock_settings.langfuse_flush_interval = 10
         mock_settings.langfuse_flush_timeout = 5.0
+        mock_settings.span_export_file = None  # no file sink in this test
 
-        with patch("langfuse.Langfuse") as MockLangfuse, patch("opentelemetry.sdk.trace.TracerProvider"):
+        import mirix.observability.tracer_provider as _tp
+
+        _tp._reset_for_testing()
+
+        with patch("langfuse.Langfuse") as MockLangfuse:
             mock_client = MagicMock()
             MockLangfuse.return_value = mock_client
 
@@ -277,6 +282,41 @@ def test_tid_isolation():
 
     set_intuit_tid("tid-2")
     assert get_intuit_tid() == "tid-2"
+
+
+def test_span_export_file_writes_jsonl(tmp_path):
+    """With span_export_file set, finished spans are written to a JSONL file.
+
+    Drives the shared TracerProvider directly with a real OTel span (no remote
+    Langfuse needed) — the path full-stack tests rely on to read spans off disk.
+    """
+    import json
+    from unittest.mock import patch
+
+    import mirix.observability.tracer_provider as tp
+    from mirix.settings import settings
+
+    span_file = tmp_path / "spans.jsonl"
+    tp._reset_for_testing()
+    try:
+        with patch.object(settings, "span_export_file", span_file):
+            provider = tp.get_shared_tracer_provider()
+            tracer = provider.get_tracer("test")
+            with tracer.start_as_current_span("List Tools By Ids") as span:
+                span.set_attribute("intuit_tid", "tid-span-export")
+                span.set_attribute("tool_id_count", 3)
+            provider.force_flush()
+
+        lines = [ln for ln in span_file.read_text().splitlines() if ln.strip()]
+        assert len(lines) == 1
+        rec = json.loads(lines[0])
+        assert rec["name"] == "List Tools By Ids"
+        assert rec["attributes"]["intuit_tid"] == "tid-span-export"
+        assert rec["attributes"]["tool_id_count"] == 3
+        assert rec["trace_id"] and rec["span_id"]
+        assert rec["duration_ms"] is not None
+    finally:
+        tp._reset_for_testing()
 
 
 def test_log_filter_injects_tid():
