@@ -399,6 +399,21 @@ class QueueWorker:
                 ) as span:
                     mark_observation_as_child(span)
 
+                    # Surface the TID at the TRACE level (tag = filterable in the
+                    # Langfuse dashboard, metadata = visible) so a failed save's
+                    # trace shows its TID for a log pivot. This is the worker
+                    # trace, decoupled from the HTTP-entry trace, so it needs its
+                    # own trace-level TID independent of the span metadata above.
+                    _worker_tid = get_intuit_tid()
+                    if _worker_tid:
+                        try:
+                            langfuse.update_current_trace(
+                                tags=[f"tid:{_worker_tid}"],
+                                metadata={"intuit_tid": _worker_tid},
+                            )
+                        except Exception as e:
+                            logger.debug("Failed to set TID on worker trace: %s", e)
+
                     span_observation_id = getattr(span, "id", None)
                     if span_observation_id:
                         set_trace_context(
