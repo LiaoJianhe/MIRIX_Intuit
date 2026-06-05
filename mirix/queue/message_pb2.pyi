@@ -167,6 +167,7 @@ class MessageCreate(_message.Message):
         "message_occurred_at",
         "message_metadata",
     )
+
     class Role(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
         __slots__ = ()
         ROLE_UNSPECIFIED: _ClassVar[MessageCreate.Role]
