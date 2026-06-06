@@ -595,6 +595,8 @@ class Agent(BaseAgent):
             if parent_span_id:
                 trace_context_dict["parent_span_id"] = parent_span_id
 
+            from mirix.observability.context import current_observation_id, set_trace_context
+
             try:
                 with langfuse.start_as_current_observation(
                     name=f"tool: {function_name}",
@@ -608,7 +610,29 @@ class Agent(BaseAgent):
                     },
                 ) as span:
                     mark_observation_as_child(span)
-                    function_response, is_error = await _execute_tool_inner()
+
+                    # Publish this tool span as the current observation while the
+                    # tool body runs so any child observation opened during
+                    # execution (e.g. "Resolve Child Agents" or the memory
+                    # sub-agent spans spawned by trigger_memory_update) nests under
+                    # the tool span rather than the agent-level span above it.
+                    # Restore the prior observation id afterward so the next
+                    # sibling tool span parents back to the agent span.
+                    span_observation_id = getattr(span, "id", None)
+                    if span_observation_id:
+                        set_trace_context(
+                            trace_id=trace_id,
+                            observation_id=span_observation_id,
+                            user_id=trace_context.get("user_id"),
+                            session_id=trace_context.get("session_id"),
+                        )
+                    try:
+                        function_response, is_error = await _execute_tool_inner()
+                    finally:
+                        # Restore the prior observation id (set_trace_context ignores
+                        # a falsy observation_id, so set the ContextVar directly to
+                        # also handle the None / no-parent case correctly).
+                        current_observation_id.set(parent_span_id)
 
                     span.update(
                         output={
@@ -1266,282 +1290,286 @@ class Agent(BaseAgent):
             else:
                 raise ValueError(f"input_messages items must be Message or MessageCreate, got {type(m)}")
 
-        # Read retained history from the parent scope (for sub-agents) or from this
-        # agent's scope (for top-level agents/meta). This keeps sub-agent inputs as a
-        # single packed message while still providing parent retained context.
-        retention = (self.actor.message_set_retention_count or 0) if self.actor else 0
-        retention_agent_id = (
-            self.agent_state.parent_id or self.agent_state.id
-        )  # Retained messages in the DB are associated with the meta agent
-        should_read_retention = retention > 0 and self.actor and self.user_id
-        is_meta_agent = self.agent_state.is_type(AgentType.meta_memory_agent)
-        should_write_retention = retention > 0 and is_meta_agent and self.actor and self.user_id
-        retained_input_sets: List[Message] = []
-        if should_read_retention:
-            from mirix.observability.timed_spans import timed_span
+        from mirix.observability.timed_spans import timed_span
 
-            async with timed_span(
-                "Load Retained History",
-                metadata={"agent_id": retention_agent_id, "limit": retention},
-            ):
-                retained_input_sets = await self.message_manager.get_messages_for_agent_user(
-                    agent_id=retention_agent_id,
+        async with timed_span(
+            "Agent Step",
+            metadata={"agent_type": str(self.agent_state.agent_type)},
+        ):
+            # Read retained history from the parent scope (for sub-agents) or from this
+            # agent's scope (for top-level agents/meta). This keeps sub-agent inputs as a
+            # single packed message while still providing parent retained context.
+            retention = (self.actor.message_set_retention_count or 0) if self.actor else 0
+            retention_agent_id = (
+                self.agent_state.parent_id or self.agent_state.id
+            )  # Retained messages in the DB are associated with the meta agent
+            should_read_retention = retention > 0 and self.actor and self.user_id
+            is_meta_agent = self.agent_state.is_type(AgentType.meta_memory_agent)
+            should_write_retention = retention > 0 and is_meta_agent and self.actor and self.user_id
+            retained_input_sets: List[Message] = []
+            if should_read_retention:
+                async with timed_span(
+                    "Load Retained History",
+                    metadata={"agent_id": retention_agent_id, "limit": retention},
+                ):
+                    retained_input_sets = await self.message_manager.get_messages_for_agent_user(
+                        agent_id=retention_agent_id,
+                        user_id=self.user_id,
+                        actor=self.actor,
+                        limit=retention,
+                    )
+
+            # Chaining accumulator for the active agent loop only.
+            accumulated: List[Message] = list(retained_input_sets)
+            # Persist only the original input payload, never synthetic helper messages
+            # appended to iteration messages during meta-agent processing.
+            input_messages_for_persistence: List[Message] = list(normalized_input_messages)
+
+            # Initialize the LLM client once per step to reuse across retries.
+            llm_client = LLMClient.create(
+                llm_config=self.agent_state.llm_config,
+            )
+
+            # Persist memory source and messages before sub-agent dispatch
+            # If memory_source_id is set on this agent instance, persist the source
+            # and its messages before running any memory extraction. This is gated on
+            # the meta_memory_agent type so sub-agents don't re-persist.
+            summary_task: Optional[asyncio.Task] = None
+            if self.agent_state.is_type(AgentType.meta_memory_agent) and self.memory_source_id:
+                self._source_deduped = False
+
+                async with timed_span(
+                    "Persist Memory Source",
+                    metadata={"memory_source_id": self.memory_source_id},
+                ):
+                    await self._persist_memory_source(
+                        memory_source_id=self.memory_source_id,
+                        input_messages=raw_input_messages,
+                    )
+
+                # Source was deduped at DB level (external_id or batch_hash conflict).
+                # A prior submission already created the source and was processed.
+                # Skip all agent processing to avoid duplicate memories.
+                if self._source_deduped:
+                    logger.info("Source %s deduped, skipping agent processing", self.memory_source_id)
+                    emit_idempotency_skip_span(
+                        name="Idempotency Skip: source deduped",
+                        reason="source-deduped",
+                        metadata={"memory_source_id": self.memory_source_id},
+                    )
+                    return MirixUsageStatistics(step_count=0)
+
+                # Skip processing if this source was already fully processed (redelivery case).
+                async with timed_span(
+                    "Check Source Processing State",
+                    metadata={"memory_source_id": self.memory_source_id},
+                ):
+                    source = await self.memory_source_manager.get_by_id(self.memory_source_id)
+                if source and source.processing_complete:
+                    logger.info("Source %s already processed, skipping", self.memory_source_id)
+                    emit_idempotency_skip_span(
+                        name="Idempotency Skip: processing complete",
+                        reason="processing-complete",
+                        metadata={"memory_source_id": self.memory_source_id},
+                    )
+                    return MirixUsageStatistics(step_count=0)
+
+                # Dispatch summary generation in parallel with the memory sub-agents.
+                # Awaited before mark_processing_complete; on failure the exception
+                # propagates out of step() so the Kafka worker redelivers the message.
+                # Source-level idempotency (external_id / batch_hash + processing_complete)
+                # makes redelivery a safe full retry.
+                # Skipped on direct-write requests because the caller provides the
+                # per-item summary directly, so there's nothing to generate.
+                if self.summarize and not self.source_summary and not self.direct_writes:
+                    summary_task = asyncio.create_task(self._generate_source_summary_traced())
+
+            # Direct-write branch: bypass LLM dispatch and call registered handlers.
+            # Placed AFTER _persist_memory_source + dedup/processing_complete checks so
+            # deduped or already-processed sources short-circuit before this runs.
+            if self.agent_state.is_type(AgentType.meta_memory_agent) and self.direct_writes:
+                await self._apply_direct_writes_traced()
+                if self.memory_source_id:
+                    await self.memory_source_manager.mark_processing_complete(self.memory_source_id)
+                return MirixUsageStatistics(step_count=0)
+
+            if self.agent_state.is_type(AgentType.meta_memory_agent):
+                # Extract topics from retained context + current input messages.
+                try:
+                    # make sure to include both retained context and current input messages in the search topic extraction
+                    topics = await self._extract_topics_from_messages(retained_input_sets + normalized_input_messages)
+
+                    if topics is not None:
+                        kwargs["topics"] = topics
+                    else:
+                        printv(f"[Mirix.Agent.{self.agent_state.name}] WARNING: No topics extracted from input")
+
+                except Exception as e:
+                    # Don't interpolate `e` — its __str__ may carry user
+                    # content from the LLM/parsing error. Type alone is
+                    # enough at info level.
+                    printv(
+                        f"[Mirix.Agent.{self.agent_state.name}] INFO: Error in extracting the topic "
+                        f"from the input: error_type={type(e).__name__}"
+                    )
+                    pass
+
+            # Main loop:ing
+            # Each iteration calls inner_step and then makes a decision about whether to continue chaining
+            # or to terminate the step. When chaining, the curren_input_messages are updated to reference
+            # a heartbeat message (e.g. "function failed", "continue chaining", etc.) and the previous input messages
+            # are added to the in-memory accumulator.
+            counter = 0
+            total_usage = UsageStatistics()
+            step_count = 0
+            loop_input_messages: List[Message] = list(normalized_input_messages)
+            while True:
+                kwargs["first_message"] = False
+                kwargs["step_count"] = step_count
+
+                loop_iteration_messages = list(loop_input_messages)
+                if self.agent_state.is_type(AgentType.meta_memory_agent) and step_count == 0:
+                    meta_message = prepare_input_message_create(
+                        MessageCreate(
+                            role="user",
+                            content="[System Message] As the meta memory manager, analyze the provided content and perform your function.",
+                            filter_tags=self.filter_tags,
+                        ),
+                        self.agent_state.id,
+                        wrap_user_message=False,
+                        wrap_system_message=True,
+                    )
+                    loop_iteration_messages.append(meta_message)
+
+                async with timed_span("Inner Step", metadata={"step_count": step_count}):
+                    step_response = await self.inner_step(
+                        messages=loop_iteration_messages,
+                        accumulated=accumulated,
+                        chaining=chaining,
+                        llm_client=llm_client,
+                        retained_count=len(retained_input_sets),
+                        **kwargs,
+                    )
+
+                continue_chaining = step_response.continue_chaining
+                function_failed = step_response.function_failed
+                usage = step_response.usage
+
+                # Accumulate step messages for next chaining iteration
+                accumulated = accumulated + step_response.messages
+
+                step_count += 1
+                total_usage += usage
+                counter += 1
+                self.interface.step_complete()
+
+                # Chain stops
+                if not chaining and (not function_failed):
+                    printv(f"[Mirix.Agent.{self.agent_state.name}] INFO: No chaining, stopping after one step")
+                    break
+                elif max_chaining_steps is not None and counter == max_chaining_steps:
+                    # Add warning message based on agent type
+                    if self.agent_state.is_type(AgentType.chat_agent):
+                        warning_content = "[System Message] You have reached the maximum chaining steps. Please call 'send_message' to send your response to the user."
+                    else:
+                        warning_content = "[System Message] You have reached the maximum chaining steps. Please call 'finish_memory_update' to end the chaining."
+                    loop_input_messages = [
+                        Message.dict_to_message(
+                            agent_id=self.agent_state.id,
+                            model=self.model,
+                            openai_message_dict={
+                                "role": "user",
+                                "content": warning_content,
+                            },
+                        )
+                    ]
+                    continue  # give agent one more chance to respond
+                elif max_chaining_steps is not None and counter > max_chaining_steps:
+                    printv(
+                        f"[Mirix.Agent.{self.agent_state.name}] INFO: Hit max chaining steps, stopping after {counter} steps"
+                    )
+                    break
+                elif function_failed:
+                    assert self.agent_state.created_by_id is not None
+                    loop_input_messages = [
+                        Message.dict_to_message(
+                            agent_id=self.agent_state.id,
+                            model=self.model,
+                            openai_message_dict={
+                                "role": "user",  # TODO: change to system?
+                                "content": get_contine_chaining(FUNC_FAILED_HEARTBEAT_MESSAGE),
+                            },
+                        )
+                    ]
+                    continue  # always chain
+                elif continue_chaining:
+                    assert self.agent_state.created_by_id is not None
+                    loop_input_messages = [
+                        Message.dict_to_message(
+                            agent_id=self.agent_state.id,
+                            model=self.model,
+                            openai_message_dict={
+                                "role": "user",  # TODO: change to system?
+                                "content": get_contine_chaining(REQ_HEARTBEAT_MESSAGE),
+                            },
+                        )
+                    ]
+                    continue  # always chain
+                # Mirix no-op / yield
+                else:
+                    break
+
+            # Retention write-back: persist input messages and prune old ones if configured
+            if should_write_retention and input_messages_for_persistence:
+                await self.message_manager.create_many_messages(
+                    input_messages_for_persistence,
+                    actor=self.actor,
+                    client_id=self.client_id,
+                    user_id=self.user_id,
+                )
+                await self.message_manager.hard_delete_user_messages_for_agent(
+                    agent_id=self.agent_state.id,
                     user_id=self.user_id,
                     actor=self.actor,
-                    limit=retention,
+                    keep_newest_n=retention,
                 )
 
-        # Chaining accumulator for the active agent loop only.
-        accumulated: List[Message] = list(retained_input_sets)
-        # Persist only the original input payload, never synthetic helper messages
-        # appended to iteration messages during meta-agent processing.
-        input_messages_for_persistence: List[Message] = list(normalized_input_messages)
-
-        # Initialize the LLM client once per step to reuse across retries.
-        llm_client = LLMClient.create(
-            llm_config=self.agent_state.llm_config,
-        )
-
-        # Persist memory source and messages before sub-agent dispatch
-        # If memory_source_id is set on this agent instance, persist the source
-        # and its messages before running any memory extraction. This is gated on
-        # the meta_memory_agent type so sub-agents don't re-persist.
-        summary_task: Optional[asyncio.Task] = None
-        if self.agent_state.is_type(AgentType.meta_memory_agent) and self.memory_source_id:
-            self._source_deduped = False
-            from mirix.observability.timed_spans import timed_span
-
-            async with timed_span(
-                "Persist Memory Source",
-                metadata={"memory_source_id": self.memory_source_id},
-            ):
-                await self._persist_memory_source(
-                    memory_source_id=self.memory_source_id,
-                    input_messages=raw_input_messages,
-                )
-
-            # Source was deduped at DB level (external_id or batch_hash conflict).
-            # A prior submission already created the source and was processed.
-            # Skip all agent processing to avoid duplicate memories.
-            if self._source_deduped:
-                logger.info("Source %s deduped, skipping agent processing", self.memory_source_id)
-                emit_idempotency_skip_span(
-                    name="Idempotency Skip: source deduped",
-                    reason="source-deduped",
-                    metadata={"memory_source_id": self.memory_source_id},
-                )
-                return MirixUsageStatistics(step_count=0)
-
-            # Skip processing if this source was already fully processed (redelivery case).
-            async with timed_span(
-                "Check Source Processing State",
-                metadata={"memory_source_id": self.memory_source_id},
-            ):
-                source = await self.memory_source_manager.get_by_id(self.memory_source_id)
-            if source and source.processing_complete:
-                logger.info("Source %s already processed, skipping", self.memory_source_id)
-                emit_idempotency_skip_span(
-                    name="Idempotency Skip: processing complete",
-                    reason="processing-complete",
-                    metadata={"memory_source_id": self.memory_source_id},
-                )
-                return MirixUsageStatistics(step_count=0)
-
-            # Dispatch summary generation in parallel with the memory sub-agents.
-            # Awaited before mark_processing_complete; on failure the exception
-            # propagates out of step() so the Kafka worker redelivers the message.
-            # Source-level idempotency (external_id / batch_hash + processing_complete)
-            # makes redelivery a safe full retry.
-            # Skipped on direct-write requests because the caller provides the
-            # per-item summary directly, so there's nothing to generate.
-            if self.summarize and not self.source_summary and not self.direct_writes:
-                summary_task = asyncio.create_task(self._generate_source_summary_traced())
-
-        # Direct-write branch: bypass LLM dispatch and call registered handlers.
-        # Placed AFTER _persist_memory_source + dedup/processing_complete checks so
-        # deduped or already-processed sources short-circuit before this runs.
-        if self.agent_state.is_type(AgentType.meta_memory_agent) and self.direct_writes:
-            await self._apply_direct_writes_traced()
-            if self.memory_source_id:
-                await self.memory_source_manager.mark_processing_complete(self.memory_source_id)
-            return MirixUsageStatistics(step_count=0)
-
-        if self.agent_state.is_type(AgentType.meta_memory_agent):
-            # Extract topics from retained context + current input messages.
-            try:
-                # make sure to include both retained context and current input messages in the search topic extraction
-                topics = await self._extract_topics_from_messages(retained_input_sets + normalized_input_messages)
-
-                if topics is not None:
-                    kwargs["topics"] = topics
-                else:
-                    printv(f"[Mirix.Agent.{self.agent_state.name}] WARNING: No topics extracted from input")
-
-            except Exception as e:
-                # Don't interpolate `e` — its __str__ may carry user
-                # content from the LLM/parsing error. Type alone is
-                # enough at info level.
-                printv(
-                    f"[Mirix.Agent.{self.agent_state.name}] INFO: Error in extracting the topic "
-                    f"from the input: error_type={type(e).__name__}"
-                )
-                pass
-
-        # Main loop:ing
-        # Each iteration calls inner_step and then makes a decision about whether to continue chaining
-        # or to terminate the step. When chaining, the curren_input_messages are updated to reference
-        # a heartbeat message (e.g. "function failed", "continue chaining", etc.) and the previous input messages
-        # are added to the in-memory accumulator.
-        counter = 0
-        total_usage = UsageStatistics()
-        step_count = 0
-        loop_input_messages: List[Message] = list(normalized_input_messages)
-        while True:
-            kwargs["first_message"] = False
-            kwargs["step_count"] = step_count
-
-            loop_iteration_messages = list(loop_input_messages)
-            if self.agent_state.is_type(AgentType.meta_memory_agent) and step_count == 0:
-                meta_message = prepare_input_message_create(
-                    MessageCreate(
-                        role="user",
-                        content="[System Message] As the meta memory manager, analyze the provided content and perform your function.",
-                        filter_tags=self.filter_tags,
-                    ),
-                    self.agent_state.id,
-                    wrap_user_message=False,
-                    wrap_system_message=True,
-                )
-                loop_iteration_messages.append(meta_message)
-
-            step_response = await self.inner_step(
-                messages=loop_iteration_messages,
-                accumulated=accumulated,
-                chaining=chaining,
-                llm_client=llm_client,
-                retained_count=len(retained_input_sets),
-                **kwargs,
-            )
-
-            continue_chaining = step_response.continue_chaining
-            function_failed = step_response.function_failed
-            usage = step_response.usage
-
-            # Accumulate step messages for next chaining iteration
-            accumulated = accumulated + step_response.messages
-
-            step_count += 1
-            total_usage += usage
-            counter += 1
-            self.interface.step_complete()
-
-            # Chain stops
-            if not chaining and (not function_failed):
-                printv(f"[Mirix.Agent.{self.agent_state.name}] INFO: No chaining, stopping after one step")
-                break
-            elif max_chaining_steps is not None and counter == max_chaining_steps:
-                # Add warning message based on agent type
-                if self.agent_state.is_type(AgentType.chat_agent):
-                    warning_content = "[System Message] You have reached the maximum chaining steps. Please call 'send_message' to send your response to the user."
-                else:
-                    warning_content = "[System Message] You have reached the maximum chaining steps. Please call 'finish_memory_update' to end the chaining."
-                loop_input_messages = [
-                    Message.dict_to_message(
-                        agent_id=self.agent_state.id,
-                        model=self.model,
-                        openai_message_dict={
-                            "role": "user",
-                            "content": warning_content,
-                        },
-                    )
-                ]
-                continue  # give agent one more chance to respond
-            elif max_chaining_steps is not None and counter > max_chaining_steps:
-                printv(
-                    f"[Mirix.Agent.{self.agent_state.name}] INFO: Hit max chaining steps, stopping after {counter} steps"
-                )
-                break
-            elif function_failed:
-                assert self.agent_state.created_by_id is not None
-                loop_input_messages = [
-                    Message.dict_to_message(
-                        agent_id=self.agent_state.id,
-                        model=self.model,
-                        openai_message_dict={
-                            "role": "user",  # TODO: change to system?
-                            "content": get_contine_chaining(FUNC_FAILED_HEARTBEAT_MESSAGE),
-                        },
-                    )
-                ]
-                continue  # always chain
-            elif continue_chaining:
-                assert self.agent_state.created_by_id is not None
-                loop_input_messages = [
-                    Message.dict_to_message(
-                        agent_id=self.agent_state.id,
-                        model=self.model,
-                        openai_message_dict={
-                            "role": "user",  # TODO: change to system?
-                            "content": get_contine_chaining(REQ_HEARTBEAT_MESSAGE),
-                        },
-                    )
-                ]
-                continue  # always chain
-            # Mirix no-op / yield
-            else:
-                break
-
-        # Retention write-back: persist input messages and prune old ones if configured
-        if should_write_retention and input_messages_for_persistence:
-            await self.message_manager.create_many_messages(
-                input_messages_for_persistence,
-                actor=self.actor,
-                client_id=self.client_id,
-                user_id=self.user_id,
-            )
-            await self.message_manager.hard_delete_user_messages_for_agent(
-                agent_id=self.agent_state.id,
-                user_id=self.user_id,
-                actor=self.actor,
-                keep_newest_n=retention,
-            )
-
-        # Await the parallel summary task (dispatched before sub-agents ran).
-        # Raises on failure so the worker redelivers the message — processing_complete
-        # stays False and the retry gets a clean full reprocess.
-        if summary_task is not None:
-            try:
-                await summary_task
-            except Exception as e:
-                # VEPAGE-1157: this task runs CONCURRENTLY with the sub-agent
-                # gather via asyncio.create_task. Its exceptions surface here
-                # only at await time. Log the full cause chain — the original
-                # warning swallowed the stack and made the asyncpg / MissingGreenlet
-                # signature invisible.
+            # Await the parallel summary task (dispatched before sub-agents ran).
+            # Raises on failure so the worker redelivers the message — processing_complete
+            # stays False and the retry gets a clean full reprocess.
+            if summary_task is not None:
                 try:
-                    from mirix.queue.error_policy import format_exc_chain
+                    await summary_task
+                except Exception as e:
+                    # VEPAGE-1157: this task runs CONCURRENTLY with the sub-agent
+                    # gather via asyncio.create_task. Its exceptions surface here
+                    # only at await time. Log the full cause chain — the original
+                    # warning swallowed the stack and made the asyncpg / MissingGreenlet
+                    # signature invisible.
+                    try:
+                        from mirix.queue.error_policy import format_exc_chain
 
-                    chain = format_exc_chain(e)
-                except Exception:
-                    chain = "<chain-format-failed>"
-                logger.error(
-                    "VEPAGE-1157 summary_task EXC: source=%s exc_type=%s — chain: %s",
-                    self.memory_source_id,
-                    type(e).__name__,
-                    chain,
-                    exc_info=True,
-                )
-                raise
+                        chain = format_exc_chain(e)
+                    except Exception:
+                        chain = "<chain-format-failed>"
+                    logger.error(
+                        "VEPAGE-1157 summary_task EXC: source=%s exc_type=%s — chain: %s",
+                        self.memory_source_id,
+                        type(e).__name__,
+                        chain,
+                        exc_info=True,
+                    )
+                    raise
 
-        # Mark memory source as fully processed after all agents complete
-        if self.agent_state.is_type(AgentType.meta_memory_agent) and self.memory_source_id:
-            try:
-                await self.memory_source_manager.mark_processing_complete(self.memory_source_id)
-            except Exception as e:
-                logger.warning("Failed to mark source %s complete: %s", self.memory_source_id, e)
-                raise
+            # Mark memory source as fully processed after all agents complete
+            if self.agent_state.is_type(AgentType.meta_memory_agent) and self.memory_source_id:
+                try:
+                    await self.memory_source_manager.mark_processing_complete(self.memory_source_id)
+                except Exception as e:
+                    logger.warning("Failed to mark source %s complete: %s", self.memory_source_id, e)
+                    raise
 
-        return MirixUsageStatistics(**total_usage.model_dump(), step_count=step_count)
+            return MirixUsageStatistics(**total_usage.model_dump(), step_count=step_count)
 
     async def _apply_direct_write(self, memory_type: str, payload: Dict[str, Any]) -> None:
         """Dispatch a direct write to the registered handler for memory_type.
