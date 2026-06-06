@@ -595,6 +595,8 @@ class Agent(BaseAgent):
             if parent_span_id:
                 trace_context_dict["parent_span_id"] = parent_span_id
 
+            from mirix.observability.context import current_observation_id, set_trace_context
+
             try:
                 with langfuse.start_as_current_observation(
                     name=f"tool: {function_name}",
@@ -608,7 +610,29 @@ class Agent(BaseAgent):
                     },
                 ) as span:
                     mark_observation_as_child(span)
-                    function_response, is_error = await _execute_tool_inner()
+
+                    # Publish this tool span as the current observation while the
+                    # tool body runs so any child observation opened during
+                    # execution (e.g. "Resolve Child Agents" or the memory
+                    # sub-agent spans spawned by trigger_memory_update) nests under
+                    # the tool span rather than the agent-level span above it.
+                    # Restore the prior observation id afterward so the next
+                    # sibling tool span parents back to the agent span.
+                    span_observation_id = getattr(span, "id", None)
+                    if span_observation_id:
+                        set_trace_context(
+                            trace_id=trace_id,
+                            observation_id=span_observation_id,
+                            user_id=trace_context.get("user_id"),
+                            session_id=trace_context.get("session_id"),
+                        )
+                    try:
+                        function_response, is_error = await _execute_tool_inner()
+                    finally:
+                        # Restore the prior observation id (set_trace_context ignores
+                        # a falsy observation_id, so set the ContextVar directly to
+                        # also handle the None / no-parent case correctly).
+                        current_observation_id.set(parent_span_id)
 
                     span.update(
                         output={
