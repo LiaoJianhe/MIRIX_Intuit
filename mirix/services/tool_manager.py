@@ -203,9 +203,7 @@ class ToolManager:
             return [tool.to_pydantic() for tool in tools]
 
     @enforce_types
-    async def list_tools_by_names(
-        self, tool_names: List[str], actor: PydanticClient
-    ) -> List[PydanticTool]:
+    async def list_tools_by_names(self, tool_names: List[str], actor: PydanticClient) -> List[PydanticTool]:
         """Batch-fetch tools by name.
 
         Returns the tools whose ``name`` is in ``tool_names`` and whose
@@ -265,9 +263,7 @@ class ToolManager:
         return results
 
     @enforce_types
-    async def list_tools_by_ids(
-        self, tool_ids: List[str], actor: PydanticClient
-    ) -> List[PydanticTool]:
+    async def list_tools_by_ids(self, tool_ids: List[str], actor: PydanticClient) -> List[PydanticTool]:
         """Batch-fetch tools by id (used by the ECMS provider's M2M
         post-create resolution). Same shape as ``list_tools_by_names``."""
         unique_ids = list({i for i in tool_ids if i})
@@ -275,35 +271,46 @@ class ToolManager:
             return []
 
         from mirix.database.relational_provider import get_relational_provider
+        from mirix.observability.timed_spans import timed_span
 
         provider = get_relational_provider()
         results: List[PydanticTool] = []
-        if provider:
-            for start in range(0, len(unique_ids), _BATCH_CHUNK_SIZE):
-                chunk = unique_ids[start : start + _BATCH_CHUNK_SIZE]
-                # See ``list_tools_by_names``: the NQ uses
-                # ``= ANY(string_to_array(CAST(:ids AS varchar), ','))``
-                # so the bind value must be a comma-separated string.
-                rows = await provider.find_using_named_query(
-                    "tools",
-                    "tool_manager.list_tools_by_ids",
-                    params={
-                        "ids": ",".join(chunk),
-                        "organizationId": actor.organization_id,
-                    },
-                    page_size=len(chunk),
-                )
-                results.extend(PydanticTool(**r) for r in rows)
-        else:
-            async with self.session_maker() as session:
-                stmt = (
-                    select(ToolModel)
-                    .where(ToolModel.id.in_(unique_ids))
-                    .where(ToolModel.organization_id == actor.organization_id)
-                    .where(~ToolModel.is_deleted)
-                )
-                rows = await session.execute(stmt)
-                results = [t.to_pydantic() for t in rows.scalars().all()]
+        # Span the batch tool resolution: it is one of the save-path network
+        # reads, and the chunk count makes a regressed N+1 visible in the trace.
+        async with timed_span(
+            "List Tools By Ids",
+            metadata={
+                "tool_id_count": len(unique_ids),
+                "chunks": (len(unique_ids) + _BATCH_CHUNK_SIZE - 1) // _BATCH_CHUNK_SIZE,
+                "provider": "ips_relational" if provider else "postgres",
+            },
+        ):
+            if provider:
+                for start in range(0, len(unique_ids), _BATCH_CHUNK_SIZE):
+                    chunk = unique_ids[start : start + _BATCH_CHUNK_SIZE]
+                    # See ``list_tools_by_names``: the NQ uses
+                    # ``= ANY(string_to_array(CAST(:ids AS varchar), ','))``
+                    # so the bind value must be a comma-separated string.
+                    rows = await provider.find_using_named_query(
+                        "tools",
+                        "tool_manager.list_tools_by_ids",
+                        params={
+                            "ids": ",".join(chunk),
+                            "organizationId": actor.organization_id,
+                        },
+                        page_size=len(chunk),
+                    )
+                    results.extend(PydanticTool(**r) for r in rows)
+            else:
+                async with self.session_maker() as session:
+                    stmt = (
+                        select(ToolModel)
+                        .where(ToolModel.id.in_(unique_ids))
+                        .where(ToolModel.organization_id == actor.organization_id)
+                        .where(~ToolModel.is_deleted)
+                    )
+                    rows = await session.execute(stmt)
+                    results = [t.to_pydantic() for t in rows.scalars().all()]
 
         if len(results) < len(unique_ids):
             returned = {t.id for t in results}
@@ -448,9 +455,7 @@ class ToolManager:
         return tools
 
     @enforce_types
-    async def ensure_base_tools_exist(
-        self, actor: PydanticClient
-    ) -> List[PydanticTool]:
+    async def ensure_base_tools_exist(self, actor: PydanticClient) -> List[PydanticTool]:
         """Lightweight request-path base-tool verification.
 
         Used by ``agent_manager.create_meta_agent`` on every cold-start init

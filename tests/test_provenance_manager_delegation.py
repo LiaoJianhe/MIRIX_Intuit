@@ -195,9 +195,7 @@ class TestMemorySourceManagerDelegation:
             return_value=mock_provider,
         ):
             mgr = _memory_source_mgr()
-            page = await mgr.list_sources(
-                organization_id="org-1", user_id="user-1", limit=10
-            )
+            page = await mgr.list_sources(organization_id="org-1", user_id="user-1", limit=10)
             mock_provider.find_using_named_query.assert_awaited_once()
             args, kwargs = mock_provider.find_using_named_query.call_args
             assert args[0] == "memory_sources"
@@ -255,9 +253,7 @@ class TestMemorySourceManagerDelegation:
             assert page.has_more is True
             assert page.next_cursor is not None
             # Round-trip the cursor — second call must request page_num=1.
-            await mgr.list_sources(
-                organization_id="org-1", limit=2, cursor=page.next_cursor
-            )
+            await mgr.list_sources(organization_id="org-1", limit=2, cursor=page.next_cursor)
             second_call_kwargs = mock_provider.find_using_named_query.call_args.kwargs
             assert second_call_kwargs["page_num"] == 1
 
@@ -273,9 +269,7 @@ class TestMemorySourceManagerDelegation:
             return_value=mock_provider,
         ):
             mgr = _memory_source_mgr()
-            await mgr.list_sources(
-                organization_id="org-1", limit=10, cursor="not-base64-at-all!!!"
-            )
+            await mgr.list_sources(organization_id="org-1", limit=10, cursor="not-base64-at-all!!!")
             kwargs = mock_provider.find_using_named_query.call_args.kwargs
             assert kwargs["page_num"] == 0
 

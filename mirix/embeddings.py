@@ -220,7 +220,9 @@ class OpenAIEmbeddingWithCustomAuth:
                 )
 
             try:
-                auth_headers = auth_provider.get_auth_headers()
+                # Async auth fetch so a blocking token round-trip never stalls
+                # the event loop.
+                auth_headers = await auth_provider.get_auth_headers_async()
                 logger.info(
                     f"OpenAI Embedding - Using auth provider '{self.config.auth_provider}' "
                     f"to inject {len(auth_headers)} header(s)"

@@ -31,9 +31,7 @@ def _encode_page_cursor(page_num: int) -> str:
     change filters mid-pagination get whatever the new query returns at the
     encoded page.
     """
-    return base64.urlsafe_b64encode(
-        json.dumps({"p": page_num}).encode("utf-8")
-    ).decode("ascii")
+    return base64.urlsafe_b64encode(json.dumps({"p": page_num}).encode("utf-8")).decode("ascii")
 
 
 def _decode_page_cursor(cursor: Optional[str]) -> int:
@@ -250,9 +248,7 @@ class MemorySourceManager:
         return await self.get_by_id(memory_source_id, use_cache=use_cache)
 
     @enforce_types
-    async def get_by_id(
-        self, memory_source_id: str, use_cache: bool = True
-    ) -> Optional[PydanticMemorySource]:
+    async def get_by_id(self, memory_source_id: str, use_cache: bool = True) -> Optional[PydanticMemorySource]:
         """Fetch a memory source by ID with cache-aside pattern."""
         # Relational provider delegation (read by ID) — provider is source of truth, skip cache
         from mirix.database.relational_provider import get_relational_provider
@@ -271,22 +267,16 @@ class MemorySourceManager:
 
                 cache_provider = get_cache_provider()
                 if cache_provider:
-                    cache_key = (
-                        f"{cache_provider.MEMORY_SOURCE_PREFIX}{memory_source_id}"
-                    )
+                    cache_key = f"{cache_provider.MEMORY_SOURCE_PREFIX}{memory_source_id}"
                     cached_data = await cache_provider.get_json(cache_key)
                     if cached_data:
                         logger.debug("Cache HIT for memory source %s", memory_source_id)
                         # Strip Redis-internal fields (_ts suffixes) that pydantic rejects
                         known_fields = PydanticMemorySource.model_fields
-                        clean = {
-                            k: v for k, v in cached_data.items() if k in known_fields
-                        }
+                        clean = {k: v for k, v in cached_data.items() if k in known_fields}
                         return PydanticMemorySource(**clean)
             except Exception as e:
-                logger.warning(
-                    "Cache read failed for memory source %s: %s", memory_source_id, e
-                )
+                logger.warning("Cache read failed for memory source %s: %s", memory_source_id, e)
 
         # Fall back to DB
         async with self.session_maker() as session:
@@ -309,20 +299,12 @@ class MemorySourceManager:
 
                 cache_provider = get_cache_provider()
                 if cache_provider:
-                    cache_key = (
-                        f"{cache_provider.MEMORY_SOURCE_PREFIX}{memory_source_id}"
-                    )
+                    cache_key = f"{cache_provider.MEMORY_SOURCE_PREFIX}{memory_source_id}"
                     data = pydantic_source.model_dump(mode="json")
-                    await cache_provider.set_json(
-                        cache_key, data, ttl=settings.redis_ttl_default
-                    )
-                    logger.debug(
-                        "Populated cache for memory source %s", memory_source_id
-                    )
+                    await cache_provider.set_json(cache_key, data, ttl=settings.redis_ttl_default)
+                    logger.debug("Populated cache for memory source %s", memory_source_id)
             except Exception as e:
-                logger.warning(
-                    "Cache write failed for memory source %s: %s", memory_source_id, e
-                )
+                logger.warning("Cache write failed for memory source %s: %s", memory_source_id, e)
 
         return pydantic_source
 
@@ -409,17 +391,13 @@ class MemorySourceManager:
             )
 
             if organization_id:
-                query = query.where(
-                    MemorySourceModel.organization_id == organization_id
-                )
+                query = query.where(MemorySourceModel.organization_id == organization_id)
             if user_id:
                 query = query.where(MemorySourceModel.user_id == user_id)
             if client_id:
                 query = query.where(MemorySourceModel.client_id == client_id)
             if scope:
-                query = query.where(
-                    MemorySourceModel.filter_tags["scope"].astext == scope
-                )
+                query = query.where(MemorySourceModel.filter_tags["scope"].astext == scope)
             if since:
                 query = query.where(MemorySourceModel.occurred_at >= since)
             if until:
@@ -457,28 +435,18 @@ class MemorySourceManager:
 
         provider = get_relational_provider()
         if provider:
-            await provider.update(
-                "memory_sources", memory_source_id, {"processing_complete": True}
-            )
-            logger.info(
-                "Marked memory source %s as processing complete", memory_source_id
-            )
+            await provider.update("memory_sources", memory_source_id, {"processing_complete": True})
+            logger.info("Marked memory source %s as processing complete", memory_source_id)
             return
 
         async with self.session_maker() as session:
-            record = await MemorySourceModel.read(
-                db_session=session, identifier=memory_source_id
-            )
+            record = await MemorySourceModel.read(db_session=session, identifier=memory_source_id)
             record.processing_complete = True
             await record.update_with_redis(session)
-            logger.info(
-                "Marked memory source %s as processing complete", memory_source_id
-            )
+            logger.info("Marked memory source %s as processing complete", memory_source_id)
 
     @enforce_types
-    async def update_summary(
-        self, memory_source_id: str, summary: str, summary_source: str
-    ) -> None:
+    async def update_summary(self, memory_source_id: str, summary: str, summary_source: str) -> None:
         """Write a summary to an existing memory source.
 
         Used after processing completes to store a generated summary.
@@ -502,9 +470,7 @@ class MemorySourceManager:
             return
 
         async with self.session_maker() as session:
-            record = await MemorySourceModel.read(
-                db_session=session, identifier=memory_source_id
-            )
+            record = await MemorySourceModel.read(db_session=session, identifier=memory_source_id)
             record.summary = summary
             record.summary_source = summary_source
             await record.update_with_redis(session)

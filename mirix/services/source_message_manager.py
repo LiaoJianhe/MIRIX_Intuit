@@ -27,9 +27,7 @@ def compute_content_hash(role: str, content: Any) -> str:
     h.update(len(role_bytes).to_bytes(4, "big"))
     h.update(role_bytes)
 
-    content_bytes = json.dumps(content, sort_keys=True, ensure_ascii=False).encode(
-        "utf-8"
-    )
+    content_bytes = json.dumps(content, sort_keys=True, ensure_ascii=False).encode("utf-8")
     h.update(len(content_bytes).to_bytes(4, "big"))
     h.update(content_bytes)
 
@@ -174,9 +172,7 @@ class SourceMessageManager:
                 external_message_id=msg.get("external_message_id"),
                 role=role,
                 content=content if isinstance(content, dict) else {"text": content},
-                occurred_at=parse_occurred_at(
-                    msg.get("occurred_at") or fallback_occurred_at
-                ),
+                occurred_at=parse_occurred_at(msg.get("occurred_at") or fallback_occurred_at),
                 sequence_num=seq,
                 content_hash=content_hash,
                 message_metadata=msg.get("metadata"),
@@ -207,17 +203,13 @@ class SourceMessageManager:
                 # Provider expects ISO strings, not datetime objects
                 row_payload = {
                     **row,
-                    "occurred_at": (
-                        row["occurred_at"].isoformat() if row["occurred_at"] else None
-                    ),
+                    "occurred_at": (row["occurred_at"].isoformat() if row["occurred_at"] else None),
                     "created_at": row["created_at"].isoformat(),
                     "updated_at": row["updated_at"].isoformat(),
                 }
                 try:
                     await retry_transient(
-                        lambda payload=row_payload: provider.create(
-                            "source_messages", payload
-                        ),
+                        lambda payload=row_payload: provider.create("source_messages", payload),
                         op=f"source_messages.create({row['content_hash'][:8]}...)",
                     )
                     inserted += 1
@@ -236,7 +228,7 @@ class SourceMessageManager:
                             e,
                         )
                         emit_idempotency_skip_span(
-                            name="Source message write failed",
+                            name="Source Message Write: failed",
                             reason="source-message-write-failed",
                             metadata={
                                 "memory_source_id": memory_source_id,
@@ -324,9 +316,7 @@ class SourceMessageManager:
                 cur = next((r for r in records if r.get("id") == cursor), None)
                 if cur is not None:
                     cur_seq = cur.get("sequence_num") or 0
-                    records = [
-                        r for r in records if (r.get("sequence_num") or 0) > cur_seq
-                    ]
+                    records = [r for r in records if (r.get("sequence_num") or 0) > cur_seq]
             has_more = len(records) > limit
             records = records[:limit]
             items = [PydanticSourceMessage(**r) for r in records]
@@ -347,14 +337,10 @@ class SourceMessageManager:
             )
 
             if cursor:
-                cursor_result = await session.execute(
-                    select(SourceMessageModel).where(SourceMessageModel.id == cursor)
-                )
+                cursor_result = await session.execute(select(SourceMessageModel).where(SourceMessageModel.id == cursor))
                 cursor_obj = cursor_result.scalar_one_or_none()
                 if cursor_obj:
-                    query = query.where(
-                        SourceMessageModel.sequence_num > cursor_obj.sequence_num
-                    )
+                    query = query.where(SourceMessageModel.sequence_num > cursor_obj.sequence_num)
 
             # Fetch limit+1 to determine has_more
             query = query.limit(limit + 1)

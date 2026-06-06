@@ -244,9 +244,7 @@ class BlockManager:
             existing = await provider.read("block", block_id, actor=actor)
             if existing is None:
                 raise NoResultFound(f"Block {block_id} not found")
-            await provider.update(
-                "block", block_id, {"filter_tags": new_filter_tags}, actor=actor
-            )
+            await provider.update("block", block_id, {"filter_tags": new_filter_tags}, actor=actor)
             await self._invalidate_block_cache(block_id)
             return
 
@@ -378,12 +376,7 @@ class BlockManager:
                 **list_kwargs,
             )
             pydantic_blocks = [PydanticBlock(**r) for r in results]
-            if (
-                not pydantic_blocks
-                and auto_create_from_default
-                and any_scopes
-                and len(any_scopes) == 1
-            ):
+            if not pydantic_blocks and auto_create_from_default and any_scopes and len(any_scopes) == 1:
                 scope = any_scopes[0]
                 assert org_id is not None
                 logger.debug(
@@ -489,14 +482,10 @@ class BlockManager:
 
         user_manager = UserManager()
         try:
-            org_default_user = await user_manager.get_or_create_org_default_user(
-                org_id=organization_id
-            )
+            org_default_user = await user_manager.get_or_create_org_default_user(org_id=organization_id)
             default_user_id = org_default_user.id
         except Exception as exc:
-            logger.warning(
-                "Failed to get org default user, falling back to global admin: %s", exc
-            )
+            logger.warning("Failed to get org default user, falling back to global admin: %s", exc)
             default_user_id = UserManager.ADMIN_USER_ID
 
         # Find template blocks for this scope on the default user via the
@@ -536,8 +525,7 @@ class BlockManager:
             deduped_templates.append(tpl)
         if len(deduped_templates) != len(template_results):
             logger.info(
-                "Deduped %d template duplicates for scope=%s on default "
-                "user %s (kept %d unique label(s): %s)",
+                "Deduped %d template duplicates for scope=%s on default " "user %s (kept %d unique label(s): %s)",
                 len(template_results) - len(deduped_templates),
                 scope,
                 default_user_id,
@@ -546,9 +534,7 @@ class BlockManager:
             )
         template_results = deduped_templates
 
-        sanitized_bft = {
-            k: v for k, v in (block_filter_tags or {}).items() if k != "scope"
-        }
+        sanitized_bft = {k: v for k, v in (block_filter_tags or {}).items() if k != "scope"}
         merged_tags = {**sanitized_bft, "scope": scope}
 
         new_blocks: List[PydanticBlock] = []
@@ -786,8 +772,8 @@ class BlockManager:
         Returns:
             Number of records soft deleted
         """
-        from mirix.database.relational_provider import get_relational_provider
         from mirix.database.redis_client import get_redis_client
+        from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
         if provider:
@@ -844,8 +830,8 @@ class BlockManager:
         """
         from sqlalchemy import delete
 
-        from mirix.database.relational_provider import get_relational_provider
         from mirix.database.redis_client import get_redis_client
+        from mirix.database.relational_provider import get_relational_provider
 
         provider = get_relational_provider()
         if provider:

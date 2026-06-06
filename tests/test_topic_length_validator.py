@@ -35,10 +35,7 @@ class TestEnforceTopicLength:
         assert _agent()._enforce_topic_length("hello") == "hello"
 
     def test_multiple_short_topics_unchanged(self):
-        assert (
-            _agent()._enforce_topic_length("alpha; beta ;gamma")
-            == "alpha;beta;gamma"
-        )
+        assert _agent()._enforce_topic_length("alpha; beta ;gamma") == "alpha;beta;gamma"
 
     def test_oversized_single_topic_truncated_to_200(self):
         topic = "x" * 250

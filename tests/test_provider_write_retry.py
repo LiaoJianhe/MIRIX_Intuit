@@ -67,39 +67,29 @@ class TestIsConflict:
         # status_code, an ambiguous DATABASE_CONSTRAINT_VIOLATION error_code,
         # and the constraint name in the message. Must classify as a conflict so
         # the caller dedups instead of crashing.
-        exc = _IpsrBadRequestError(
-            "Client data violates a database constraint:  uq_memory_sources_ext_id"
-        )
+        exc = _IpsrBadRequestError("Client data violates a database constraint:  uq_memory_sources_ext_id")
         assert is_conflict(exc)
 
     def test_ipsr_batch_hash_constraint_violation_is_conflict(self):
-        exc = _IpsrBadRequestError(
-            "Client data violates a database constraint:  uq_memory_sources_batch"
-        )
+        exc = _IpsrBadRequestError("Client data violates a database constraint:  uq_memory_sources_batch")
         assert is_conflict(exc)
 
     def test_ipsr_source_message_constraint_violation_is_conflict(self):
-        exc = _IpsrBadRequestError(
-            "Client data violates a database constraint:  uq_source_messages_ext_id"
-        )
+        exc = _IpsrBadRequestError("Client data violates a database constraint:  uq_source_messages_ext_id")
         assert is_conflict(exc)
 
     def test_ipsr_primary_key_violation_is_conflict(self):
         # Primary-key collision. The provider names PK constraints
         # ``<table>_pkey`` (e.g. users_pkey), so the uq_-only matcher missed it
         # and unhandled BadRequestError crashed admin-user creation on startup.
-        exc = _IpsrBadRequestError(
-            "Client data violates a database constraint:  users_pkey"
-        )
+        exc = _IpsrBadRequestError("Client data violates a database constraint:  users_pkey")
         assert is_conflict(exc)
 
     def test_ipsr_column_shape_mismatch_is_not_conflict(self):
         # Same DATABASE_CONSTRAINT_VIOLATION error_code is also raised for a
         # column-shape mismatch, which is a permanent error, NOT a conflict. It
         # carries no uq_ index name, so it must NOT be classified as a conflict.
-        exc = _IpsrBadRequestError(
-            "Client data violates a database constraint:  1, number of columns: 0"
-        )
+        exc = _IpsrBadRequestError("Client data violates a database constraint:  1, number of columns: 0")
         assert not is_conflict(exc)
 
 

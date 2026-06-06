@@ -1040,6 +1040,7 @@ class TestClientManagerCascadeNamedQuery:
 
     def _client_mgr(self):
         from mirix.services.client_manager import ClientManager
+
         m = ClientManager.__new__(ClientManager)
         m.session_maker = MagicMock()
         return m
@@ -1051,8 +1052,15 @@ class TestClientManagerCascadeNamedQuery:
         mock_provider.mutate_using_named_query = AsyncMock(return_value=0)
         mock_provider.delete = AsyncMock(return_value=True)
 
-        _MEMORY_TABLES = {"episodic_memory", "semantic_memory", "procedural_memory",
-                          "resource_memory", "knowledge_vault", "raw_memory", "block"}
+        _MEMORY_TABLES = {
+            "episodic_memory",
+            "semantic_memory",
+            "procedural_memory",
+            "resource_memory",
+            "knowledge_vault",
+            "raw_memory",
+            "block",
+        }
 
         with patch("mirix.database.relational_provider.get_relational_provider", return_value=mock_provider):
             mgr = self._client_mgr()
@@ -1190,9 +1198,7 @@ class TestFindMostRecentlyUpdatedNamedQuery:
         mock_provider = AsyncMock()
         mock_provider.find_using_named_query = AsyncMock(return_value=[])
 
-        result = await find_most_recently_updated(
-            mock_provider, "knowledge_vault", user_id="u", organization_id="o"
-        )
+        result = await find_most_recently_updated(mock_provider, "knowledge_vault", user_id="u", organization_id="o")
 
         assert result is None
         args = mock_provider.find_using_named_query.await_args[0]
@@ -1228,13 +1234,9 @@ class TestFindMostRecentlyUpdatedNamedQuery:
         from mirix.services.memory_manager_helpers import find_most_recently_updated
 
         mock_provider = AsyncMock()
-        mock_provider.find_using_named_query = AsyncMock(
-            return_value=[{"id": f"{table}-1"}]
-        )
+        mock_provider.find_using_named_query = AsyncMock(return_value=[{"id": f"{table}-1"}])
 
-        result = await find_most_recently_updated(
-            mock_provider, table, user_id="u", organization_id="o"
-        )
+        result = await find_most_recently_updated(mock_provider, table, user_id="u", organization_id="o")
 
         assert result == {"id": f"{table}-1"}
         mock_provider.find_using_named_query.assert_awaited_once()
@@ -1250,9 +1252,7 @@ class TestFindMostRecentlyUpdatedNamedQuery:
         mock_provider = AsyncMock()
         mock_provider.list = AsyncMock(return_value=[])
 
-        await find_most_recently_updated(
-            mock_provider, "semantic_memory", user_id="u", organization_id=None
-        )
+        await find_most_recently_updated(mock_provider, "semantic_memory", user_id="u", organization_id=None)
 
         mock_provider.list.assert_awaited()
         mock_provider.find_using_named_query.assert_not_awaited()
@@ -1265,8 +1265,7 @@ class TestFindMostRecentlyUpdatedNamedQuery:
         mock_provider.list = AsyncMock(return_value=[])
 
         await find_most_recently_updated(
-            mock_provider, "semantic_memory",
-            user_id="u", organization_id="o", client_id="c-1"
+            mock_provider, "semantic_memory", user_id="u", organization_id="o", client_id="c-1"
         )
 
         mock_provider.list.assert_awaited()
@@ -1347,10 +1346,7 @@ class TestToolManagerBatchLookups:
         async def _fake_nq(_table, _nq_name, **kwargs):
             # NQ receives a comma-separated string; split to recover the chunk.
             chunk_names = kwargs["params"]["names"].split(",")
-            return [
-                {**_tool_row_dict(f"tool-{i:08x}"), "name": n}
-                for i, n in enumerate(chunk_names)
-            ]
+            return [{**_tool_row_dict(f"tool-{i:08x}"), "name": n} for i, n in enumerate(chunk_names)]
 
         mock_provider = MagicMock()
         mock_provider.find_using_named_query = AsyncMock(side_effect=_fake_nq)
@@ -1400,10 +1396,7 @@ class TestEnsureBaseToolsExist:
 
         # Pretend half of the expected base tools are already present.
         existing_names = list(ALL_TOOLS)[: len(ALL_TOOLS) // 2]
-        existing_rows = [
-            {**_tool_row_dict(f"tool-{i:08x}"), "name": n}
-            for i, n in enumerate(existing_names)
-        ]
+        existing_rows = [{**_tool_row_dict(f"tool-{i:08x}"), "name": n} for i, n in enumerate(existing_names)]
 
         mock_provider = MagicMock()
         mock_provider.find_using_named_query = AsyncMock(return_value=existing_rows)
@@ -1438,10 +1431,7 @@ class TestEnsureBaseToolsExist:
     async def test_second_call_same_org_is_zero_roundtrip(self):
         from mirix.constants import ALL_TOOLS
 
-        all_rows = [
-            {**_tool_row_dict(f"tool-{i:08x}"), "name": n}
-            for i, n in enumerate(ALL_TOOLS)
-        ]
+        all_rows = [{**_tool_row_dict(f"tool-{i:08x}"), "name": n} for i, n in enumerate(ALL_TOOLS)]
         mock_provider = MagicMock()
         mock_provider.find_using_named_query = AsyncMock(return_value=all_rows)
 
@@ -1468,10 +1458,7 @@ class TestEnsureBaseToolsExist:
     async def test_upsert_base_tools_memoized_per_org(self):
         from mirix.constants import ALL_TOOLS
 
-        existing_rows = [
-            {**_tool_row_dict(f"tool-{i:08x}"), "name": n}
-            for i, n in enumerate(ALL_TOOLS)
-        ]
+        existing_rows = [{**_tool_row_dict(f"tool-{i:08x}"), "name": n} for i, n in enumerate(ALL_TOOLS)]
         mock_provider = MagicMock()
         mock_provider.find_using_named_query = AsyncMock(return_value=existing_rows)
         mock_provider.update = AsyncMock(side_effect=lambda *_a, **_kw: existing_rows[0])
@@ -1516,12 +1503,8 @@ class TestAgentManagerBatchedToolResolution:
             agent_create=CreateAgent(
                 name="x",
                 agent_type=AgentType.chat_agent,
-                llm_config=LLMConfig(
-                    model="m", model_endpoint_type="openai", context_window=8000
-                ),
-                embedding_config=EmbeddingConfig.default_config(
-                    "text-embedding-3-small"
-                ),
+                llm_config=LLMConfig(model="m", model_endpoint_type="openai", context_window=8000),
+                embedding_config=EmbeddingConfig.default_config("text-embedding-3-small"),
                 include_base_tools=False,
                 tools=["send_message"],
             ),
@@ -1547,12 +1530,8 @@ class TestAgentManagerBatchedToolResolution:
                 name="a",
                 system="sys",
                 agent_type=AgentType.chat_agent,
-                llm_config=LLMConfig(
-                    model="m", model_endpoint_type="openai", context_window=8000
-                ),
-                embedding_config=EmbeddingConfig.default_config(
-                    "text-embedding-3-small"
-                ),
+                llm_config=LLMConfig(model="m", model_endpoint_type="openai", context_window=8000),
+                embedding_config=EmbeddingConfig.default_config("text-embedding-3-small"),
                 organization_id="org-1",
                 tools=[Tool.model_construct(id="tool-22222222", name="old_tool")],
             )
@@ -1560,9 +1539,7 @@ class TestAgentManagerBatchedToolResolution:
         mgr.update_agent = AsyncMock()
         mgr.update_system_prompt = AsyncMock()
 
-        await mgr.update_agent_tools_and_system_prompts(
-            agent_id="agent-1", actor=_mock_actor()
-        )
+        await mgr.update_agent_tools_and_system_prompts(agent_id="agent-1", actor=_mock_actor())
 
         # Exactly one batched lookup covering union(new, removed); the
         # per-name N+1 path must not be used.

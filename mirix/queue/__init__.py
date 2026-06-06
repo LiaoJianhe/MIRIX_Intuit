@@ -100,11 +100,7 @@ async def process_external_message(raw_message: bytes) -> None:
 
     queue_message = deserialize_queue_message(raw_message, format=KAFKA_SERIALIZATION_FORMAT)
 
-    memory_source_id = (
-        queue_message.memory_source_id
-        if queue_message.HasField("memory_source_id")
-        else None
-    )
+    memory_source_id = queue_message.memory_source_id if queue_message.HasField("memory_source_id") else None
 
     logger.debug(
         "Processing external message (%s format): agent_id=%s, user_id=%s, memory_source_id=%s",
@@ -140,8 +136,12 @@ async def process_external_message(raw_message: bytes) -> None:
     )
 
     if outcome.kind is OutcomeKind.TRANSIENT_EXHAUSTED:
+        # A transient error was raised. Internally some retries were attempted, but the error was not resolved.
+        # The most recently raised exception is still considered transient, so we re-raise it to the consumer
+        # so the consumer can redeliver the message for more attempts.
         assert outcome.cause is not None
         raise outcome.cause
+
     # COMPLETED and PERMANENT_FAILURE both return normally so the consumer acks.
 
 
