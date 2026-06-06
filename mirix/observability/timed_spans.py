@@ -15,7 +15,11 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Dict, Optional, cast
 
 from mirix.log import get_logger
-from mirix.observability.context import get_trace_context, mark_observation_as_child
+from mirix.observability.context import (
+    current_observation_id,
+    get_trace_context,
+    mark_observation_as_child,
+)
 from mirix.observability.langfuse_client import get_langfuse_client
 
 logger = get_logger(__name__)
@@ -69,4 +73,21 @@ async def timed_span(
             mark_observation_as_child(span)
         except Exception as e:
             logger.warning("timed_span(%s) failed to mark child: %s", name, e)
-        yield
+
+        # Publish this span as the current observation while the wrapped block
+        # runs so any span opened inside it (including a nested timed_span)
+        # nests under THIS span rather than under its parent. Restore the prior
+        # observation id afterward so the next sibling span parents back to the
+        # original parent.
+        span_observation_id = getattr(span, "id", None)
+        prior_observation_id = parent_span_id
+        if span_observation_id:
+            # set_trace_context ignores a falsy observation_id, so set the
+            # ContextVar directly (and restore directly below) to also handle
+            # the None / no-parent case correctly.
+            current_observation_id.set(span_observation_id)
+        try:
+            yield
+        finally:
+            if span_observation_id:
+                current_observation_id.set(prior_observation_id)

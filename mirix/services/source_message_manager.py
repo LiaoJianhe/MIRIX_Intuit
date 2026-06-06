@@ -228,7 +228,7 @@ class SourceMessageManager:
                             e,
                         )
                         emit_idempotency_skip_span(
-                            name="Source message write failed",
+                            name="Source Message Write: failed",
                             reason="source-message-write-failed",
                             metadata={
                                 "memory_source_id": memory_source_id,

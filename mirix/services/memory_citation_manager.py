@@ -128,7 +128,7 @@ class MemoryCitationManager:
                         e,
                     )
                     emit_idempotency_skip_span(
-                        name="Citation write failed",
+                        name="Citation Write: failed",
                         reason="citation-write-failed",
                         metadata={
                             "memory_source_id": memory_source_id,

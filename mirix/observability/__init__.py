@@ -1,6 +1,11 @@
 """Observability and tracing utilities for Mirix."""
 
-from mirix.observability.context import mark_observation_as_child
+from mirix.observability.context import (
+    clear_tid,
+    get_tid,
+    mark_observation_as_child,
+    set_tid,
+)
 from mirix.observability.langfuse_client import (
     flush_langfuse,
     get_langfuse_client,
@@ -30,6 +35,9 @@ __all__ = [
     "add_trace_to_queue_message",
     "restore_trace_from_queue_message",
     "mark_observation_as_child",
+    "set_tid",
+    "get_tid",
+    "clear_tid",
     "emit_idempotency_skip_span",
     # PII masking for Langfuse exports.
     "REDACTED_PLACEHOLDER",
