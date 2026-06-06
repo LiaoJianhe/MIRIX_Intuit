@@ -28,7 +28,7 @@ from mirix.constants import (
     REQ_HEARTBEAT_MESSAGE,
 )
 from mirix.embeddings import embedding_model
-from mirix.errors import ContextWindowExceededError
+from mirix.errors import ContextWindowExceededError, LLMSemanticToolError
 from mirix.functions.functions import get_function_from_module
 from mirix.helpers import ToolRulesSolver
 from mirix.helpers.message_helpers import prepare_input_message_create
@@ -573,8 +573,14 @@ class Agent(BaseAgent):
                 else:
                     raise ValueError(f"Tool type {target_mirix_tool.tool_type} not supported")
 
-            except Exception as e:
-                # Need to catch error here, or else truncation wont happen
+            except LLMSemanticToolError as e:
+                # LLM-semantic failure (bad args / validation / malformed JSON).
+                # Friendly-stringify so the outer loop can feed it back to the
+                # LLM for a bounded re-prompt — this is the one place where
+                # feed-back-to-LLM is correct. Everything else (DB,
+                # provider, code bug) is intentionally NOT caught here and
+                # propagates out so `process_with_policy` can classify it.
+                # See `_handle_ai_response` for the matching outer except.
                 is_error = True
                 function_response = get_friendly_error_msg(
                     function_name=function_name,
@@ -597,6 +603,15 @@ class Agent(BaseAgent):
 
             from mirix.observability.context import current_observation_id, set_trace_context
 
+            # The fallback below is for the case where the langfuse SDK
+            # itself fails *before* the tool body executes (so the tool
+            # never ran). Once we are about to invoke the body, set
+            # `inner_attempted=True` so any exception from the body — or
+            # from the langfuse machinery after the body — does NOT trigger
+            # a silent re-run of the tool. Non-LLM-semantic exceptions
+            # raised by the body propagate out so `process_with_policy`
+            # can classify them (VEPAGE-1228 fix).
+            inner_attempted = False
             try:
                 with langfuse.start_as_current_observation(
                     name=f"tool: {function_name}",
@@ -626,6 +641,7 @@ class Agent(BaseAgent):
                             user_id=trace_context.get("user_id"),
                             session_id=trace_context.get("session_id"),
                         )
+                    inner_attempted = True
                     try:
                         function_response, is_error = await _execute_tool_inner()
                     finally:
@@ -634,20 +650,28 @@ class Agent(BaseAgent):
                         # also handle the None / no-parent case correctly).
                         current_observation_id.set(parent_span_id)
 
-                    span.update(
-                        output={
-                            "response": str(function_response),
-                            "is_error": is_error,
-                        },
-                        metadata={
-                            "tool_type": str(target_mirix_tool.tool_type),
-                            "tool_name": function_name,
-                            "is_error": is_error,
-                        },
-                        level="ERROR" if is_error else "DEFAULT",
-                    )
+                    try:
+                        span.update(
+                            output={
+                                "response": str(function_response),
+                                "is_error": is_error,
+                            },
+                            metadata={
+                                "tool_type": str(target_mirix_tool.tool_type),
+                                "tool_name": function_name,
+                                "is_error": is_error,
+                            },
+                            level="ERROR" if is_error else "DEFAULT",
+                        )
+                    except Exception as span_exc:
+                        # span.update failure is observability-only.
+                        self.logger.debug(f"Langfuse span.update failed: {span_exc}")
             except Exception as e:
-                self.logger.debug(f"Langfuse tool execution trace failed: {e}")
+                if inner_attempted:
+                    # Tool body already ran (and may have raised). Do NOT
+                    # re-execute; propagate the original exception unchanged.
+                    raise
+                self.logger.debug(f"Langfuse tool execution trace failed before body ran: {e}")
                 function_response, _ = await _execute_tool_inner()
         else:
             function_response, _ = await _execute_tool_inner()
@@ -1095,10 +1119,19 @@ class Agent(BaseAgent):
                     function_response = package_function_response(True, function_response_string)
                     function_failed = False
 
-                except Exception as e:
+                except LLMSemanticToolError as e:
+                    # LLM-semantic failure: bad tool args / validation. The
+                    # bounded re-prompt is the right tool here — the LLM can
+                    # self-correct. Friendly-stringify, flag function_failed,
+                    # and continue the loop so the agent re-prompts.
+                    #
+                    # Everything else (DB blip, provider 503, AttributeError,
+                    # ...) is intentionally NOT caught: it propagates out of
+                    # `_handle_ai_response` -> `step()` so `process_with_policy`
+                    # sees the typed exception and classifies it. This is the
+                    # VEPAGE-1228 fix: stop turning real bugs into
+                    # "Error executing function ..." then processing_complete=True.
                     function_args.pop("self", None)
-                    # error_msg = f"Error calling function {function_name} with args {function_args}: {str(e)}"
-                    # Less detailed - don't provide full args, idea is that it should be in recent context so no need (just adds noise)
                     error_msg = get_friendly_error_msg(
                         function_name=function_name,
                         exception_name=type(e).__name__,
@@ -1108,7 +1141,6 @@ class Agent(BaseAgent):
                     printv(f"[Mirix.Agent.{self.agent_state.name}] ERROR: {error_msg_user}")
                     function_response = package_function_response(False, error_msg)
                     self.last_function_response = function_response
-                    # TODO: truncate error message somehow
                     messages.append(
                         Message.dict_to_message(
                             agent_id=self.agent_state.id,

@@ -128,6 +128,64 @@ class LLMUnprocessableEntityError(LLMError):
     pass
 
 
+class LLMSemanticToolError(MirixError):
+    """Tool execution failed for a reason the LLM can self-correct on a re-prompt.
+
+    Examples: missing required tool argument, malformed JSON in tool args,
+    argument type mismatch caught by preprocessing.
+
+    Distinguishes "LLM produced something wrong" — which the bounded re-prompt
+    in `Agent.step()` is designed to fix — from "something downstream broke"
+    (DB/provider/code-bug) which must propagate so `process_with_policy` can
+    classify and decide retry/finalize.
+
+    Raising this from tool argument preprocessing keeps the existing
+    feed-back-to-LLM behavior; everything else (`AttributeError`,
+    `OperationalError`, `ProviderTransientError`, …) propagates out of
+    `step()` instead of being string-erased at agent.py:576.
+    """
+
+    pass
+
+
+class ProviderTransientError(MirixError):
+    """Provider call failed with a retryable condition (5xx, 429, timeout).
+
+    The ECMS provider boundary translates SDK-specific transient exceptions
+    into this type. `error_policy.classify()` maps it to `Bucket.TRANSIENT`
+    by isinstance — no string-matching in the MIRIX core.
+    """
+
+    pass
+
+
+class ProviderPermanentError(MirixError):
+    """Provider call failed with a non-retryable condition (4xx auth, bad request).
+
+    The ECMS provider boundary translates SDK-specific permanent exceptions
+    into this type. `error_policy.classify()` maps it to `Bucket.PERMANENT`
+    by isinstance.
+    """
+
+    pass
+
+
+class ProviderConflictError(MirixError):
+    """Provider call hit a unique-constraint / duplicate-key conflict.
+
+    Callers (`source_message_manager`, `user_manager`, `client_manager`,
+    `memory_citation_manager`) treat this as an idempotent no-op — the
+    intended row already exists.
+
+    Kept distinct from `ProviderPermanentError`: collapsing the two would
+    break the dedup control flow (L1 source-message uniqueness, L3 citation
+    dedup). Never classified into a transient/permanent bucket; the
+    `is_conflict(exc)` predicate is the only consumer.
+    """
+
+    pass
+
+
 class BedrockPermissionError(MirixError):
     """Exception raised for errors in the Bedrock permission process."""
 
