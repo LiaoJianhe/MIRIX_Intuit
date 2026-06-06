@@ -68,39 +68,56 @@ async def test_core_reraises_on_failure(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_finalize_marks_source_complete(monkeypatch):
-    mark_complete = AsyncMock()
+    """Worker finalize routes through the single chokepoint
+    (MemorySourceManager.finalize_source); the chokepoint then writes
+    processing_complete=True via mark_processing_complete."""
+    from mirix.services.memory_source_manager import FinalizeOutcome
+
+    finalize = AsyncMock()
     monkeypatch.setattr(
         "mirix.services.memory_source_manager.MemorySourceManager",
-        Mock(return_value=Mock(mark_processing_complete=mark_complete)),
+        Mock(return_value=Mock(finalize_source=finalize)),
     )
     worker = QueueWorker(queue=Mock(), server=Mock())
     await worker._finalize_source_on_failure(_message("src-finalize"))
-    mark_complete.assert_awaited_once_with("src-finalize")
+    finalize.assert_awaited_once_with("src-finalize", FinalizeOutcome.PERMANENT_FAILURE)
 
 
 @pytest.mark.asyncio
 async def test_finalize_is_noop_without_source_id(monkeypatch):
-    mark_complete = AsyncMock()
+    finalize = AsyncMock()
     monkeypatch.setattr(
         "mirix.services.memory_source_manager.MemorySourceManager",
-        Mock(return_value=Mock(mark_processing_complete=mark_complete)),
+        Mock(return_value=Mock(finalize_source=finalize)),
     )
     worker = QueueWorker(queue=Mock(), server=Mock())
     # No memory_source_id on the message, and a None message: both no-op.
     await worker._finalize_source_on_failure(_message(None))
     await worker._finalize_source_on_failure(None)
-    mark_complete.assert_not_awaited()
+    finalize.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_finalize_never_raises_on_mark_error(monkeypatch):
+    """The chokepoint itself catches DB failures and logs — same contract
+    as the legacy _finalize_source_on_failure: must not raise."""
     monkeypatch.setattr(
         "mirix.services.memory_source_manager.MemorySourceManager",
-        Mock(return_value=Mock(mark_processing_complete=AsyncMock(side_effect=RuntimeError("db down")))),
+        Mock(
+            return_value=Mock(
+                finalize_source=AsyncMock(side_effect=RuntimeError("should never escape")),
+                mark_processing_complete=AsyncMock(side_effect=RuntimeError("db down")),
+            )
+        ),
     )
     worker = QueueWorker(queue=Mock(), server=Mock())
-    # Must swallow the mark failure — a debugging/cleanup aid must not crash the loop.
-    await worker._finalize_source_on_failure(_message("src-err"))
+    # The chokepoint must swallow internal failures so the loop keeps running.
+    # If the mock's finalize_source side_effect leaked, this test would raise.
+    # (The real finalize_source wraps mark_processing_complete in try/except.)
+    try:
+        await worker._finalize_source_on_failure(_message("src-err"))
+    except RuntimeError:
+        pytest.fail("finalize must not propagate DB errors out of the consume loop")
 
 
 # ---------------------------------------------------------------------------

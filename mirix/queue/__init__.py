@@ -114,20 +114,19 @@ async def process_external_message(raw_message: bytes) -> None:
         await worker.process_external_message(queue_message)
 
     async def _mark_permanent(source_id: str, _error_message: str, exc: BaseException) -> None:
-        # Mark processing_complete so redeliveries hit the existing short-circuit in
-        # agent.step and don't re-run the LLM pipeline against the same poison input.
-        try:
-            await MemorySourceManager().mark_processing_complete(source_id)
-            logger.info(
-                "Marked memory_source=%s processing_complete on permanent failure (%s)",
-                source_id,
-                type(exc).__name__,
-            )
-        except Exception:
-            logger.exception(
-                "Failed to mark memory_source=%s processing_complete on permanent failure",
-                source_id,
-            )
+        # Route through the single finalize chokepoint so VEPAGE-1250 can
+        # later distinguish permanent failures from success at one place.
+        # Today (boolean schema) finalize_source marks processing_complete=True
+        # for any outcome — redeliveries hit the existing L2 short-circuit
+        # in agent.step.
+        from mirix.services.memory_source_manager import FinalizeOutcome
+
+        await MemorySourceManager().finalize_source(source_id, FinalizeOutcome.PERMANENT_FAILURE)
+        logger.info(
+            "Finalized memory_source=%s PERMANENT (%s)",
+            source_id,
+            type(exc).__name__,
+        )
 
     outcome = await process_with_policy(
         _run_step,

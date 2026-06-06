@@ -124,6 +124,7 @@ def _setup_agent(memory_source_id, summarize=False, source_summary=None):
     agent.memory_source_manager = MagicMock()
     agent.memory_source_manager.get_by_id = AsyncMock(return_value=_make_pydantic_source(processing_complete=False))
     agent.memory_source_manager.mark_processing_complete = AsyncMock()
+    agent.memory_source_manager.finalize_source = AsyncMock()
     agent.memory_source_manager.update_summary = AsyncMock()
     agent._persist_memory_source = AsyncMock()
 
@@ -364,7 +365,11 @@ class TestSummaryTriggerInStep:
                 user=user,
             )
 
-        agent.memory_source_manager.mark_processing_complete.assert_called_once_with("src-abc123")
+        from mirix.services.memory_source_manager import FinalizeOutcome
+
+        agent.memory_source_manager.finalize_source.assert_called_once_with(
+            "src-abc123", FinalizeOutcome.SUCCESS
+        )
         agent._generate_source_summary_traced.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -392,7 +397,11 @@ class TestSummaryTriggerInStep:
                 user=user,
             )
 
-        agent.memory_source_manager.mark_processing_complete.assert_called_once_with("src-abc123")
+        from mirix.services.memory_source_manager import FinalizeOutcome
+
+        agent.memory_source_manager.finalize_source.assert_called_once_with(
+            "src-abc123", FinalizeOutcome.SUCCESS
+        )
         agent._generate_source_summary_traced.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -424,7 +433,7 @@ class TestSummaryTriggerInStep:
                 user=user,
             )
 
-        agent.memory_source_manager.mark_processing_complete.assert_called_once()
+        agent.memory_source_manager.finalize_source.assert_called_once()
         agent._generate_source_summary_traced.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -453,8 +462,9 @@ class TestSummaryTriggerInStep:
                     user=user,
                 )
 
-        # processing_complete was NOT called — worker will redeliver, retry will reprocess
+        # Source must NOT be finalized — worker will redeliver, retry will reprocess
         agent.memory_source_manager.mark_processing_complete.assert_not_called()
+        agent.memory_source_manager.finalize_source.assert_not_called()
         agent._generate_source_summary_traced.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -499,7 +509,11 @@ class TestSummaryTriggerInStep:
         inner_end_idx = order.index("inner_step_end")
         assert summary_start_idx < inner_end_idx, f"summary did not start before sub-agents finished; order={order}"
         # processing_complete happens after both finish
-        agent.memory_source_manager.mark_processing_complete.assert_called_once_with("src-abc123")
+        from mirix.services.memory_source_manager import FinalizeOutcome
+
+        agent.memory_source_manager.finalize_source.assert_called_once_with(
+            "src-abc123", FinalizeOutcome.SUCCESS
+        )
 
 
 class TestSummaryTracedSpan:

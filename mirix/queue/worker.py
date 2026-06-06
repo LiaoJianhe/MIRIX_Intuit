@@ -27,6 +27,7 @@ from mirix.services.user_manager import UserManager
 if TYPE_CHECKING:
     from mirix.schemas.client import Client
     from mirix.schemas.message import MessageCreate
+    from mirix.services.memory_source_manager import FinalizeOutcome
 
     from .queue_interface import QueueInterface
 
@@ -470,13 +471,22 @@ class QueueWorker:
             # never leaks from one message into the next on a reused worker task.
             clear_tid()
 
-    async def _finalize_source_on_failure(self, message: Optional[QueueMessage]) -> None:
-        """Mark a message's memory source processing_complete after a failure.
+    async def _finalize_source_on_failure(
+        self,
+        message: Optional[QueueMessage],
+        outcome: Optional["FinalizeOutcome"] = None,
+    ) -> None:
+        """Route a failed in-process save through the single finalize chokepoint.
 
         Used by the internal consume loop (which has no redelivery): finalizing
         the source unblocks SDK wait_for_save() and short-circuits any future
         reprocessing of the same poison input. Best-effort and None-safe — never
         raises (the loop has already logged the original failure).
+
+        S5 of VEPAGE-1251 will distinguish PERMANENT_FAILURE vs
+        TRANSIENT_EXHAUSTED here by classifying before finalizing. Until
+        then, callers without an outcome argument default to
+        PERMANENT_FAILURE — same behavior as the legacy path.
         """
         if message is None:
             return
@@ -487,19 +497,25 @@ class QueueWorker:
         )
         if not source_id:
             return
-        try:
-            from mirix.services.memory_source_manager import MemorySourceManager
+        from mirix.services.memory_source_manager import FinalizeOutcome, MemorySourceManager
 
-            await MemorySourceManager().mark_processing_complete(source_id)
+        chosen_outcome = outcome or FinalizeOutcome.PERMANENT_FAILURE
+        try:
+            await MemorySourceManager().finalize_source(source_id, chosen_outcome)
             logger.info(
-                "Marked memory_source=%s processing_complete after a failure on the "
+                "Finalized memory_source=%s outcome=%s after a failure on the "
                 "internal consume loop (no redelivery path).",
                 source_id,
+                chosen_outcome.value,
             )
         except Exception:
+            # finalize_source already catches its own DB failures, but
+            # defense-in-depth: the consume loop must NEVER raise here. The
+            # original failure has already been logged.
             logger.exception(
-                "Failed to mark memory_source=%s processing_complete after consume-loop failure",
+                "Unexpected error finalizing memory_source=%s outcome=%s",
                 source_id,
+                chosen_outcome.value,
             )
 
     async def _consume_loop(self) -> None:

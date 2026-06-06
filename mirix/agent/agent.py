@@ -1421,8 +1421,16 @@ class Agent(BaseAgent):
             # deduped or already-processed sources short-circuit before this runs.
             if self.agent_state.is_type(AgentType.meta_memory_agent) and self.direct_writes:
                 await self._apply_direct_writes_traced()
+                # If _apply_direct_writes_traced raised, the exception
+                # propagates past here — the source is NOT finalized.
+                # process_with_policy / _consume_loop see the typed
+                # exception and classify it.
                 if self.memory_source_id:
-                    await self.memory_source_manager.mark_processing_complete(self.memory_source_id)
+                    from mirix.services.memory_source_manager import FinalizeOutcome
+
+                    await self.memory_source_manager.finalize_source(
+                        self.memory_source_id, FinalizeOutcome.SUCCESS
+                    )
                 return MirixUsageStatistics(step_count=0)
 
             if self.agent_state.is_type(AgentType.meta_memory_agent):
@@ -1593,12 +1601,28 @@ class Agent(BaseAgent):
                     )
                     raise
 
-            # Mark memory source as fully processed after all agents complete
-            if self.agent_state.is_type(AgentType.meta_memory_agent) and self.memory_source_id:
+            # Finalize the source — but ONLY if the last iteration completed
+            # cleanly. If the loop exited because re-prompts on a
+            # function_failed iteration were exhausted (counter > max under
+            # ECMS), we leave the source NOT-complete: redelivery (numaflow)
+            # or _consume_loop's classifier (internal) decides what to do.
+            #
+            # "Complete = success only" — VEPAGE-1228 silent-data-loss fix.
+            # See VEPAGE-1251 design doc §5.5; VEPAGE-1250 swaps the boolean
+            # for `status` by touching only `finalize_source`.
+            if (
+                self.agent_state.is_type(AgentType.meta_memory_agent)
+                and self.memory_source_id
+                and not function_failed
+            ):
+                from mirix.services.memory_source_manager import FinalizeOutcome
+
                 try:
-                    await self.memory_source_manager.mark_processing_complete(self.memory_source_id)
+                    await self.memory_source_manager.finalize_source(
+                        self.memory_source_id, FinalizeOutcome.SUCCESS
+                    )
                 except Exception as e:
-                    logger.warning("Failed to mark source %s complete: %s", self.memory_source_id, e)
+                    logger.warning("Failed to finalize source %s: %s", self.memory_source_id, e)
                     raise
 
             return MirixUsageStatistics(**total_usage.model_dump(), step_count=step_count)
