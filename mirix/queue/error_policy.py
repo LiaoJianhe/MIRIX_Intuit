@@ -26,6 +26,8 @@ from mirix.errors import (
     LLMRateLimitError,
     LLMServerError,
     LLMUnprocessableEntityError,
+    ProviderPermanentError,
+    ProviderTransientError,
 )
 from mirix.settings import settings
 
@@ -56,18 +58,62 @@ class Outcome:
 
 # Subclass matches use isinstance — order is not significant for correctness,
 # but kept stable for readability.
+#
+# Provider* types are MIRIX-owned and re-raised by the ECMS provider boundary
+# from SDK-specific exceptions. This keeps `classify()` pure isinstance and
+# respects the dependency direction (ECMS -> MIRIX): MIRIX cannot import the
+# IPS-R / IPS-Search / SDK exception classes, so the seam that *can* (the
+# provider) is responsible for the translation. See VEPAGE-1251 design §5.6.
 _PERMANENT_TYPES: tuple[type[BaseException], ...] = (
     LLMUnprocessableEntityError,  # 422
     LLMBadRequestError,  # 400
     LLMAuthenticationError,  # 401
     LLMPermissionDeniedError,  # 403
+    ProviderPermanentError,  # provider boundary: auth, bad request, etc.
 )
 
 _TRANSIENT_TYPES: tuple[type[BaseException], ...] = (
     LLMRateLimitError,  # 429
     LLMServerError,  # 5xx
     LLMConnectionError,
+    ProviderTransientError,  # provider boundary: 429, 5xx, timeout
 )
+
+
+# Inner-exhausted marker. The marker is an attribute on the propagated
+# exception — NOT a new exception type — so callers downstream can still
+# `isinstance` against the original LLM*/Provider*/SQLAlchemy class.
+#
+# When `_get_ai_reply` (or any inner-retry tier) exhausts its budget on a
+# transient, it tags the propagated exception so `process_with_policy` knows
+# the dependency was already retried in place and the whole-step loop must
+# not retry it again. Removes the LLM inner (3) × whole-step (3) = 9
+# multiplication; the same shape applies to ORM / provider tiers.
+_INNER_EXHAUSTED_ATTR = "__mirix_inner_exhausted__"
+
+
+def mark_inner_exhausted(exc: BaseException) -> BaseException:
+    """Tag exc so process_with_policy treats it as already-retried.
+
+    Returns the exception so call sites can chain:
+        raise mark_inner_exhausted(exc)
+
+    Idempotent — re-tagging the same exception is a no-op.
+    """
+    try:
+        setattr(exc, _INNER_EXHAUSTED_ATTR, True)
+    except Exception:
+        # Some C-extension exceptions reject arbitrary attrs. Treat as a
+        # missed optimization rather than a failure — the whole-step loop
+        # will just run its normal budget.
+        pass
+    return exc
+
+
+def is_inner_exhausted(exc: BaseException) -> bool:
+    """Read the inner-exhausted marker. False if the attribute is missing or
+    the exception doesn't accept attrs."""
+    return bool(getattr(exc, _INNER_EXHAUSTED_ATTR, False))
 
 # One-shot warning per unknown exception class so the log doesn't flood when
 # a new error type starts appearing in production.
@@ -201,6 +247,22 @@ async def process_with_policy(
                             memory_source_id,
                         )
                 return Outcome(kind=OutcomeKind.PERMANENT_FAILURE, cause=exc, bucket=bucket)
+            # An inner-retry tier (LLM, ORM, provider boundary) has already
+            # exhausted its budget on this exact failure — repeating the whole
+            # step is wasted work that just re-runs persist/extract/sub-agent
+            # spawns. Verdict as TRANSIENT_EXHAUSTED immediately. This kills
+            # the inner × whole-step multiplication (VEPAGE-1251 §5.6).
+            if is_inner_exhausted(exc):
+                logger.info(
+                    "error_policy: inner-exhausted transient (%s) on memory_source=%s — "
+                    "skipping whole-step retry — chain: %s",
+                    type(exc).__name__,
+                    memory_source_id,
+                    format_exc_chain(exc),
+                )
+                return Outcome(
+                    kind=OutcomeKind.TRANSIENT_EXHAUSTED, cause=exc, bucket=Bucket.TRANSIENT
+                )
             if attempt < max_attempts:
                 sleep_s = _backoff_seconds(attempt, base, cap)
                 logger.info(

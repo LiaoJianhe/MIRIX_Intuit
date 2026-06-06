@@ -817,7 +817,11 @@ class Agent(BaseAgent):
                     )
                     raise
                 if attempt >= max_attempts:
-                    # Budget exhausted on a Transient. Let the outer layer decide.
+                    # Budget exhausted on a Transient. Tag with the inner-
+                    # exhausted marker so process_with_policy doesn't add
+                    # another 3-attempt whole-step cycle on top — that
+                    # multiplication used to make a sustained 429 cost
+                    # 9 LLM calls per save (VEPAGE-1251 §5.6).
                     log_telemetry(self.logger, "_get_ai_reply transient exhausted")
                     self.logger.warning(
                         "[Mirix.Agent.%s] _get_ai_reply: transient retries exhausted after %d attempts: %s",
@@ -825,7 +829,9 @@ class Agent(BaseAgent):
                         max_attempts + 1,
                         f"{type(exc).__name__}: {exc!r}",
                     )
-                    raise
+                    from mirix.queue.error_policy import mark_inner_exhausted
+
+                    raise mark_inner_exhausted(exc)
                 delay = min(base * (2**attempt), cap)
                 printv(
                     f"[Mirix.Agent.{self.agent_state.name}] WARNING: Attempt {attempt + 1} failed: "

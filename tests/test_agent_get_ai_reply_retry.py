@@ -114,15 +114,20 @@ async def test_get_ai_reply_422_propagates_on_first_attempt(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_get_ai_reply_transient_retries_to_budget_then_propagates(monkeypatch):
-    """LLMRateLimitError should retry max_attempts times then re-raise."""
+    """LLMRateLimitError should retry max_attempts times then re-raise.
+
+    After VEPAGE-1251 S3 the propagated exception is tagged
+    `__mirix_inner_exhausted__` so process_with_policy does NOT add another
+    whole-step cycle on top (kills the 3 x 3 = 9 multiplication)."""
     monkeypatch.setattr("mirix.agent.agent.asyncio.sleep", AsyncMock())
+    from mirix.queue.error_policy import is_inner_exhausted
     from mirix.settings import settings
 
     expected_total = settings.llm_inline_retry_max_attempts + 1  # initial + retries
 
     stub, llm_client = _build_stub_agent(send_side_effect=LLMRateLimitError("429 still"))
 
-    with pytest.raises(LLMRateLimitError):
+    with pytest.raises(LLMRateLimitError) as excinfo:
         await Agent._get_ai_reply(
             stub,
             message_sequence=[],
@@ -130,6 +135,10 @@ async def test_get_ai_reply_transient_retries_to_budget_then_propagates(monkeypa
         )
 
     assert llm_client.send_llm_request.await_count == expected_total
+    assert is_inner_exhausted(excinfo.value) is True, (
+        "exhausted LLM transient must be tagged so the whole-step policy "
+        "doesn't trigger another retry cycle (kills the 3x3 multiplication)"
+    )
 
 
 @pytest.mark.asyncio

@@ -1,18 +1,25 @@
 """Retry + classification helpers for relational-provider writes.
 
-The provider interface is duck-typed (the provider's exception classes are not
-imported here), so classification is structural — we look at attributes
-(status_code, error_code, class name) rather than isinstance checks against
-provider-specific classes.
+The provider boundary in ECMS translates each SDK exception into one of three
+MIRIX-owned types (`ProviderTransientError`, `ProviderPermanentError`,
+`ProviderConflictError`) — see VEPAGE-1251 §5.6. With that translation in
+place, classification here is plain `isinstance`.
+
+For transition while the boundary is being wired up, this module ALSO retains
+the legacy structural detection (status_code / error_code / class name) so
+provider calls that have not yet been wrapped still work. New translations
+should always go through the boundary; the structural fallback is a safety
+net, not a target.
 
 Three failure classes:
 
-* **Conflict** — unique-constraint violation. Caller treats as no-op (idempotent
-  re-write). Detected via 4xx status code or "conflict"/"duplicate" hint in
-  error_code/message. Returned, not raised.
-* **Transient** — 5xx, 429, connection/request timeout. Retried with exponential
-  backoff. After max_attempts, raised to the caller (which logs WARNING + emits
-  a skip-span and swallows).
+* **Conflict** — unique-constraint violation. Caller treats as no-op
+  (idempotent re-write). Detected via `isinstance(ProviderConflictError)` or
+  legacy structural hints.
+* **Transient** — 5xx, 429, connection/request timeout. Retried with
+  exponential backoff. On exhausted budget the propagated exception is
+  tagged with the `__mirix_inner_exhausted__` marker so the whole-step
+  policy does not re-retry it (kills the inner × whole-step multiplication).
 * **Permanent** — anything else (auth, unknown entity, malformed request).
   Raised immediately, no retry.
 """
@@ -20,12 +27,22 @@ Three failure classes:
 import asyncio
 from typing import Awaitable, Callable, TypeVar
 
+from mirix.errors import (
+    ProviderConflictError,
+    ProviderPermanentError,
+    ProviderTransientError,
+)
 from mirix.log import get_logger
+from mirix.queue.error_policy import mark_inner_exhausted
 
 logger = get_logger(__name__)
 
 T = TypeVar("T")
 
+# Legacy structural detection — kept ONLY for code paths that have not yet
+# been migrated to translate SDK exceptions at the boundary. Once every
+# provider call site re-raises Provider*Error, these constants and helpers
+# can be removed.
 _TRANSIENT_STATUS_CODES = frozenset({429, 502, 503, 504})
 _TRANSIENT_CLASS_HINTS = ("Timeout", "ServerError", "Throttle")
 _CONFLICT_HINTS = ("CONFLICT", "DUPLICATE", "UNIQUE")
@@ -36,28 +53,23 @@ def _exc_status_code(exc: BaseException) -> int | None:
 
 
 def is_conflict(exc: BaseException) -> bool:
-    """True if the exception looks like a unique-constraint violation.
+    """True if the exception is a duplicate-key / unique-constraint violation.
 
-    There is no single canonical error code for unique conflicts across the
-    providers we support; treat 409 plus any error_code/message containing
-    CONFLICT/DUPLICATE/UNIQUE as a conflict. Conservative — false positives just
-    skip a retry, not data loss.
+    Four call sites depend on this:
+    `source_message_manager.py:217` (L1 dedup), `user_manager.py`,
+    `client_manager.py`, `memory_citation_manager.py` (L3 dedup). Each
+    treats a conflict as an idempotent no-op (`continue` / `if not is_conflict(exc): raise`).
 
-    Some relational providers do not surface unique-index violations as a 409
-    nor with a CONFLICT/DUPLICATE/UNIQUE token. One such provider raises a
-    ``BadRequestError`` (no ``status_code``) with the message
-    ``"Client data violates a database constraint:  uq_<index>"`` and an ambiguous
-    ``DATABASE_CONSTRAINT_VIOLATION`` error_code that is *also* used for
-    column-shape mismatches. We therefore key off the unique-index name prefix
-    (``uq_``) which only appears for genuine uniqueness conflicts — the
-    column-shape variant of the same error carries no constraint name.
+    Preferred shape (post-translation): the provider boundary raises
+    `ProviderConflictError`; this returns True by isinstance.
 
-    Primary-key collisions (``<table>_pkey``) are the same class of duplicate-key
-    conflict; PG/asyncpg surfaces them as ``UniqueConstraintViolationError`` with
-    a message containing ``"users_pkey"`` etc. Match ``_PKEY`` too. The
-    column-shape variant still carries no constraint name, so this does not
-    widen the false-positive surface.
+    Legacy shape (during transition): structural detection on
+    status_code 409, error_code/message hints, or the "violates a database
+    constraint" + `uq_`/`_pkey` parse path some IPSR backends emit.
     """
+    if isinstance(exc, ProviderConflictError):
+        return True
+
     status = _exc_status_code(exc)
     if status == 409:
         return True
@@ -69,7 +81,16 @@ def is_conflict(exc: BaseException) -> bool:
 
 
 def is_transient(exc: BaseException) -> bool:
-    """True if the exception is worth retrying."""
+    """True if the exception is worth retrying.
+
+    Preferred: `isinstance(exc, ProviderTransientError)`.
+    Legacy: structural matching on status_code / class-name hints / asyncio
+    TimeoutError until every provider call is wrapped.
+    """
+    if isinstance(exc, ProviderTransientError):
+        return True
+    if isinstance(exc, ProviderPermanentError) or isinstance(exc, ProviderConflictError):
+        return False
     if isinstance(exc, asyncio.TimeoutError):
         return True
     status = _exc_status_code(exc)
@@ -91,6 +112,10 @@ async def retry_transient(
 
     Conflicts and permanent errors are raised immediately. Caller is
     responsible for catching ``is_conflict``-classified exceptions.
+
+    On exhausted budget, the propagated exception is tagged with the
+    inner-exhausted marker so `process_with_policy` does NOT add another
+    whole-step retry cycle on top (VEPAGE-1251 §5.6).
     """
     last: BaseException | None = None
     for attempt in range(1, max_attempts + 1):
@@ -113,4 +138,6 @@ async def retry_transient(
             )
             await asyncio.sleep(delay)
     assert last is not None
-    raise last
+    # The inner tier exhausted its budget — tag so the whole-step loop
+    # doesn't re-retry the same provider call.
+    raise mark_inner_exhausted(last)

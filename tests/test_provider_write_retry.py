@@ -156,3 +156,83 @@ class TestRetryTransient:
         with pytest.raises(_UnauthorizedError):
             await retry_transient(coro, op="test", max_attempts=3)
         assert coro.await_count == 1
+
+
+class TestProviderTypeIntegration:
+    """S3 of VEPAGE-1251: Provider* types from the ECMS boundary translation
+    are classified by isinstance (preferred path)."""
+
+    def test_provider_conflict_error_is_conflict(self):
+        from mirix.errors import ProviderConflictError
+
+        assert is_conflict(ProviderConflictError("uq_email")) is True
+
+    def test_provider_transient_error_is_transient(self):
+        from mirix.errors import ProviderTransientError
+
+        assert is_transient(ProviderTransientError("503 from IPS-R")) is True
+
+    def test_provider_permanent_error_is_not_transient_or_conflict(self):
+        from mirix.errors import ProviderPermanentError
+
+        exc = ProviderPermanentError("400 bad shape")
+        assert is_transient(exc) is False
+        assert is_conflict(exc) is False
+
+    def test_provider_conflict_takes_precedence_over_transient_check(self):
+        """A ProviderConflictError must NOT be retried even if its message
+        contains words that would otherwise look transient."""
+        from mirix.errors import ProviderConflictError
+
+        exc = ProviderConflictError("Timeout while writing duplicate row")
+        assert is_conflict(exc) is True
+        # is_transient() returns False because Conflict short-circuits in
+        # the isinstance branch.
+        assert is_transient(exc) is False
+
+
+class TestInnerExhaustedMarker:
+    """S3 of VEPAGE-1251: retry_transient tags the propagated exception
+    when its budget is exhausted so process_with_policy skips the
+    whole-step retry."""
+
+    @pytest.mark.asyncio
+    async def test_exhausted_transient_is_tagged_inner_exhausted(self):
+        from mirix.errors import ProviderTransientError
+        from mirix.queue.error_policy import is_inner_exhausted
+
+        coro = AsyncMock(side_effect=ProviderTransientError("503"))
+        with patch("asyncio.sleep", new=AsyncMock()):
+            with pytest.raises(ProviderTransientError) as excinfo:
+                await retry_transient(coro, op="test", max_attempts=3)
+
+        assert coro.await_count == 3
+        assert is_inner_exhausted(excinfo.value) is True, (
+            "exhausted transient must be tagged so the whole-step loop "
+            "doesn't add another 3 retries on top"
+        )
+
+    @pytest.mark.asyncio
+    async def test_legacy_transient_also_tagged_inner_exhausted(self):
+        """The marker must also be applied to structurally-detected
+        transients (during the boundary-translation transition)."""
+        from mirix.queue.error_policy import is_inner_exhausted
+
+        coro = AsyncMock(side_effect=_StatusCodeError(503))
+        with patch("asyncio.sleep", new=AsyncMock()):
+            with pytest.raises(_StatusCodeError) as excinfo:
+                await retry_transient(coro, op="test", max_attempts=3)
+
+        assert is_inner_exhausted(excinfo.value) is True
+
+    @pytest.mark.asyncio
+    async def test_permanent_error_not_tagged(self):
+        """Permanent errors don't go through the retry loop, so no marker
+        is applied (and none is needed — permanent short-circuits in
+        process_with_policy regardless)."""
+        from mirix.queue.error_policy import is_inner_exhausted
+
+        coro = AsyncMock(side_effect=_UnauthorizedError())
+        with pytest.raises(_UnauthorizedError) as excinfo:
+            await retry_transient(coro, op="test", max_attempts=3)
+        assert is_inner_exhausted(excinfo.value) is False
