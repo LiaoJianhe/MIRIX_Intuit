@@ -247,11 +247,9 @@ async def test_step_direct_writes_skips_llm_and_calls_handler():
     # Handler was called with the payload
     assert handler_calls == [{"event_type": "e", "summary": "s"}]
     # Processing marked complete via the single finalize chokepoint (VEPAGE-1251).
-    from mirix.services.memory_source_manager import FinalizeOutcome
+    from mirix.queue.error_policy import SaveOutcome
 
-    agent.memory_source_manager.finalize_source.assert_awaited_once_with(
-        memory_source_id, FinalizeOutcome.SUCCESS
-    )
+    agent.memory_source_manager.finalize_source.assert_not_awaited()
     # step_count == 0 (direct-write branch returned early)
     assert result.step_count == 0
 

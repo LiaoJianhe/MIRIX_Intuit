@@ -42,6 +42,7 @@ from sqlalchemy.exc import DataError, DBAPIError, IntegrityError, OperationalErr
 from mirix.errors import (
     LLMAuthenticationError,
     LLMBadRequestError,
+    LLMChainingExhaustedError,
     LLMConnectionError,
     LLMPermissionDeniedError,
     LLMRateLimitError,
@@ -62,8 +63,16 @@ class Bucket(str, Enum):
     PERMANENT = "permanent"
 
 
-class OutcomeKind(str, Enum):
-    COMPLETED = "completed"
+class SaveOutcome(str, Enum):
+    """Terminal verdict for one save attempt.
+
+    Same enum used by `process_with_policy` (the policy's verdict) AND by
+    `MemorySourceManager.finalize_source` (what gets recorded on the source).
+    One vocabulary, one set of values — the seam that VEPAGE-1250 will use
+    to diversify column writes per outcome.
+    """
+
+    SUCCESS = "success"
     PERMANENT_FAILURE = "permanent_failure"
     TRANSIENT_EXHAUSTED = "transient_exhausted"
 
@@ -72,7 +81,7 @@ class OutcomeKind(str, Enum):
 class Outcome:
     """Result of process_with_policy. Consumers translate this into ack/raise."""
 
-    kind: OutcomeKind
+    kind: SaveOutcome
     cause: Optional[BaseException] = None
     bucket: Optional[Bucket] = None
 
@@ -90,6 +99,7 @@ _PERMANENT_TYPES: tuple[type[BaseException], ...] = (
     LLMBadRequestError,  # 400
     LLMAuthenticationError,  # 401
     LLMPermissionDeniedError,  # 403
+    LLMChainingExhaustedError,  # meta-agent LLM emitted malformed calls past budget
     ProviderPermanentError,  # provider boundary: auth, bad request, etc.
     IntegrityError,  # SQLAlchemy: constraint/unique/foreign-key violations
     DataError,  # SQLAlchemy: bad input shape (invalid syntax, range)
@@ -314,7 +324,7 @@ async def process_with_policy(
     for attempt in range(max_attempts + 1):  # initial attempt + max_attempts retries
         try:
             await run_step()
-            return Outcome(kind=OutcomeKind.COMPLETED)
+            return Outcome(kind=SaveOutcome.SUCCESS)
         except Exception as exc:
             bucket = classify(exc)
             last_exc = exc
@@ -335,7 +345,7 @@ async def process_with_policy(
                             "error_policy: on_permanent callback failed for memory_source=%s",
                             memory_source_id,
                         )
-                return Outcome(kind=OutcomeKind.PERMANENT_FAILURE, cause=exc, bucket=bucket)
+                return Outcome(kind=SaveOutcome.PERMANENT_FAILURE, cause=exc, bucket=bucket)
             # An inner-retry tier (LLM, ORM, provider boundary) has already
             # exhausted its budget on this exact failure — repeating the whole
             # step is wasted work that just re-runs persist/extract/sub-agent
@@ -350,7 +360,7 @@ async def process_with_policy(
                     format_exc_chain(exc),
                 )
                 return Outcome(
-                    kind=OutcomeKind.TRANSIENT_EXHAUSTED, cause=exc, bucket=Bucket.TRANSIENT
+                    kind=SaveOutcome.TRANSIENT_EXHAUSTED, cause=exc, bucket=Bucket.TRANSIENT
                 )
             if attempt < max_attempts:
                 sleep_s = _backoff_seconds(attempt, base, cap)
@@ -371,9 +381,48 @@ async def process_with_policy(
                 exc,
                 format_exc_chain(exc),
             )
-            return Outcome(kind=OutcomeKind.TRANSIENT_EXHAUSTED, cause=exc, bucket=Bucket.TRANSIENT)
+            return Outcome(kind=SaveOutcome.TRANSIENT_EXHAUSTED, cause=exc, bucket=Bucket.TRANSIENT)
 
     # Defensive — the loop above either returns or continues. This line satisfies
     # the type checker for the case where max_attempts is somehow exceeded
     # without a return path being taken.
-    return Outcome(kind=OutcomeKind.TRANSIENT_EXHAUSTED, cause=last_exc, bucket=Bucket.TRANSIENT)
+    return Outcome(kind=SaveOutcome.TRANSIENT_EXHAUSTED, cause=last_exc, bucket=Bucket.TRANSIENT)
+
+
+async def dispatch_save(
+    run_step: Callable[[], Awaitable[object]],
+    *,
+    memory_source_id: Optional[str],
+) -> Outcome:
+    """One save attempt, classified and finalized — the shared post-policy
+    handler for ALL three run modes (numaflow, kafka, in-memory).
+
+    Flow:
+      1. Run the save under process_with_policy (classify + bounded retry).
+      2. Route the resulting Outcome through the single finalize chokepoint
+         (`MemorySourceManager.finalize_source`).
+
+    No conscious redelivery. TRANSIENT_EXHAUSTED is dead-letter behavior in
+    all modes — the in-process retry budget already covered the transient
+    case, and consuming-side redelivery is reserved for *process-death*
+    cases (broker semantics on un-ack'd messages), not for failures we
+    classified.
+
+    Today (boolean schema) finalize_source records the SaveOutcome in a log
+    line and writes `processing_complete=True` regardless of outcome.
+    VEPAGE-1250 will diversify the actual column writes per outcome by
+    touching only `finalize_source` — this dispatcher doesn't change.
+
+    Step() no longer finalizes internally; ALL finalize calls flow through
+    this function. (VEPAGE-1251 Option B.)
+    """
+    outcome = await process_with_policy(run_step, memory_source_id=memory_source_id)
+
+    if memory_source_id is not None:
+        # Late import to avoid cycle (memory_source_manager doesn't import
+        # error_policy at runtime).
+        from mirix.services.memory_source_manager import MemorySourceManager
+
+        await MemorySourceManager().finalize_source(memory_source_id, outcome.kind)
+
+    return outcome

@@ -75,8 +75,12 @@ async def process_external_message(raw_message: bytes) -> None:
     """
     Process a message consumed by an external system (e.g., Numaflow, custom Kafka consumer).
 
-    On a Permanent classification this marks the source processing_complete and returns
-    normally (consumer acks). Transient exhaustion re-raises so the consumer redelivers.
+    Delegates to the shared `dispatch_save` helper — same flow as the
+    internal `_consume_loop`. Returns normally on every classified outcome
+    so the consumer always acks. We do NOT consciously re-raise to invoke
+    broker redelivery; the in-process retry budget already handled transient
+    cases, and broker redelivery is reserved for process-death recovery
+    (un-ack'd messages on crash).
     """
     if not _manager.is_initialized:
         logger.info("Queue not initialized, auto-initializing with server for external message processing")
@@ -94,9 +98,8 @@ async def process_external_message(raw_message: bytes) -> None:
     worker = workers[0]
 
     from mirix.queue.config import KAFKA_SERIALIZATION_FORMAT
-    from mirix.queue.error_policy import OutcomeKind, process_with_policy
+    from mirix.queue.error_policy import dispatch_save
     from mirix.queue.queue_util import deserialize_queue_message
-    from mirix.services.memory_source_manager import MemorySourceManager
 
     queue_message = deserialize_queue_message(raw_message, format=KAFKA_SERIALIZATION_FORMAT)
 
@@ -113,35 +116,7 @@ async def process_external_message(raw_message: bytes) -> None:
     async def _run_step() -> None:
         await worker.process_external_message(queue_message)
 
-    async def _mark_permanent(source_id: str, _error_message: str, exc: BaseException) -> None:
-        # Route through the single finalize chokepoint so VEPAGE-1250 can
-        # later distinguish permanent failures from success at one place.
-        # Today (boolean schema) finalize_source marks processing_complete=True
-        # for any outcome — redeliveries hit the existing L2 short-circuit
-        # in agent.step.
-        from mirix.services.memory_source_manager import FinalizeOutcome
-
-        await MemorySourceManager().finalize_source(source_id, FinalizeOutcome.PERMANENT_FAILURE)
-        logger.info(
-            "Finalized memory_source=%s PERMANENT (%s)",
-            source_id,
-            type(exc).__name__,
-        )
-
-    outcome = await process_with_policy(
-        _run_step,
-        memory_source_id=memory_source_id,
-        on_permanent=_mark_permanent if memory_source_id else None,
-    )
-
-    if outcome.kind is OutcomeKind.TRANSIENT_EXHAUSTED:
-        # A transient error was raised. Internally some retries were attempted, but the error was not resolved.
-        # The most recently raised exception is still considered transient, so we re-raise it to the consumer
-        # so the consumer can redeliver the message for more attempts.
-        assert outcome.cause is not None
-        raise outcome.cause
-
-    # COMPLETED and PERMANENT_FAILURE both return normally so the consumer acks.
+    await dispatch_save(_run_step, memory_source_id=memory_source_id)
 
 
 __all__ = ["initialize_queue", "save", "process_external_message", "QueueMessage"]

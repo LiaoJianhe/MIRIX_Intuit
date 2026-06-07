@@ -3,8 +3,7 @@
 import base64
 import json
 from datetime import datetime, timezone
-from enum import Enum
-from typing import Any, Dict, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, Optional, Union
 
 from sqlalchemy import select
 
@@ -12,39 +11,21 @@ from mirix.log import get_logger
 from mirix.orm.memory_source import MemorySource as MemorySourceModel
 from mirix.schemas.client import Client as PydanticClient
 from mirix.schemas.memory_source import MemorySource as PydanticMemorySource
+
+if TYPE_CHECKING:
+    from mirix.queue.error_policy import SaveOutcome
 from mirix.schemas.memory_source import PaginatedResponse
 from mirix.utils import enforce_types
 
 logger = get_logger(__name__)
 
 
-class FinalizeOutcome(str, Enum):
-    """The terminal verdict for a memory_source after processing.
-
-    The four save-path call sites today (LLM path, direct-write path,
-    numaflow on_permanent, internal-loop on_failure) route through
-    `MemorySourceManager.finalize_source` with one of these values. Under
-    today's boolean schema all "do-not-reprocess" outcomes write
-    `processing_complete=True`; the LLM-path mid-failure does NOT call
-    finalize at all (the exception propagates so the worker / policy
-    decides).
-
-    VEPAGE-1250 swaps the boolean for a `status` column. That migration
-    changes ONLY this function — upstream callers already produce the
-    right outcome.
-    """
-
-    SUCCESS = "success"
-    """Step completed and the source was processed end-to-end."""
-
-    PERMANENT_FAILURE = "permanent_failure"
-    """Classifier returned PERMANENT (poison input). On numaflow,
-    redeliveries would loop forever — mark complete to short-circuit."""
-
-    TRANSIENT_EXHAUSTED = "transient_exhausted"
-    """Classifier returned TRANSIENT and the in-process retries exhausted.
-    Called only on no-redelivery paths (internal consume loop). On
-    numaflow this verdict re-raises for broker redelivery instead."""
+# NOTE: The outcome vocabulary lives in `mirix.queue.error_policy.SaveOutcome`.
+# `finalize_source` takes a SaveOutcome value; today (boolean schema) it writes
+# `processing_complete=True` for every outcome and records the value in a log
+# line. VEPAGE-1250 will diversify the actual column writes per outcome by
+# touching only `finalize_source` — upstream callers already produce the
+# right value.
 
 # Hard ceiling on the per-request page size we'll forward to IPSR. The IPSR
 # named-query runner caps page_size at 1500 server-side; we cap a little
@@ -478,17 +459,20 @@ class MemorySourceManager:
     async def finalize_source(
         self,
         memory_source_id: Optional[str],
-        outcome: FinalizeOutcome,
+        outcome: "SaveOutcome",
     ) -> None:
         """Single finalize chokepoint — all save-path "mark done" decisions
         flow through here.
 
-        Today (boolean schema): every outcome that should not be reprocessed
-        writes `processing_complete=True`. The LLM-path mid-failure does
-        NOT call this; the exception propagates so the policy decides.
+        Called by `dispatch_save` in error_policy.py with the SaveOutcome that
+        the policy returned. Every outcome (SUCCESS / PERMANENT_FAILURE /
+        TRANSIENT_EXHAUSTED) flows through this one function.
 
-        Tomorrow (VEPAGE-1250): this function diversifies into distinct
-        `status` writes per outcome. Upstream callers do not change.
+        Today (boolean schema): every outcome writes `processing_complete=True`
+        and records the SaveOutcome value in the log line.
+
+        Tomorrow (VEPAGE-1250): this function fans out into distinct `status`
+        writes per outcome. Upstream callers don't change.
         """
         if not memory_source_id:
             return

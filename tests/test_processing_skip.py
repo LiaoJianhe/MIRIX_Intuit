@@ -169,11 +169,9 @@ class TestProcessingSkip:
 
         assert isinstance(result, MirixUsageStatistics)
         agent.inner_step.assert_called_once()
-        from mirix.services.memory_source_manager import FinalizeOutcome
+        from mirix.queue.error_policy import SaveOutcome
 
-        agent.memory_source_manager.finalize_source.assert_called_once_with(
-            "src-abc123", FinalizeOutcome.SUCCESS
-        )
+        agent.memory_source_manager.finalize_source.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_no_skip_check_without_memory_source_id(self):

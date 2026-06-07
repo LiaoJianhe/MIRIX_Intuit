@@ -1,22 +1,13 @@
-"""S5 of VEPAGE-1251: internal consume loop routes through process_with_policy.
+"""VEPAGE-1251: consume loop dispatches every save through `dispatch_save`.
 
-Before this story, `_consume_loop` swallowed every failure and finalized
-regardless of bucket. A transient DB blip on the internal path was locked
-in as complete-but-empty.
+Same flow as the numaflow path:
 
-After this story, the internal loop runs `_process_message_async` under
-`process_with_policy`, getting the same classification + in-process retry
-the numaflow path already has:
-
-- COMPLETED → noop (mark success via the in-step finalize chokepoint).
-- PERMANENT_FAILURE → finalize_source(PERMANENT_FAILURE). Poison input;
-  no future processing.
-- TRANSIENT_EXHAUSTED → finalize_source(TRANSIENT_EXHAUSTED). The
-  internal path has no redelivery, so we still mark done — but the
-  outcome value is now distinguishable from PERMANENT for VEPAGE-1250.
-
-This is the design's "#1 concrete win": same classifier, same policy,
-all three run modes.
+- SUCCESS              → finalize_source(SUCCESS) (Option B: step() doesn't
+                         finalize internally; the dispatcher does).
+- PERMANENT_FAILURE    → finalize_source(PERMANENT_FAILURE).
+- TRANSIENT_EXHAUSTED  → finalize_source(TRANSIENT_EXHAUSTED). No
+                         conscious redelivery; the policy already
+                         retried in-process up to budget.
 """
 
 from __future__ import annotations
@@ -44,7 +35,7 @@ def _message(source_id):
 async def test_consume_loop_permanent_calls_finalize_with_permanent(monkeypatch):
     """A Permanent classification (422 from the LLM) finalizes with
     PERMANENT_FAILURE — not generic 'mark complete'."""
-    from mirix.services.memory_source_manager import FinalizeOutcome
+    from mirix.queue.error_policy import SaveOutcome
 
     finalize = AsyncMock()
     monkeypatch.setattr(
@@ -72,7 +63,7 @@ async def test_consume_loop_permanent_calls_finalize_with_permanent(monkeypatch)
     finalize.assert_awaited()
     args = finalize.call_args
     assert args.args[0] == source_id
-    assert args.args[1] == FinalizeOutcome.PERMANENT_FAILURE
+    assert args.args[1] == SaveOutcome.PERMANENT_FAILURE
 
 
 @pytest.mark.asyncio
@@ -80,7 +71,7 @@ async def test_consume_loop_transient_retried_then_finalized_exhausted(monkeypat
     """A sustained transient (LLM 5xx) runs through process_with_policy's
     retry loop. After exhaustion the internal-loop finalizes with
     TRANSIENT_EXHAUSTED (no redelivery on this path)."""
-    from mirix.services.memory_source_manager import FinalizeOutcome
+    from mirix.queue.error_policy import SaveOutcome
 
     finalize = AsyncMock()
     monkeypatch.setattr(
@@ -117,13 +108,16 @@ async def test_consume_loop_transient_retried_then_finalized_exhausted(monkeypat
     finalize.assert_awaited()
     args = finalize.call_args
     assert args.args[0] == source_id
-    assert args.args[1] == FinalizeOutcome.TRANSIENT_EXHAUSTED
+    assert args.args[1] == SaveOutcome.TRANSIENT_EXHAUSTED
 
 
 @pytest.mark.asyncio
-async def test_consume_loop_completed_does_not_finalize(monkeypatch):
-    """Successful completion: the in-step finalize chokepoint already
-    marked the source SUCCESS; the loop must NOT call finalize again."""
+async def test_consume_loop_success_finalizes_with_success(monkeypatch):
+    """Successful completion: dispatch_save calls finalize_source(SUCCESS).
+    step() does NOT finalize internally (Option B); the dispatcher is the
+    single finalize call site."""
+    from mirix.queue.error_policy import SaveOutcome
+
     finalize = AsyncMock()
     monkeypatch.setattr(
         "mirix.services.memory_source_manager.MemorySourceManager",
@@ -144,4 +138,4 @@ async def test_consume_loop_completed_does_not_finalize(monkeypatch):
 
     await worker._consume_loop()
 
-    finalize.assert_not_awaited()
+    finalize.assert_awaited_once_with("src-ok", SaveOutcome.SUCCESS)

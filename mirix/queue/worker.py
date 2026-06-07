@@ -2,32 +2,31 @@
 Background worker that consumes messages from the queue.
 Runs as an asyncio.Task in the main event loop (async-native).
 
-PER-MODE POLICY (VEPAGE-1251 §3 / §6):
+Save dispatch is unified across all 3 run modes (numaflow / kafka /
+in-memory) via `error_policy.dispatch_save`. Each mode does the same
+thing: receive a message, run the save under process_with_policy, route
+the verdict through the single finalize chokepoint.
 
 * numaflow (external) — process_external_message in queue/__init__.py.
-  Wraps _process_message_async in process_with_policy:
-  COMPLETED -> ack; PERMANENT -> finalize + ack; TRANSIENT_EXHAUSTED ->
-  re-raise so numaflow redelivers.
+* internal kafka manual / in-memory sim — this file, _consume_loop.
 
-* internal kafka manual / in-memory sim (this file, _consume_loop).
-  Wraps _process_message_async in the same process_with_policy.
-  COMPLETED -> noop (in-step chokepoint already finalized SUCCESS);
-  PERMANENT -> finalize(PERMANENT_FAILURE);
-  TRANSIENT_EXHAUSTED -> finalize(TRANSIENT_EXHAUSTED) (no redelivery
-  exists on this path; we still finalize so SDK wait_for_save unblocks).
+The only mode-specific behavior is HOW messages are obtained (broker
+delivery vs in-process queue.get()) and what happens on
+TRANSIENT_EXHAUSTED — numaflow could in principle let the broker redeliver,
+but post-VEPAGE-1251 we treat exhausted-transient as dead-letter in all
+modes. Broker-level redelivery is reserved for *process-death* cases
+(message not ack'd), not for failures we classified.
 
 ONE classifier (error_policy.classify), ONE policy
-(error_policy.process_with_policy), ONE finalize chokepoint
-(memory_source_manager.finalize_source). The three run modes differ
-only in their post-policy actions; the classification contract is
-identical.
+(error_policy.process_with_policy), ONE save dispatcher
+(error_policy.dispatch_save), ONE finalize chokepoint
+(memory_source_manager.finalize_source).
 
-NOTE — boolean schema today. finalize_source records the FinalizeOutcome
-in the log line but writes `processing_complete=True` for any
-do-not-reprocess outcome (SUCCESS / PERMANENT_FAILURE / TRANSIENT_EXHAUSTED).
-VEPAGE-1250 will diversify the actual column writes per outcome via a
-`status` column; this story does not enforce "complete = success only"
-at the DB level.
+NOTE — boolean schema today. finalize_source records the SaveOutcome
+in the log line but writes `processing_complete=True` for every outcome
+(SUCCESS / PERMANENT_FAILURE / TRANSIENT_EXHAUSTED). VEPAGE-1250 will
+diversify the actual column writes per outcome via a `status` column;
+this story does not enforce "complete = success only" at the DB level.
 """
 
 import asyncio
@@ -54,7 +53,6 @@ from mirix.services.user_manager import UserManager
 if TYPE_CHECKING:
     from mirix.schemas.client import Client
     from mirix.schemas.message import MessageCreate
-    from mirix.services.memory_source_manager import FinalizeOutcome
 
     from .queue_interface import QueueInterface
 
@@ -498,53 +496,15 @@ class QueueWorker:
             # never leaks from one message into the next on a reused worker task.
             clear_tid()
 
-    async def _finalize_source_on_failure(
-        self,
-        message: Optional[QueueMessage],
-        outcome: Optional["FinalizeOutcome"] = None,
-    ) -> None:
-        """Route a failed in-process save through the single finalize chokepoint.
-
-        Used by the internal consume loop (which has no redelivery): finalizing
-        the source unblocks SDK wait_for_save() and short-circuits any future
-        reprocessing of the same poison input. Best-effort and None-safe — never
-        raises (the loop has already logged the original failure).
-
-        The consume loop classifies the failure before calling this and passes
-        the verdict as `outcome`. Callers without an outcome argument default
-        to PERMANENT_FAILURE — same behavior as the legacy bare-except fallback
-        path at the bottom of `_consume_loop`.
-        """
-        if message is None:
-            return
-        source_id = (
-            message.memory_source_id
-            if hasattr(message, "memory_source_id") and message.HasField("memory_source_id")
-            else None
-        )
-        if not source_id:
-            return
-        from mirix.services.memory_source_manager import FinalizeOutcome, MemorySourceManager
-
-        chosen_outcome = outcome or FinalizeOutcome.PERMANENT_FAILURE
-        try:
-            # finalize_source itself logs "Finalized memory_source=... outcome=...".
-            # Don't duplicate that line here; the consume-loop context is already
-            # implied by the upstream "Consume loop: ..." error log emitted before
-            # this method is called.
-            await MemorySourceManager().finalize_source(source_id, chosen_outcome)
-        except Exception:
-            # finalize_source already catches its own DB failures, but
-            # defense-in-depth: the consume loop must NEVER raise here. The
-            # original failure has already been logged.
-            logger.exception(
-                "Unexpected error finalizing memory_source=%s outcome=%s",
-                source_id,
-                chosen_outcome.value,
-            )
-
     async def _consume_loop(self) -> None:
-        """Async consume loop running as an asyncio.Task in the main event loop."""
+        """Async consume loop running as an asyncio.Task in the main event loop.
+
+        Every received message goes through the shared `dispatch_save` helper
+        in `error_policy.py`. That helper runs process_with_policy (classify
+        + bounded retry) and then routes the verdict to the single finalize
+        chokepoint. No mode-specific outcome dispatch lives here — the same
+        helper handles numaflow's `process_external_message` too.
+        """
         partition_info = f", partition={self._partition_id}" if self._partition_id is not None else ""
         logger.info("Queue worker task started%s", partition_info)
 
@@ -564,17 +524,9 @@ class QueueWorker:
                     len(message.input_messages),
                 )
 
-                # VEPAGE-1251 S5: route the internal loop through the same
-                # classification + retry policy the numaflow path uses, so a
-                # transient blip gets retried in-process instead of being
-                # locked in as complete-but-empty. The internal path has no
-                # redelivery, so on TRANSIENT_EXHAUSTED we still finalize —
-                # but with a distinct outcome value VEPAGE-1250 will surface
-                # via the new status column.
-                from mirix.queue.error_policy import OutcomeKind, process_with_policy
-                from mirix.services.memory_source_manager import FinalizeOutcome
+                from mirix.queue.error_policy import dispatch_save
 
-                source_id_for_policy = (
+                source_id = (
                     message.memory_source_id
                     if message.HasField("memory_source_id")
                     else None
@@ -583,34 +535,7 @@ class QueueWorker:
                 async def _run() -> None:
                     await self._process_message_async(message)
 
-                outcome = await process_with_policy(
-                    _run,
-                    memory_source_id=source_id_for_policy,
-                )
-
-                if outcome.kind is OutcomeKind.COMPLETED:
-                    # The in-step finalize chokepoint already marked
-                    # the source SUCCESS — nothing else to do.
-                    pass
-                elif outcome.kind is OutcomeKind.PERMANENT_FAILURE:
-                    logger.error(
-                        "Consume loop: permanent failure on memory_source=%s — %s",
-                        source_id_for_policy,
-                        outcome.cause,
-                    )
-                    await self._finalize_source_on_failure(
-                        message, FinalizeOutcome.PERMANENT_FAILURE
-                    )
-                else:  # TRANSIENT_EXHAUSTED
-                    logger.error(
-                        "Consume loop: transient retries exhausted on memory_source=%s "
-                        "— no redelivery path; finalizing — %s",
-                        source_id_for_policy,
-                        outcome.cause,
-                    )
-                    await self._finalize_source_on_failure(
-                        message, FinalizeOutcome.TRANSIENT_EXHAUSTED
-                    )
+                await dispatch_save(_run, memory_source_id=source_id)
 
             except asyncio.TimeoutError:
                 continue
@@ -620,13 +545,14 @@ class QueueWorker:
             except Exception as e:
                 if type(e).__name__ in ["Empty", "StopIteration"]:
                     continue
-                # Defense in depth: process_with_policy returns an Outcome
-                # rather than raising for known classifications, but a
-                # genuinely-unexpected error elsewhere in the loop body
-                # (e.g. queue protocol shape) lands here and is swallowed
-                # so the worker keeps running.
+                # Defense in depth: dispatch_save catches its own classified
+                # failures and finalizes through the chokepoint. A genuinely
+                # unexpected error elsewhere in the loop body (queue protocol
+                # shape, message deserialization, etc.) lands here and is
+                # swallowed so the worker task keeps running. We do NOT
+                # finalize the source here — we don't know the outcome of
+                # the save (it may have succeeded before the protocol error).
                 logger.error("Error in message consumption loop: %s", e, exc_info=True)
-                await self._finalize_source_on_failure(message)
 
     async def start(self) -> None:
         """Start the background worker as an asyncio.Task."""

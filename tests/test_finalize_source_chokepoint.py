@@ -132,15 +132,13 @@ def _make_step_response(function_failed: bool, continue_chaining: bool = False):
 async def test_finalize_source_success_marks_complete():
     """finalize_source(SUCCESS) writes processing_complete=True under
     today's boolean schema."""
-    from mirix.services.memory_source_manager import (
-        FinalizeOutcome,
-        MemorySourceManager,
-    )
+    from mirix.queue.error_policy import SaveOutcome
+    from mirix.services.memory_source_manager import MemorySourceManager
 
     mgr = MemorySourceManager.__new__(MemorySourceManager)
     mgr.mark_processing_complete = AsyncMock()
 
-    await mgr.finalize_source("src-abc", FinalizeOutcome.SUCCESS)
+    await mgr.finalize_source("src-abc", SaveOutcome.SUCCESS)
 
     mgr.mark_processing_complete.assert_awaited_once_with("src-abc")
 
@@ -150,15 +148,13 @@ async def test_finalize_source_permanent_failure_marks_complete():
     """finalize_source(PERMANENT_FAILURE) marks complete: the input is
     poison; redeliveries should short-circuit via the L2 check. (Under
     VEPAGE-1250 this will write status='failed_permanent' instead.)"""
-    from mirix.services.memory_source_manager import (
-        FinalizeOutcome,
-        MemorySourceManager,
-    )
+    from mirix.queue.error_policy import SaveOutcome
+    from mirix.services.memory_source_manager import MemorySourceManager
 
     mgr = MemorySourceManager.__new__(MemorySourceManager)
     mgr.mark_processing_complete = AsyncMock()
 
-    await mgr.finalize_source("src-abc", FinalizeOutcome.PERMANENT_FAILURE)
+    await mgr.finalize_source("src-abc", SaveOutcome.PERMANENT_FAILURE)
 
     mgr.mark_processing_complete.assert_awaited_once_with("src-abc")
 
@@ -169,15 +165,13 @@ async def test_finalize_source_transient_exhausted_marks_complete():
     on a path that has no redelivery (internal loop). Numaflow does NOT
     call finalize on TRANSIENT_EXHAUSTED — it re-raises for redelivery
     (see queue/__init__.py)."""
-    from mirix.services.memory_source_manager import (
-        FinalizeOutcome,
-        MemorySourceManager,
-    )
+    from mirix.queue.error_policy import SaveOutcome
+    from mirix.services.memory_source_manager import MemorySourceManager
 
     mgr = MemorySourceManager.__new__(MemorySourceManager)
     mgr.mark_processing_complete = AsyncMock()
 
-    await mgr.finalize_source("src-abc", FinalizeOutcome.TRANSIENT_EXHAUSTED)
+    await mgr.finalize_source("src-abc", SaveOutcome.TRANSIENT_EXHAUSTED)
 
     mgr.mark_processing_complete.assert_awaited_once_with("src-abc")
 
@@ -185,15 +179,13 @@ async def test_finalize_source_transient_exhausted_marks_complete():
 @pytest.mark.asyncio
 async def test_finalize_source_none_id_is_noop():
     """finalize_source with no source id is a safe no-op."""
-    from mirix.services.memory_source_manager import (
-        FinalizeOutcome,
-        MemorySourceManager,
-    )
+    from mirix.queue.error_policy import SaveOutcome
+    from mirix.services.memory_source_manager import MemorySourceManager
 
     mgr = MemorySourceManager.__new__(MemorySourceManager)
     mgr.mark_processing_complete = AsyncMock()
 
-    await mgr.finalize_source(None, FinalizeOutcome.SUCCESS)
+    await mgr.finalize_source(None, SaveOutcome.SUCCESS)
 
     mgr.mark_processing_complete.assert_not_awaited()
 
@@ -202,15 +194,17 @@ async def test_finalize_source_none_id_is_noop():
 
 
 @pytest.mark.asyncio
-async def test_llm_path_does_not_mark_complete_after_exhausted_function_failed():
-    """Under ECMS max_chaining_steps=1, a function_failed loop exits via
-    counter > max_chaining_steps. The source must NOT be marked complete
-    in that case — the LLM exhausted its re-prompts without recovery."""
+async def test_llm_path_raises_chaining_exhausted_on_exhausted_function_failed():
+    """When the LLM loop exits with function_failed=True (meta-agent emitted
+    malformed tool calls past chaining budget), step() raises
+    LLMChainingExhaustedError. classify() routes this to Bucket.PERMANENT so
+    dispatch_save records SaveOutcome.PERMANENT_FAILURE. step() itself does
+    NOT call finalize — that's the dispatcher's job (VEPAGE-1251 Option B)."""
+    from mirix.errors import LLMChainingExhaustedError
     from mirix.schemas.message import MessageCreate
 
     agent, actor, user = _setup_agent("src-abc")
 
-    # Both iterations report function_failed=True (re-prompt didn't recover).
     failed_resp = _make_step_response(function_failed=True)
     agent.inner_step = AsyncMock(return_value=failed_resp)
     agent._extract_topics_from_messages = AsyncMock(return_value=["topic"])
@@ -218,27 +212,26 @@ async def test_llm_path_does_not_mark_complete_after_exhausted_function_failed()
     input_msg = MessageCreate(role="user", content="hello")
 
     with patch("mirix.agent.agent.LLMClient"):
-        await agent.step(
-            input_messages=[input_msg],
-            chaining=False,
-            max_chaining_steps=1,
-            stream=False,
-            skip_verify=True,
-            actor=actor,
-            user=user,
-        )
+        with pytest.raises(LLMChainingExhaustedError):
+            await agent.step(
+                input_messages=[input_msg],
+                chaining=False,
+                max_chaining_steps=1,
+                stream=False,
+                skip_verify=True,
+                actor=actor,
+                user=user,
+            )
 
-    # Source must NOT be marked complete: the last iteration still had a
-    # function failure that the LLM never resolved. Neither the legacy
-    # direct mark nor the new finalize chokepoint fire.
-    agent.memory_source_manager.mark_processing_complete.assert_not_awaited()
+    # step() does not finalize on the failure path either.
     agent.memory_source_manager.finalize_source.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_llm_path_marks_complete_on_clean_exit():
-    """The success path (function_failed=False, not chaining) still marks
-    complete — the existing contract is preserved."""
+async def test_llm_path_does_not_finalize_on_clean_exit():
+    """Under Option B, step() returns successfully WITHOUT calling
+    finalize_source. dispatch_save is responsible for calling finalize on
+    the post-policy SUCCESS verdict."""
     from mirix.schemas.message import MessageCreate
 
     agent, actor, user = _setup_agent("src-abc")
@@ -260,8 +253,5 @@ async def test_llm_path_marks_complete_on_clean_exit():
             user=user,
         )
 
-    from mirix.services.memory_source_manager import FinalizeOutcome
-
-    agent.memory_source_manager.finalize_source.assert_awaited_once_with(
-        "src-abc", FinalizeOutcome.SUCCESS
-    )
+    agent.memory_source_manager.finalize_source.assert_not_awaited()
+    agent.memory_source_manager.mark_processing_complete.assert_not_awaited()

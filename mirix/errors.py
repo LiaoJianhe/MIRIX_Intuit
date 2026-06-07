@@ -128,6 +128,25 @@ class LLMUnprocessableEntityError(LLMError):
     pass
 
 
+class LLMChainingExhaustedError(MirixError):
+    """The meta-agent LLM loop ran out of chaining budget with the last
+    iteration still flagging a CorrectableToolError-shape failure.
+
+    Concretely: the LLM emitted a malformed tool call (unknown tool name /
+    bad JSON args / failed validation), the loop injected a "please finish"
+    re-prompt, and the LLM either emitted another malformed call OR
+    `max_chaining_steps` was reached without recovery.
+
+    Classified as Bucket.PERMANENT — retrying the whole step would just
+    re-run the same prompt against the same LLM and get the same broken
+    output. Surfaces as a save-path PERMANENT_FAILURE so the source can be
+    dead-lettered with a distinct outcome value (VEPAGE-1250 will give it
+    its own `status` column value).
+    """
+
+    pass
+
+
 class CorrectableToolError(MirixError):
     """Tool execution failed for a reason the LLM can self-correct on a re-prompt.
 

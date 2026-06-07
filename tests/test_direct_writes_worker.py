@@ -227,7 +227,16 @@ async def test_worker_direct_writes_writes_source_and_citation_to_db(monkeypatch
     )
 
     try:
-        await worker._process_message_async(queue_msg)
+        # Route through dispatch_save (Option B): step() no longer finalizes
+        # internally — the dispatcher calls finalize_source after the save
+        # returns. This matches what both the numaflow path
+        # (process_external_message) and the in-process _consume_loop do.
+        from mirix.queue.error_policy import dispatch_save
+
+        async def _run():
+            await worker._process_message_async(queue_msg)
+
+        await dispatch_save(_run, memory_source_id=memory_source_id)
 
         # 1 memory_source row for this external_id
         source_mgr = MemorySourceManager()
@@ -240,7 +249,7 @@ async def test_worker_direct_writes_writes_source_and_citation_to_db(monkeypatch
         assert created_source.id == memory_source_id
         assert (
             created_source.processing_complete is True
-        ), "mark_processing_complete should have run after direct-write branch"
+        ), "dispatch_save should have finalized SUCCESS after direct-write branch"
 
         # 1 citation row for the stubbed episodic memory id
         citations = await MemoryCitationManager().get_citations_for_memory(

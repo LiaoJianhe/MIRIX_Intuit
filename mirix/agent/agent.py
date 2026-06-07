@@ -27,7 +27,7 @@ from mirix.constants import (
     REQ_HEARTBEAT_MESSAGE,
 )
 from mirix.embeddings import embedding_model
-from mirix.errors import ContextWindowExceededError, CorrectableToolError
+from mirix.errors import ContextWindowExceededError, CorrectableToolError, LLMChainingExhaustedError
 from mirix.functions.functions import get_function_from_module
 from mirix.helpers import ToolRulesSolver
 from mirix.helpers.message_helpers import prepare_input_message_create
@@ -1365,16 +1365,11 @@ class Agent(BaseAgent):
             # deduped or already-processed sources short-circuit before this runs.
             if self.agent_state.is_type(AgentType.meta_memory_agent) and self.direct_writes:
                 await self._apply_direct_writes_traced()
-                # If _apply_direct_writes_traced raised, the exception
-                # propagates past here — the source is NOT finalized.
-                # process_with_policy / _consume_loop see the typed
-                # exception and classify it.
-                if self.memory_source_id:
-                    from mirix.services.memory_source_manager import FinalizeOutcome
-
-                    await self.memory_source_manager.finalize_source(
-                        self.memory_source_id, FinalizeOutcome.SUCCESS
-                    )
+                # step() does NOT finalize anymore (VEPAGE-1251 Option B).
+                # On clean return, dispatch_save calls finalize_source(SUCCESS)
+                # in the post-policy handler. If _apply_direct_writes_traced
+                # raises, the exception propagates and dispatch_save records
+                # the appropriate failure outcome.
                 return MirixUsageStatistics(step_count=0)
 
             if self.agent_state.is_type(AgentType.meta_memory_agent):
@@ -1545,40 +1540,27 @@ class Agent(BaseAgent):
                     )
                     raise
 
-            # Finalize the source. `function_failed` here is the LAST loop
-            # iteration's value; it's True iff that iteration's tool calls
-            # included an LLM-correctable failure (CorrectableToolError).
-            # If the loop exited with function_failed=True, the LLM's last
-            # re-prompt attempt also produced bad tool use — leave the
-            # source NOT-finalized so process_with_policy / _consume_loop
-            # decide.
+            # If the LLM loop exited with `function_failed=True`, the meta-agent
+            # LLM emitted a malformed tool call (CorrectableToolError-shape) on
+            # the last iteration AND the bounded re-prompt didn't recover.
+            # Raise a typed exception so process_with_policy classifies this as
+            # PERMANENT (no value in retrying — the LLM already had its
+            # budget) and the post-policy handler records the right outcome.
             #
-            # NOTE — this conditional only covers the case where the *last*
-            # iteration failed correctably. It does NOT cover the shape
-            # where iter 1 failed correctably, iter 2 cleanly called
-            # `finish_memory_update` without actually writing memories
-            # (LLM gave up). VEPAGE-1250 will distinguish those outcomes
-            # via the new `status` column once we have a sub-agent-level
-            # success signal to feed in.
+            # Non-correctable failures (DB / provider / code bug) never reach
+            # this point: they raised out of `inner_step` earlier.
             #
-            # Non-correctable failures (DB / provider / code bug) never
-            # reach this point: they raised out of `inner_step` and the
-            # source is not finalized at all. process_with_policy handles
-            # the routing from there.
+            # step() does NOT finalize on the success path either — that's
+            # `dispatch_save`'s job after process_with_policy returns SUCCESS
+            # (VEPAGE-1251 Option B).
             if (
                 self.agent_state.is_type(AgentType.meta_memory_agent)
-                and self.memory_source_id
-                and not function_failed
+                and function_failed
             ):
-                from mirix.services.memory_source_manager import FinalizeOutcome
-
-                try:
-                    await self.memory_source_manager.finalize_source(
-                        self.memory_source_id, FinalizeOutcome.SUCCESS
-                    )
-                except Exception as e:
-                    logger.warning("Failed to finalize source %s: %s", self.memory_source_id, e)
-                    raise
+                raise LLMChainingExhaustedError(
+                    f"meta-agent LLM produced malformed tool calls past chaining budget "
+                    f"(counter={counter}, max_chaining_steps={max_chaining_steps})"
+                )
 
             return MirixUsageStatistics(**total_usage.model_dump(), step_count=step_count)
 

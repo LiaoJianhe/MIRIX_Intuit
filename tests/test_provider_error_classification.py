@@ -28,7 +28,7 @@ from mirix.errors import (
 from mirix.queue.error_policy import (
     Bucket,
     Outcome,
-    OutcomeKind,
+    SaveOutcome,
     classify,
     mark_inner_exhausted,
     process_with_policy,
@@ -120,7 +120,7 @@ async def test_inner_exhausted_transient_not_re_retried_at_whole_step():
 
     outcome = await process_with_policy(run_step, memory_source_id="src-x")
 
-    assert outcome.kind is OutcomeKind.TRANSIENT_EXHAUSTED, (
+    assert outcome.kind is SaveOutcome.TRANSIENT_EXHAUSTED, (
         "marked exhausted transient must still verdict TRANSIENT_EXHAUSTED"
     )
     assert calls["n"] == 1, (
@@ -142,7 +142,7 @@ async def test_unmarked_transient_still_retried_at_whole_step():
 
     outcome = await process_with_policy(run_step, memory_source_id="src-y")
 
-    assert outcome.kind is OutcomeKind.TRANSIENT_EXHAUSTED
+    assert outcome.kind is SaveOutcome.TRANSIENT_EXHAUSTED
     # The default whole_step_retry_max_attempts under MIRIX settings is 2,
     # so the loop runs initial + 2 = 3 attempts. Assert it ran more than
     # the single inner-exhausted attempt.
@@ -164,5 +164,5 @@ async def test_inner_exhausted_permanent_classification_unaffected():
 
     outcome = await process_with_policy(run_step, memory_source_id="src-z")
 
-    assert outcome.kind is OutcomeKind.PERMANENT_FAILURE
+    assert outcome.kind is SaveOutcome.PERMANENT_FAILURE
     assert calls["n"] == 1

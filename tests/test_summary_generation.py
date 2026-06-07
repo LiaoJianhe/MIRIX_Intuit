@@ -365,11 +365,9 @@ class TestSummaryTriggerInStep:
                 user=user,
             )
 
-        from mirix.services.memory_source_manager import FinalizeOutcome
+        from mirix.queue.error_policy import SaveOutcome
 
-        agent.memory_source_manager.finalize_source.assert_called_once_with(
-            "src-abc123", FinalizeOutcome.SUCCESS
-        )
+        agent.memory_source_manager.finalize_source.assert_not_called()
         agent._generate_source_summary_traced.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -397,11 +395,9 @@ class TestSummaryTriggerInStep:
                 user=user,
             )
 
-        from mirix.services.memory_source_manager import FinalizeOutcome
+        from mirix.queue.error_policy import SaveOutcome
 
-        agent.memory_source_manager.finalize_source.assert_called_once_with(
-            "src-abc123", FinalizeOutcome.SUCCESS
-        )
+        agent.memory_source_manager.finalize_source.assert_not_called()
         agent._generate_source_summary_traced.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -433,7 +429,7 @@ class TestSummaryTriggerInStep:
                 user=user,
             )
 
-        agent.memory_source_manager.finalize_source.assert_called_once()
+        agent.memory_source_manager.finalize_source.assert_not_called()
         agent._generate_source_summary_traced.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -509,11 +505,9 @@ class TestSummaryTriggerInStep:
         inner_end_idx = order.index("inner_step_end")
         assert summary_start_idx < inner_end_idx, f"summary did not start before sub-agents finished; order={order}"
         # processing_complete happens after both finish
-        from mirix.services.memory_source_manager import FinalizeOutcome
+        from mirix.queue.error_policy import SaveOutcome
 
-        agent.memory_source_manager.finalize_source.assert_called_once_with(
-            "src-abc123", FinalizeOutcome.SUCCESS
-        )
+        agent.memory_source_manager.finalize_source.assert_not_called()
 
 
 class TestSummaryTracedSpan:

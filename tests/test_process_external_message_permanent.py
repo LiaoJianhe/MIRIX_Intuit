@@ -40,7 +40,7 @@ async def test_permanent_failure_marks_processing_complete_and_does_not_raise(mo
     # After VEPAGE-1251 S2 the permanent callback routes through the single
     # finalize chokepoint (MemorySourceManager.finalize_source), not directly
     # to mark_processing_complete.
-    from mirix.services.memory_source_manager import FinalizeOutcome
+    from mirix.queue.error_policy import SaveOutcome
 
     finalize = AsyncMock()
     fake_source_manager_cls = Mock(return_value=Mock(finalize_source=finalize))
@@ -52,4 +52,4 @@ async def test_permanent_failure_marks_processing_complete_and_does_not_raise(mo
     # Permanent → returns normally (no raise).
     await process_external_message(b"ignored-by-stub-deserializer")
 
-    finalize.assert_awaited_once_with(source_id, FinalizeOutcome.PERMANENT_FAILURE)
+    finalize.assert_awaited_once_with(source_id, SaveOutcome.PERMANENT_FAILURE)
