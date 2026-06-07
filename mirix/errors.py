@@ -128,7 +128,7 @@ class LLMUnprocessableEntityError(LLMError):
     pass
 
 
-class LLMSemanticToolError(MirixError):
+class CorrectableToolError(MirixError):
     """Tool execution failed for a reason the LLM can self-correct on a re-prompt.
 
     Examples: missing required tool argument, malformed JSON in tool args,
@@ -142,7 +142,7 @@ class LLMSemanticToolError(MirixError):
     Raising this from tool argument preprocessing keeps the existing
     feed-back-to-LLM behavior; everything else (`AttributeError`,
     `OperationalError`, `ProviderTransientError`, …) propagates out of
-    `step()` instead of being string-erased at agent.py:576.
+    `step()` instead of being string-erased at the tool-execution swallow site.
     """
 
     pass

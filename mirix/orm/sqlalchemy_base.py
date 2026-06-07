@@ -93,7 +93,12 @@ def retry_db_operation(
                                 max_retries,
                                 e,
                             )
-                            raise
+                            # Inner-retry budget exhausted on a DB transient.
+                            # Tag so process_with_policy doesn't add another
+                            # whole-step retry cycle on top (VEPAGE-1251 §5.6).
+                            from mirix.queue.error_policy import mark_inner_exhausted
+
+                            raise mark_inner_exhausted(e)
                         delay = min(base_delay * (backoff_factor**attempt), max_delay)
                         jitter = random.uniform(0, delay * 0.1)
                         total_delay = delay + jitter
@@ -161,7 +166,11 @@ def transaction_retry(max_retries: int = 3, base_delay: float = 0.1, max_delay: 
                                 max_retries,
                                 e,
                             )
-                            raise
+                            # Inner-retry budget exhausted; see retry_db_operation
+                            # above for the rationale.
+                            from mirix.queue.error_policy import mark_inner_exhausted
+
+                            raise mark_inner_exhausted(e)
                         delay = min(base_delay * (2.0**attempt), max_delay)
                         jitter = random.uniform(0, delay * 0.1)
                         total_delay = delay + jitter

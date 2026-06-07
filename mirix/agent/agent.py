@@ -28,7 +28,7 @@ from mirix.constants import (
     REQ_HEARTBEAT_MESSAGE,
 )
 from mirix.embeddings import embedding_model
-from mirix.errors import ContextWindowExceededError, LLMSemanticToolError
+from mirix.errors import ContextWindowExceededError, CorrectableToolError
 from mirix.functions.functions import get_function_from_module
 from mirix.helpers import ToolRulesSolver
 from mirix.helpers.message_helpers import prepare_input_message_create
@@ -573,8 +573,8 @@ class Agent(BaseAgent):
                 else:
                     raise ValueError(f"Tool type {target_mirix_tool.tool_type} not supported")
 
-            except LLMSemanticToolError as e:
-                # LLM-semantic failure (bad args / validation / malformed JSON).
+            except CorrectableToolError as e:
+                # LLM-correctable failure (bad args / validation / malformed JSON).
                 # Friendly-stringify so the outer loop can feed it back to the
                 # LLM for a bounded re-prompt — this is the one place where
                 # feed-back-to-LLM is correct. Everything else (DB,
@@ -608,7 +608,7 @@ class Agent(BaseAgent):
             # never ran). Once we are about to invoke the body, set
             # `inner_attempted=True` so any exception from the body — or
             # from the langfuse machinery after the body — does NOT trigger
-            # a silent re-run of the tool. Non-LLM-semantic exceptions
+            # a silent re-run of the tool. Non-correctable exceptions
             # raised by the body propagate out so `process_with_policy`
             # can classify them (VEPAGE-1228 fix).
             inner_attempted = False
@@ -1125,8 +1125,8 @@ class Agent(BaseAgent):
                     function_response = package_function_response(True, function_response_string)
                     function_failed = False
 
-                except LLMSemanticToolError as e:
-                    # LLM-semantic failure: bad tool args / validation. The
+                except CorrectableToolError as e:
+                    # LLM-correctable failure: bad tool args / validation. The
                     # bounded re-prompt is the right tool here — the LLM can
                     # self-correct. Friendly-stringify, flag function_failed,
                     # and continue the loop so the agent re-prompts.

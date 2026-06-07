@@ -1,13 +1,13 @@
 """Tests for the swallow fix on the save path.
 
-When a tool body raises a non-LLM-semantic exception, the exception must
+When a tool body raises a non-correctable exception, the exception must
 propagate out of `_handle_ai_response` (and therefore out of `step()`) so the
 worker / `process_with_policy` machinery sees the real exception type and can
 classify it.
 
-LLM-semantic errors (bad tool args, validation against the schema) stay
-contained: friendly-stringified, flagged `overall_function_failed=True`, and
-fed back to the LLM for a bounded re-prompt.
+LLM-correctable errors (bad tool args, validation against the schema, malformed
+JSON) stay contained: friendly-stringified, flagged `overall_function_failed=True`,
+and fed back to the LLM for a bounded re-prompt.
 
 This is sub-piece S1 of VEPAGE-1251 / the save-path error-handling design
 (docs/superpowers/specs/2026-06-06-mirix-save-path-error-handling-design.md).
@@ -25,7 +25,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from mirix.agent.agent import Agent
-from mirix.errors import LLMSemanticToolError
+from mirix.errors import CorrectableToolError
 from mirix.schemas.agent import AgentState, AgentType
 from mirix.schemas.enums import ToolType
 from mirix.schemas.message import Message
@@ -94,7 +94,7 @@ def _make_messages(function_name: str = "trigger_memory_update"):
 
 
 @pytest.mark.asyncio
-async def test_non_semantic_tool_exception_propagates_out_of_handle_ai_response():
+async def test_non_correctable_tool_exception_propagates_out_of_handle_ai_response():
     """A tool body raising AttributeError (the VEPAGE-1228 shape) must NOT
     be swallowed into a friendly string. The original exception type must
     escape so `process_with_policy` can classify it."""
@@ -119,18 +119,18 @@ async def test_non_semantic_tool_exception_propagates_out_of_handle_ai_response(
 
 
 @pytest.mark.asyncio
-async def test_llm_semantic_tool_error_is_contained_and_flags_function_failed():
-    """LLMSemanticToolError stays contained: the LLM sees a friendly error
+async def test_correctable_tool_error_is_contained_and_flags_function_failed():
+    """CorrectableToolError stays contained: the LLM sees a friendly error
     message and `function_failed=True` is flagged so the bounded re-prompt
     can run. The exception itself does NOT escape."""
     agent = _make_meta_agent()
 
-    async def _exec_that_raises_semantic(*args, **kwargs):
-        raise LLMSemanticToolError(
+    async def _exec_that_raises_correctable(*args, **kwargs):
+        raise CorrectableToolError(
             "trigger_memory_update missing required arg 'memory_types'"
         )
 
-    agent.execute_tool_and_persist_state = _exec_that_raises_semantic
+    agent.execute_tool_and_persist_state = _exec_that_raises_correctable
 
     input_message, response_message = _make_messages()
 
@@ -144,7 +144,7 @@ async def test_llm_semantic_tool_error_is_contained_and_flags_function_failed():
     )
 
     assert function_failed is True, (
-        "LLM-semantic failures must flag function_failed so the bounded "
+        "Correctable tool errors must flag function_failed so the bounded "
         "re-prompt fires."
     )
     # The friendly error message should be appended as the tool response

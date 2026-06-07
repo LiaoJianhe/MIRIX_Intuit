@@ -11,17 +11,23 @@ PER-MODE POLICY (VEPAGE-1251 §3 / §6):
 
 * internal kafka manual / in-memory sim (this file, _consume_loop).
   Wraps _process_message_async in the same process_with_policy.
-  COMPLETED -> noop (in-step chokepoint already marked success);
+  COMPLETED -> noop (in-step chokepoint already finalized SUCCESS);
   PERMANENT -> finalize(PERMANENT_FAILURE);
   TRANSIENT_EXHAUSTED -> finalize(TRANSIENT_EXHAUSTED) (no redelivery
-  exists on this path; we still finalize, but with a distinct outcome
-  for VEPAGE-1250's status column).
+  exists on this path; we still finalize so SDK wait_for_save unblocks).
 
 ONE classifier (error_policy.classify), ONE policy
 (error_policy.process_with_policy), ONE finalize chokepoint
 (memory_source_manager.finalize_source). The three run modes differ
 only in their post-policy actions; the classification contract is
 identical.
+
+NOTE — boolean schema today. finalize_source records the FinalizeOutcome
+in the log line but writes `processing_complete=True` for any
+do-not-reprocess outcome (SUCCESS / PERMANENT_FAILURE / TRANSIENT_EXHAUSTED).
+VEPAGE-1250 will diversify the actual column writes per outcome via a
+`status` column; this story does not enforce "complete = success only"
+at the DB level.
 """
 
 import asyncio
@@ -504,10 +510,10 @@ class QueueWorker:
         reprocessing of the same poison input. Best-effort and None-safe — never
         raises (the loop has already logged the original failure).
 
-        S5 of VEPAGE-1251 will distinguish PERMANENT_FAILURE vs
-        TRANSIENT_EXHAUSTED here by classifying before finalizing. Until
-        then, callers without an outcome argument default to
-        PERMANENT_FAILURE — same behavior as the legacy path.
+        The consume loop classifies the failure before calling this and passes
+        the verdict as `outcome`. Callers without an outcome argument default
+        to PERMANENT_FAILURE — same behavior as the legacy bare-except fallback
+        path at the bottom of `_consume_loop`.
         """
         if message is None:
             return
