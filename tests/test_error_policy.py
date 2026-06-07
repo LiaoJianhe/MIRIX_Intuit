@@ -61,11 +61,20 @@ def test_classify_unknown_defaults_to_transient(caplog):
 
 
 def test_classify_unknown_warns_once_per_class(caplog):
-    ep._unknown_warned.discard(KeyError)
+    """Unknown types that aren't pure-Python bug shapes default to
+    TRANSIENT with a one-shot warning. (After VEPAGE-1251 S4, bug shapes
+    like KeyError without a provider traceback frame are routed to
+    PERMANENT by the origin-split, so they intentionally bypass this
+    warning path — see test_classify_db_and_unknown_origin.py.)"""
+
+    class _UnmappedException(Exception):
+        pass
+
+    ep._unknown_warned.discard(_UnmappedException)
     with caplog.at_level("WARNING", logger="mirix.queue.error_policy"):
-        classify(KeyError("a"))
-        classify(KeyError("b"))
-    warnings = [r for r in caplog.records if "KeyError" in r.message]
+        classify(_UnmappedException("a"))
+        classify(_UnmappedException("b"))
+    warnings = [r for r in caplog.records if "_UnmappedException" in r.message]
     assert len(warnings) == 1, "expected one-shot warning per class"
 
 

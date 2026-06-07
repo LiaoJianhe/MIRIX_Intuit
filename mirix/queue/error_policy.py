@@ -14,9 +14,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import types
 from dataclasses import dataclass
 from enum import Enum
 from typing import Awaitable, Callable, Optional
+
+from sqlalchemy.exc import DataError, DBAPIError, IntegrityError, OperationalError
 
 from mirix.errors import (
     LLMAuthenticationError,
@@ -70,6 +73,8 @@ _PERMANENT_TYPES: tuple[type[BaseException], ...] = (
     LLMAuthenticationError,  # 401
     LLMPermissionDeniedError,  # 403
     ProviderPermanentError,  # provider boundary: auth, bad request, etc.
+    IntegrityError,  # SQLAlchemy: constraint/unique/foreign-key violations
+    DataError,  # SQLAlchemy: bad input shape (invalid syntax, range)
 )
 
 _TRANSIENT_TYPES: tuple[type[BaseException], ...] = (
@@ -77,7 +82,56 @@ _TRANSIENT_TYPES: tuple[type[BaseException], ...] = (
     LLMServerError,  # 5xx
     LLMConnectionError,
     ProviderTransientError,  # provider boundary: 429, 5xx, timeout
+    OperationalError,  # SQLAlchemy: connection / serialization / lock
+    DBAPIError,  # SQLAlchemy generic DBAPI failure
+    asyncio.TimeoutError,  # I/O stall worth one retry
 )
+
+# Pure-Python bug shapes. When an exception of one of these types reaches
+# `classify()` without a provider/SDK frame in its traceback, treat as
+# PERMANENT (it'll never succeed on retry). This is the origin-split for
+# the VEPAGE-1228 AttributeError shape — see design §5.4. With a provider
+# frame in the traceback, the exception is treated as transient (the
+# provider might have wrapped a real infra failure).
+_PYTHON_BUG_TYPES: tuple[type[BaseException], ...] = (
+    AttributeError,
+    KeyError,
+    TypeError,
+    IndexError,
+    NameError,
+)
+
+# Frame module-name fragments that signal "this exception came from
+# provider / database / SDK code, not pure-Python agent logic." If any
+# frame on the traceback matches, an otherwise-bug-shaped exception is
+# treated as transient (the provider might have crashed mid-call).
+_PROVIDER_FRAME_HINTS: tuple[str, ...] = (
+    "ipsr",
+    "ipss",
+    "ipsrclient",
+    "ipssearchclient",
+    "sqlalchemy",
+    "asyncpg",
+    "psycopg",
+    "httpx",
+    "openai",
+    "anthropic",
+)
+
+
+def _traceback_has_provider_frame(tb: Optional[types.TracebackType]) -> bool:
+    """Walk the traceback looking for a frame in provider/SDK code. If any
+    such frame is on the chain, the exception is not purely an agent-logic
+    bug and should keep the default Transient classification."""
+    cur = tb
+    depth = 0
+    while cur is not None and depth < 64:
+        module_path = (cur.tb_frame.f_globals.get("__name__") or "").lower()
+        if any(hint in module_path for hint in _PROVIDER_FRAME_HINTS):
+            return True
+        cur = cur.tb_next
+        depth += 1
+    return False
 
 
 # Inner-exhausted marker. The marker is an attribute on the propagated
@@ -180,6 +234,23 @@ def classify(exc: BaseException) -> Bucket:
         seen.add(id(current))
         current = current.__cause__
         depth += 1
+
+    # Origin-split for pure-Python bug shapes (VEPAGE-1251 §5.4). If the
+    # exception is a recognized bug class AND its traceback has no
+    # provider/SDK frame, treat as permanent — retrying a deterministic
+    # AttributeError just burns redeliveries. With a provider frame on
+    # the chain, fall through to the historical Transient default (the
+    # provider might have wrapped real infra trouble).
+    if isinstance(exc, _PYTHON_BUG_TYPES) and not _traceback_has_provider_frame(
+        exc.__traceback__
+    ):
+        logger.info(
+            "error_policy.classify: PERMANENT (pure-Python bug shape %s, no provider "
+            "frame in traceback) — chain: %s",
+            type(exc).__name__,
+            format_exc_chain(exc),
+        )
+        return Bucket.PERMANENT
 
     exc_type = type(exc)
     if exc_type not in _unknown_warned:
