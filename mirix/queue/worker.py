@@ -1,6 +1,27 @@
 """
 Background worker that consumes messages from the queue.
 Runs as an asyncio.Task in the main event loop (async-native).
+
+PER-MODE POLICY (VEPAGE-1251 §3 / §6):
+
+* numaflow (external) — process_external_message in queue/__init__.py.
+  Wraps _process_message_async in process_with_policy:
+  COMPLETED -> ack; PERMANENT -> finalize + ack; TRANSIENT_EXHAUSTED ->
+  re-raise so numaflow redelivers.
+
+* internal kafka manual / in-memory sim (this file, _consume_loop).
+  Wraps _process_message_async in the same process_with_policy.
+  COMPLETED -> noop (in-step chokepoint already marked success);
+  PERMANENT -> finalize(PERMANENT_FAILURE);
+  TRANSIENT_EXHAUSTED -> finalize(TRANSIENT_EXHAUSTED) (no redelivery
+  exists on this path; we still finalize, but with a distinct outcome
+  for VEPAGE-1250's status column).
+
+ONE classifier (error_policy.classify), ONE policy
+(error_policy.process_with_policy), ONE finalize chokepoint
+(memory_source_manager.finalize_source). The three run modes differ
+only in their post-policy actions; the classification contract is
+identical.
 """
 
 import asyncio

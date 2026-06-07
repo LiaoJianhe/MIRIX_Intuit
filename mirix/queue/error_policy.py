@@ -7,6 +7,24 @@ agent.step, so the contract is consistent.
 
 Callers run an agent step under process_with_policy; the returned Outcome
 tells the consumer loop whether to ack the message or let it be redelivered.
+
+CONTRACT (VEPAGE-1251):
+
+* classify(exc) is PURE-ISINSTANCE against MIRIX-owned types — no
+  string-matching. The three Provider*Error types are how ECMS providers
+  speak to this module across the ECMS -> MIRIX dependency direction:
+  the boundary translates SDK exceptions; classify maps the result.
+
+* mark_inner_exhausted(exc) tags a propagated exception so
+  process_with_policy returns TRANSIENT_EXHAUSTED after exactly one
+  attempt instead of running the full backoff cycle. Inner-retry tiers
+  (_get_ai_reply, provider_write_retry.retry_transient) use this to kill
+  the inner x whole-step multiplication.
+
+* Origin-split for pure-Python bug shapes: AttributeError / KeyError /
+  TypeError / IndexError / NameError with no provider frame in the
+  traceback classify PERMANENT (the VEPAGE-1228 shape). With a provider
+  frame on the chain, fall back to the historical Transient default.
 """
 
 from __future__ import annotations
