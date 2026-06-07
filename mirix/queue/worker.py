@@ -539,7 +539,53 @@ class QueueWorker:
                     len(message.input_messages),
                 )
 
-                await self._process_message_async(message)
+                # VEPAGE-1251 S5: route the internal loop through the same
+                # classification + retry policy the numaflow path uses, so a
+                # transient blip gets retried in-process instead of being
+                # locked in as complete-but-empty. The internal path has no
+                # redelivery, so on TRANSIENT_EXHAUSTED we still finalize —
+                # but with a distinct outcome value VEPAGE-1250 will surface
+                # via the new status column.
+                from mirix.queue.error_policy import OutcomeKind, process_with_policy
+                from mirix.services.memory_source_manager import FinalizeOutcome
+
+                source_id_for_policy = (
+                    message.memory_source_id
+                    if message.HasField("memory_source_id")
+                    else None
+                )
+
+                async def _run() -> None:
+                    await self._process_message_async(message)
+
+                outcome = await process_with_policy(
+                    _run,
+                    memory_source_id=source_id_for_policy,
+                )
+
+                if outcome.kind is OutcomeKind.COMPLETED:
+                    # The in-step finalize chokepoint already marked
+                    # the source SUCCESS — nothing else to do.
+                    pass
+                elif outcome.kind is OutcomeKind.PERMANENT_FAILURE:
+                    logger.error(
+                        "Consume loop: permanent failure on memory_source=%s — %s",
+                        source_id_for_policy,
+                        outcome.cause,
+                    )
+                    await self._finalize_source_on_failure(
+                        message, FinalizeOutcome.PERMANENT_FAILURE
+                    )
+                else:  # TRANSIENT_EXHAUSTED
+                    logger.error(
+                        "Consume loop: transient retries exhausted on memory_source=%s "
+                        "— no redelivery path; finalizing — %s",
+                        source_id_for_policy,
+                        outcome.cause,
+                    )
+                    await self._finalize_source_on_failure(
+                        message, FinalizeOutcome.TRANSIENT_EXHAUSTED
+                    )
 
             except asyncio.TimeoutError:
                 continue
@@ -549,14 +595,11 @@ class QueueWorker:
             except Exception as e:
                 if type(e).__name__ in ["Empty", "StopIteration"]:
                     continue
-                # A processing failure propagated out of _process_message_async
-                # (the core re-raises). The internal consume loop has NO
-                # redelivery — get() already consumed the message — so we must
-                # finalize the source here (mark processing_complete) and
-                # swallow, otherwise it stays "in progress" forever and the SDK's
-                # wait_for_save() polls to its timeout. We finalize regardless of
-                # permanent/transient: there is nothing to redeliver to, so a
-                # transient failure can't be retried on this path anyway.
+                # Defense in depth: process_with_policy returns an Outcome
+                # rather than raising for known classifications, but a
+                # genuinely-unexpected error elsewhere in the loop body
+                # (e.g. queue protocol shape) lands here and is swallowed
+                # so the worker keeps running.
                 logger.error("Error in message consumption loop: %s", e, exc_info=True)
                 await self._finalize_source_on_failure(message)
 
