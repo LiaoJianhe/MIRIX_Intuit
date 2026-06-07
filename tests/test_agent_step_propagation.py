@@ -177,3 +177,153 @@ async def test_db_operational_error_propagates():
             retrieved_memories=None,
             chaining=False,
         )
+
+
+# ---------- Synthetic pre-execution CorrectableToolError paths ----------
+#
+# `_handle_ai_response` raises CorrectableToolError BEFORE the tool body
+# runs in three cases:
+#   1) tool name not in agent_state.tools
+#   2) tool arguments fail JSON parsing
+#   3) tool arguments fail validate_tool_args
+# All three should be caught by the single CorrectableToolError handler and
+# converted into a tool-role message with function_failed=True. The original
+# exception must NOT escape, and execute_tool_and_persist_state must NOT be
+# called.
+
+
+@pytest.mark.asyncio
+async def test_unknown_tool_name_raises_correctable_error_contained():
+    """LLM hallucinates a tool name → CorrectableToolError, contained."""
+    agent = _make_meta_agent()
+
+    execute_called = {"flag": False}
+
+    async def _exec_should_not_run(*args, **kwargs):
+        execute_called["flag"] = True
+        return "should not be called"
+
+    agent.execute_tool_and_persist_state = _exec_should_not_run
+
+    input_message, _ = _make_messages()
+    response_message = ChatCompletionMessage(
+        role="assistant",
+        content=None,
+        tool_calls=[
+            ToolCall(
+                id="call-1",
+                function=FunctionCall(
+                    name="not_a_real_tool_name_xyz", arguments="{}"
+                ),
+            ),
+        ],
+    )
+
+    messages, _, function_failed = await agent._handle_ai_response(
+        input_message=input_message,
+        response_message=response_message,
+        existing_file_uris=[],
+        response_message_id="message-87654321",
+        retrieved_memories=None,
+        chaining=False,
+    )
+
+    assert function_failed is True
+    assert execute_called["flag"] is False, (
+        "execute_tool_and_persist_state must NOT be called for an unknown "
+        "tool name — the CorrectableToolError raises pre-execution."
+    )
+    tool_msgs = [m for m in messages if getattr(m, "role", None) == "tool"]
+    assert tool_msgs, "expected a tool-role message capturing the friendly error"
+
+
+@pytest.mark.asyncio
+async def test_bad_json_args_raises_correctable_error_contained():
+    """LLM emits unparseable JSON for tool args → CorrectableToolError.
+    Empty string is the canonical "parse_json raises" input."""
+    agent = _make_meta_agent()
+
+    execute_called = {"flag": False}
+
+    async def _exec_should_not_run(*args, **kwargs):
+        execute_called["flag"] = True
+        return "should not be called"
+
+    agent.execute_tool_and_persist_state = _exec_should_not_run
+
+    input_message, _ = _make_messages()
+    response_message = ChatCompletionMessage(
+        role="assistant",
+        content=None,
+        tool_calls=[
+            ToolCall(
+                id="call-1",
+                function=FunctionCall(
+                    name="trigger_memory_update",
+                    arguments="",
+                ),
+            ),
+        ],
+    )
+
+    messages, _, function_failed = await agent._handle_ai_response(
+        input_message=input_message,
+        response_message=response_message,
+        existing_file_uris=[],
+        response_message_id="message-87654321",
+        retrieved_memories=None,
+        chaining=False,
+    )
+
+    assert function_failed is True
+    assert execute_called["flag"] is False, (
+        "execute_tool_and_persist_state must NOT be called for unparseable "
+        "JSON args — the CorrectableToolError raises pre-execution."
+    )
+    tool_msgs = [m for m in messages if getattr(m, "role", None) == "tool"]
+    assert tool_msgs, "expected a tool-role message capturing the friendly error"
+
+
+@pytest.mark.asyncio
+async def test_args_coerced_to_wrong_shape_raises_correctable_error():
+    """parse_json's json_repair fallback may coerce malformed input to a
+    list. That's not a usable shape — CorrectableToolError it so the LLM
+    can re-emit, not so it crashes downstream in _filter_function_args."""
+    agent = _make_meta_agent()
+
+    execute_called = {"flag": False}
+
+    async def _exec_should_not_run(*args, **kwargs):
+        execute_called["flag"] = True
+        return "should not be called"
+
+    agent.execute_tool_and_persist_state = _exec_should_not_run
+
+    input_message, _ = _make_messages()
+    response_message = ChatCompletionMessage(
+        role="assistant",
+        content=None,
+        tool_calls=[
+            ToolCall(
+                id="call-1",
+                function=FunctionCall(
+                    name="trigger_memory_update",
+                    arguments="{invalid",  # json_repair coerces this to a list
+                ),
+            ),
+        ],
+    )
+
+    messages, _, function_failed = await agent._handle_ai_response(
+        input_message=input_message,
+        response_message=response_message,
+        existing_file_uris=[],
+        response_message_id="message-87654321",
+        retrieved_memories=None,
+        chaining=False,
+    )
+
+    assert function_failed is True
+    assert execute_called["flag"] is False
+    tool_msgs = [m for m in messages if getattr(m, "role", None) == "tool"]
+    assert tool_msgs
