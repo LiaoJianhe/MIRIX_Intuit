@@ -12,6 +12,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mirix.errors import (
+    ProviderConflictError as _ProviderConflictError,
+)
+from mirix.errors import (
+    ProviderPermanentError as _ProviderPermanentError,
+)
+from mirix.errors import (
+    ProviderTransientError as _ProviderTransientError,
+)
 from mirix.schemas.client import Client as PydanticClient
 from mirix.services.memory_citation_manager import MemoryCitationManager
 from mirix.services.memory_source_manager import MemorySourceManager
@@ -98,7 +107,7 @@ class TestMemorySourceManagerDelegation:
     async def test_create_falls_back_to_lookup_on_conflict(self):
         existing = _memory_source_row()
         mock_provider = MagicMock()
-        mock_provider.create = AsyncMock(side_effect=Exception("unique constraint violation"))
+        mock_provider.create = AsyncMock(side_effect=_ProviderConflictError("uq_test"))
         # Conflict-recovery path was rewritten to use the find_by_external_id
         # named query (VEPAGE-1107) instead of provider.list.
         mock_provider.find_using_named_query = AsyncMock(return_value=[existing])
@@ -302,7 +311,7 @@ class TestSourceMessageManagerDelegation:
     async def test_bulk_insert_treats_conflicts_as_no_op(self):
         # First create succeeds, second raises a "conflict" — total inserted = 1.
         mock_provider = MagicMock()
-        mock_provider.create = AsyncMock(side_effect=[{}, Exception("unique constraint violation")])
+        mock_provider.create = AsyncMock(side_effect=[{}, _ProviderConflictError("uq_test")])
 
         with patch(
             "mirix.database.relational_provider.get_relational_provider",
@@ -395,7 +404,7 @@ class TestMemoryCitationManagerDelegation:
     async def test_create_returns_none_on_conflict(self):
         # L3 dedup: provider raises on duplicate (memory_source_id, memory_type, memory_id).
         mock_provider = MagicMock()
-        mock_provider.create = AsyncMock(side_effect=Exception("unique constraint violation"))
+        mock_provider.create = AsyncMock(side_effect=_ProviderConflictError("uq_test"))
 
         with patch(
             "mirix.database.relational_provider.get_relational_provider",
@@ -509,15 +518,21 @@ class TestMemoryCitationManagerDelegation:
 # ---------------------------------------------------------------------------
 
 
-class _FakeServerError(Exception):
-    """Stand-in for an IPSR ServerError (5xx). Has status_code attribute."""
+class _FakeServerError(_ProviderTransientError):
+    """Stand-in for an IPSR ServerError (5xx).
+
+    Post-VEPAGE-1251 §5.6, transient failures arriving at the MIRIX retry
+    helper are already translated to ProviderTransientError by the ECMS
+    provider boundary. The fake subclasses that type so the helper's
+    isinstance check classifies it as transient.
+    """
 
     def __init__(self, status_code: int = 503):
         super().__init__(f"HTTP {status_code}")
         self.status_code = status_code
 
 
-class _FakeUnauthorizedError(Exception):
+class _FakeUnauthorizedError(_ProviderPermanentError):
     """Stand-in for an IPSR UnauthorizedError (401/403). Permanent — must propagate."""
 
     def __init__(self):
@@ -532,7 +547,7 @@ class TestBestEffortCitationWrite:
     async def test_returns_none_silently_on_conflict(self):
         # A conflict (unique constraint hint in message) → return None, no retry.
         mock_provider = MagicMock()
-        mock_provider.create = AsyncMock(side_effect=Exception("unique constraint violation"))
+        mock_provider.create = AsyncMock(side_effect=_ProviderConflictError("uq_test"))
         with (
             patch(
                 "mirix.database.relational_provider.get_relational_provider",
@@ -607,7 +622,7 @@ class TestBestEffortSourceMessageWrite:
         mock_provider.create = AsyncMock(
             side_effect=[
                 {},  # row 0 success
-                Exception("unique constraint violation"),  # row 1 conflict
+                _ProviderConflictError("uq_test"),  # row 1 conflict
                 _FakeUnauthorizedError(),  # row 2 permanent
             ]
         )

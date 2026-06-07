@@ -170,6 +170,18 @@ class ProviderPermanentError(MirixError):
     pass
 
 
+class ProviderNotFoundError(ProviderPermanentError):
+    """Provider call returned 404 / "entity does not exist".
+
+    Subclass of ProviderPermanentError so it classifies the same way at the
+    policy layer, but distinct enough that read paths can convert it to
+    `None` rather than crashing. Translated from IPS-R's
+    ``UnknownEntityError`` at the provider boundary.
+    """
+
+    pass
+
+
 class ProviderConflictError(MirixError):
     """Provider call hit a unique-constraint / duplicate-key conflict.
 
