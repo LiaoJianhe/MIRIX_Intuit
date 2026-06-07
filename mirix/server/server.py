@@ -798,9 +798,12 @@ class AsyncServer(Server):
                 user=user,  # User for read operations (data filtering)
             )
 
-        except Exception as e:
-            logger.error("Error in server._step: %s", e)
-            logger.error(traceback.print_exc())
+        except Exception:
+            # `logger.exception` attaches the traceback automatically; the
+            # previous `logger.error(traceback.print_exc())` was logging
+            # `None` because `print_exc` returns nothing — see noise audit
+            # during VEPAGE-1251 FST validation.
+            logger.exception("Error in server._step")
             raise
         finally:
             logger.debug("Calling step_yield()")

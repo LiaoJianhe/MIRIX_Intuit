@@ -522,13 +522,11 @@ class QueueWorker:
 
         chosen_outcome = outcome or FinalizeOutcome.PERMANENT_FAILURE
         try:
+            # finalize_source itself logs "Finalized memory_source=... outcome=...".
+            # Don't duplicate that line here; the consume-loop context is already
+            # implied by the upstream "Consume loop: ..." error log emitted before
+            # this method is called.
             await MemorySourceManager().finalize_source(source_id, chosen_outcome)
-            logger.info(
-                "Finalized memory_source=%s outcome=%s after a failure on the "
-                "internal consume loop (no redelivery path).",
-                source_id,
-                chosen_outcome.value,
-            )
         except Exception:
             # finalize_source already catches its own DB failures, but
             # defense-in-depth: the consume loop must NEVER raise here. The
