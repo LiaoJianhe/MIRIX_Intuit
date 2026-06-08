@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from mirix.schemas.agent import AgentType
 from mirix.services.agent_manager import AgentManager
 
 
@@ -167,3 +168,128 @@ async def test_no_relational_provider_falls_back_to_list_agents():
 
     la.assert_awaited_once()
     assert result is sentinel
+
+
+# --- VEPAGE-1228 (reopened): positional / non-dict wire rows ---------------
+#
+# The grouping originally assumed every row was a dict and did
+# ``row.get("agent_id")``. Against the *deployed* NQ via the local IPS-R SDK
+# the joined multi-column projection comes back as POSITIONAL LISTS, not named
+# dicts, so ``.get`` blew up with ``AttributeError: 'list' object has no
+# attribute 'get'`` on every save. The fix passes a ``result_set_entity_class``
+# so the relational provider hydrates positional rows into dicts (the same
+# positional-zip contract ECMS's async_ips_relational_provider uses), keyed by
+# the dataclass field order, which must match the NQ SELECT order.
+
+# Authoritative NQ SELECT order (ipsr-mgd-model
+# agent_manager.list_agents_with_tools_by_parent).
+_NQ_COLUMN_ORDER = [
+    "agent_id",
+    "agent_type",
+    "agent_name",
+    "agent_description",
+    "agent_llm_config",
+    "agent_embedding_config",
+    "agent_system",
+    "agent_tool_rules",
+    "agent_mcp_tools",
+    "agent_parent_id",
+    "agent_organization_id",
+    "agent_owner",
+    "agent_created_at",
+    "agent_updated_at",
+    "tool_id",
+    "tool_name",
+    "tool_description",
+    "tool_json_schema",
+    "tool_type",
+    "tool_organization_id",
+]
+
+
+def _positional_row(agent_id, agent_type, tool_id, tool_name):
+    """One flat (agent, tool) join row as POSITIONAL values, in NQ SELECT
+    order — the shape the deployed NQ returns through the local IPS-R SDK."""
+    d = _agent_row(agent_id, agent_type, tool_id, tool_name)
+    return [d[col] for col in _NQ_COLUMN_ORDER]
+
+
+def _provider_that_hydrates_positional_rows(positional_rows):
+    """A fake relational provider mirroring ECMS
+    async_ips_relational_provider.find_using_named_query(skip_entity_mapping=
+    True): positional list rows are zipped into dicts ONLY when a
+    ``result_set_entity_class`` is supplied (its field order is contractual
+    with the NQ projection order). With no class, rows pass through as lists.
+    """
+    import dataclasses
+
+    async def _fake(table, query_name, **kwargs):
+        cls = kwargs.get("result_set_entity_class")
+        if cls is None:
+            return list(positional_rows)
+        fields = list(getattr(cls, "__dataclass_fields__", {}).keys())
+        hydrated = []
+        for row in positional_rows:
+            positional = row if isinstance(row, list) else [row]
+            kw = dict(zip(fields, positional))
+            hydrated.append(dataclasses.asdict(cls(**kw)))
+        return hydrated
+
+    rp = AsyncMock()
+    rp.find_using_named_query = AsyncMock(side_effect=_fake)
+    return rp
+
+
+@pytest.mark.asyncio
+async def test_positional_rows_are_grouped_without_attribute_error():
+    """Repro of the reopened defect: deployed-NQ rows arrive positional, not as
+    dicts. Grouping must still produce agents with their tools.
+    """
+    am = AgentManager()
+    fake_rp = _provider_that_hydrates_positional_rows(
+        [
+            _positional_row("agent-epi", "episodic_memory_agent", "tool-aaaaaaaa", "episodic_memory_insert"),
+            _positional_row("agent-epi", "episodic_memory_agent", "tool-bbbbbbbb", "conversation_search"),
+            _positional_row("agent-sem", "semantic_memory_agent", "tool-cccccccc", "semantic_memory_insert"),
+        ]
+    )
+
+    with patch(
+        "mirix.database.relational_provider.get_relational_provider",
+        return_value=fake_rp,
+    ):
+        agents = await am.list_agents_with_tools(parent_id="meta-1", actor=_make_actor())
+
+    assert {a.id for a in agents} == {"agent-epi", "agent-sem"}
+    by_id = {a.id: a for a in agents}
+    assert {t.name for t in by_id["agent-epi"].tools} == {
+        "episodic_memory_insert",
+        "conversation_search",
+    }
+    assert by_id["agent-epi"].llm_config.model == "gpt-4o-mini"
+    assert by_id["agent-sem"].agent_type == AgentType.semantic_memory_agent
+
+
+@pytest.mark.asyncio
+async def test_passes_result_set_entity_class_to_named_query():
+    """The grouping must delegate positional-row hydration to the provider by
+    supplying a ``result_set_entity_class`` whose field order matches the NQ
+    SELECT order — otherwise positional rows reach the grouping as lists.
+    """
+    am = AgentManager()
+    fake_rp = _provider_that_hydrates_positional_rows(
+        [_positional_row("agent-core", "core_memory_agent", None, None)]
+    )
+
+    with patch(
+        "mirix.database.relational_provider.get_relational_provider",
+        return_value=fake_rp,
+    ):
+        await am.list_agents_with_tools(parent_id="meta-1", actor=_make_actor())
+
+    cls = fake_rp.find_using_named_query.await_args.kwargs.get("result_set_entity_class")
+    assert cls is not None, "list_agents_with_tools must pass result_set_entity_class"
+    field_order = list(getattr(cls, "__dataclass_fields__", {}).keys())
+    assert field_order == _NQ_COLUMN_ORDER, (
+        "dataclass field order must match the NQ SELECT projection order"
+    )
