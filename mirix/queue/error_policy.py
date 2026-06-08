@@ -18,9 +18,11 @@ CONTRACT:
 
 * mark_inner_exhausted(exc) tags a propagated exception so
   process_with_policy returns TRANSIENT_EXHAUSTED after exactly one
-  attempt instead of running the full backoff cycle. Inner-retry tiers
-  (_get_ai_reply, provider_write_retry.retry_transient) use this to kill
-  the inner x whole-step multiplication.
+  attempt instead of running the full backoff cycle. Every inner-retry
+  tier (LLM via _get_ai_reply, SQLAlchemy via retry_db_operation /
+  transaction_retry, IPS-R via event_retry.retry_with_backoff, IPS-Search
+  via _post_json) tags on exhaustion so the whole-step loop doesn't
+  multiply.
 
 * Origin-split for pure-Python bug shapes: AttributeError / KeyError /
   TypeError / IndexError / NameError with no provider frame in the

@@ -130,7 +130,6 @@ class MemorySourceManager:
         from mirix.database.provider_write_retry import (
             is_conflict,
             is_transient,
-            retry_transient,
         )
         from mirix.database.relational_provider import get_relational_provider
 
@@ -160,10 +159,9 @@ class MemorySourceManager:
                 "is_deleted": False,
             }
             try:
-                result = await retry_transient(
-                    lambda: provider.create("memory_sources", data_dict),
-                    op=f"memory_sources.create({memory_source_id})",
-                )
+                # The relational provider has its own inner-retry tier
+                # (event_retry.retry_with_backoff) — no extra wrapper here.
+                result = await provider.create("memory_sources", data_dict)
                 return PydanticMemorySource(**result)
             except Exception as e:
                 if not is_conflict(e):

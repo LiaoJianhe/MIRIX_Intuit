@@ -191,7 +191,6 @@ class SourceMessageManager:
         from mirix.database.provider_write_retry import (
             is_conflict,
             is_transient,
-            retry_transient,
         )
         from mirix.database.relational_provider import get_relational_provider
         from mirix.observability.skip_spans import emit_idempotency_skip_span
@@ -208,10 +207,9 @@ class SourceMessageManager:
                     "updated_at": row["updated_at"].isoformat(),
                 }
                 try:
-                    await retry_transient(
-                        lambda payload=row_payload: provider.create("source_messages", payload),
-                        op=f"source_messages.create({row['content_hash'][:8]}...)",
-                    )
+                    # The relational provider has its own inner-retry tier
+                    # (event_retry.retry_with_backoff) — no extra wrapper here.
+                    await provider.create("source_messages", row_payload)
                     inserted += 1
                 except Exception as e:
                     if is_conflict(e):

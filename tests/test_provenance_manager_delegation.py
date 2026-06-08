@@ -104,12 +104,16 @@ class TestMemorySourceManagerDelegation:
             assert out.id == "src-aaaaaaaa"
 
     @pytest.mark.asyncio
-    async def test_create_falls_back_to_lookup_on_conflict(self):
+    async def test_create_on_conflict_returns_none_for_dedup(self):
+        """On conflict the manager looks up the pre-existing record (defensive
+        check that something actually exists) and returns None to signal
+        "deduped" to the caller. It must NOT return the pre-existing row —
+        the caller (Agent._persist_memory_source) treats None as "skip this
+        save," and returning the pre-existing row would make the worker
+        re-run the pipeline and produce duplicate memories."""
         existing = _memory_source_row()
         mock_provider = MagicMock()
         mock_provider.create = AsyncMock(side_effect=_ProviderConflictError("uq_test"))
-        # Conflict-recovery path was rewritten to use the find_by_external_id
-        # named query (VEPAGE-1107) instead of provider.list.
         mock_provider.find_using_named_query = AsyncMock(return_value=[existing])
 
         with patch(
@@ -125,7 +129,7 @@ class TestMemorySourceManagerDelegation:
                 external_id="ext-1",
             )
             mock_provider.find_using_named_query.assert_awaited_once()
-            assert out.id == "src-aaaaaaaa"
+            assert out is None
 
     @pytest.mark.asyncio
     async def test_get_by_id_delegates_to_provider(self):
@@ -567,9 +571,16 @@ class TestBestEffortCitationWrite:
             skip_span.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_retries_then_returns_none_with_skip_span_on_transient(self):
-        # 3 ServerErrors → exhaust retries → log + skip-span + return None.
+    async def test_returns_none_with_skip_span_on_transient(self):
+        """An exhausted ProviderTransientError (from the provider's own
+        inner-retry tier exhausting) is classified transient at the
+        manager; the manager logs + skip-spans + returns None so the
+        caller's memory write still stands. The manager itself doesn't
+        retry — that's the provider's job."""
         mock_provider = MagicMock()
+        # ProviderTransientError stands in for "provider's retry budget
+        # exhausted." `_FakeServerError` is a subclass of it in this
+        # test file.
         mock_provider.create = AsyncMock(side_effect=_FakeServerError(503))
         with (
             patch(
@@ -577,7 +588,6 @@ class TestBestEffortCitationWrite:
                 return_value=mock_provider,
             ),
             patch("mirix.observability.skip_spans.emit_idempotency_skip_span") as skip_span,
-            patch("asyncio.sleep", new=AsyncMock()),
         ):
             mgr = _memory_citation_mgr()
             out = await mgr.create(
@@ -587,7 +597,7 @@ class TestBestEffortCitationWrite:
                 citation_type="created",
             )
             assert out is None
-            assert mock_provider.create.await_count == 3  # retried
+            assert mock_provider.create.await_count == 1  # manager doesn't retry
             skip_span.assert_called_once()
             kwargs = skip_span.call_args.kwargs
             assert kwargs["reason"] == "citation-write-failed"
@@ -642,15 +652,15 @@ class TestBestEffortSourceMessageWrite:
                 )
 
     @pytest.mark.asyncio
-    async def test_transient_row_retries_then_emits_skip_span(self):
-        # Row 0: 3x ServerError → exhaust retries → skip-span + continue.  Row 1: success.
+    async def test_transient_row_emits_skip_span(self):
+        """Row 0 fails with ProviderTransientError (provider's retry tier
+        already exhausted); manager logs + skip-spans + continues with
+        row 1. Manager itself doesn't retry — that's the provider's job."""
         mock_provider = MagicMock()
         mock_provider.create = AsyncMock(
             side_effect=[
-                _FakeServerError(503),
-                _FakeServerError(503),
-                _FakeServerError(503),
-                {},  # row 1 success after row 0 retries exhausted
+                _FakeServerError(503),  # row 0: provider exhausted -> skip
+                {},                     # row 1: success
             ]
         )
         with (
@@ -659,7 +669,6 @@ class TestBestEffortSourceMessageWrite:
                 return_value=mock_provider,
             ),
             patch("mirix.observability.skip_spans.emit_idempotency_skip_span") as skip_span,
-            patch("asyncio.sleep", new=AsyncMock()),
         ):
             mgr = _source_message_mgr()
             inserted = await mgr.bulk_insert(
@@ -670,6 +679,7 @@ class TestBestEffortSourceMessageWrite:
                 memory_source_id="src-1",
             )
             assert inserted == 1  # only row 1 succeeded
+            assert mock_provider.create.await_count == 2  # one call per row, no retries
             assert skip_span.call_count == 1
             assert skip_span.call_args.kwargs["reason"] == "source-message-write-failed"
 
@@ -678,15 +688,16 @@ class TestBestEffortMemorySourceWrite:
     """T6 (VEPAGE-1026): MemorySourceManager.create retries transient + propagates permanent."""
 
     @pytest.mark.asyncio
-    async def test_retries_then_raises_on_transient(self):
+    async def test_raises_on_exhausted_transient(self):
+        """An exhausted ProviderTransientError from the provider's retry
+        tier propagates out of the memory_source manager (unlike citation
+        / source-message writes which best-effort skip). Manager itself
+        doesn't retry."""
         mock_provider = MagicMock()
         mock_provider.create = AsyncMock(side_effect=_FakeServerError(503))
-        with (
-            patch(
-                "mirix.database.relational_provider.get_relational_provider",
-                return_value=mock_provider,
-            ),
-            patch("asyncio.sleep", new=AsyncMock()),
+        with patch(
+            "mirix.database.relational_provider.get_relational_provider",
+            return_value=mock_provider,
         ):
             mgr = _memory_source_mgr()
             with pytest.raises(_FakeServerError):
@@ -697,7 +708,7 @@ class TestBestEffortMemorySourceWrite:
                     organization_id="org-1",
                     external_id="ext-1",
                 )
-            assert mock_provider.create.await_count == 3
+            assert mock_provider.create.await_count == 1  # manager doesn't retry
 
     @pytest.mark.asyncio
     async def test_propagates_permanent_error_immediately(self):
