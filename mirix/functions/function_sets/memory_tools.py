@@ -16,6 +16,7 @@ from mirix.observability.context import (
 )
 from mirix.observability.langfuse_client import get_langfuse_client
 from mirix.observability.skip_spans import emit_idempotency_skip_span
+from mirix.testing import fault_injection
 from mirix.schemas.episodic_memory import EpisodicEventForLLM
 from mirix.schemas.knowledge_vault import KnowledgeVaultItemBase
 from mirix.schemas.mirix_message_content import TextContent
@@ -983,6 +984,19 @@ async def trigger_memory_update(self: "Agent", user_message: object, memory_type
                     user_id=parent_trace_context.get("user_id"),
                     session_id=parent_trace_context.get("session_id"),
                 )
+
+            # Test-only fault injection (inert in prod): a `subagent` directive
+            # scoped to a memory_type fails exactly one sub-agent in the fan-out
+            # (shape subagent_permanent -> ProviderPermanentError). The other
+            # sub-agents still run and write their memories; the reducer
+            # (_decide_step_outcome_from_sub_agent_results) then re-raises the
+            # permanent one, so the step is PERMANENT with partial writes —
+            # idempotent on whole-step retry.
+            fault_injection.maybe_raise(
+                "subagent",
+                source_key=getattr(self, "memory_source_id", None),
+                tool=memory_type,
+            )
 
             agent_class = memory_type_to_agent_class[memory_type]
             agent_type_str = f"{memory_type}_memory_agent"
