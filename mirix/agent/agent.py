@@ -1349,6 +1349,33 @@ class Agent(BaseAgent):
             if self.agent_state.is_type(AgentType.meta_memory_agent) and self.memory_source_id:
                 self._source_deduped = False
 
+                # Skip already-processed sources (redelivery). BEFORE persist so
+                # a completed redelivery short-circuits without re-writing
+                # source_messages or injecting a fault (resolve is below).
+                async with timed_span(
+                    "Check Source Processing State",
+                    metadata={"memory_source_id": self.memory_source_id},
+                ):
+                    source = await self.memory_source_manager.get_by_id(self.memory_source_id)
+                if source and source.processing_complete:
+                    logger.info("Source %s already processed, skipping", self.memory_source_id)
+                    emit_idempotency_skip_span(
+                        name="Idempotency Skip: processing complete",
+                        reason="processing-complete",
+                        metadata={"memory_source_id": self.memory_source_id},
+                    )
+                    return MirixUsageStatistics(step_count=0)
+
+                # Test-only fault injection (inert in prod). Resolved BEFORE
+                # persist so a directive scoped to the source_messages write
+                # (which happens in persist, incl. the dedup/conflict path) can
+                # fire. Completed sources already returned above, so they never
+                # inject; not-yet-complete sources do. Only registers, never
+                # fires; idempotent; no-op when disabled.
+                fault_injection.resolve_directives(
+                    self.memory_source_id, getattr(self, "source_metadata", None)
+                )
+
                 async with timed_span(
                     "Persist Memory Source",
                     metadata={"memory_source_id": self.memory_source_id},
@@ -1369,32 +1396,6 @@ class Agent(BaseAgent):
                         metadata={"memory_source_id": self.memory_source_id},
                     )
                     return MirixUsageStatistics(step_count=0)
-
-                # Skip processing if this source was already fully processed (redelivery case).
-                async with timed_span(
-                    "Check Source Processing State",
-                    metadata={"memory_source_id": self.memory_source_id},
-                ):
-                    source = await self.memory_source_manager.get_by_id(self.memory_source_id)
-                if source and source.processing_complete:
-                    logger.info("Source %s already processed, skipping", self.memory_source_id)
-                    emit_idempotency_skip_span(
-                        name="Idempotency Skip: processing complete",
-                        reason="processing-complete",
-                        metadata={"memory_source_id": self.memory_source_id},
-                    )
-                    return MirixUsageStatistics(step_count=0)
-
-                # Test-only fault injection (inert in prod): register per-source
-                # fault directives carried in source_metadata. Placed AFTER the
-                # dedup / processing-complete short-circuits so a redelivery of
-                # an already-processed source never injects. No-op when injection
-                # is disabled. The active-source ContextVar that the provider
-                # hooks read is set/cleared at the per-save boundary in
-                # dispatch_save, not here — so it can't go stale across messages.
-                fault_injection.resolve_directives(
-                    self.memory_source_id, getattr(self, "source_metadata", None)
-                )
 
                 # Dispatch summary generation in parallel with the memory sub-agents.
                 # Awaited before mark_processing_complete; on failure the exception

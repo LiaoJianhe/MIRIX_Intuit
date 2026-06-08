@@ -17,6 +17,7 @@ from typing import Any, AsyncIterator, Dict, Optional, cast
 from mirix.log import get_logger
 from mirix.observability.context import (
     current_observation_id,
+    get_tid,
     get_trace_context,
     mark_observation_as_child,
 )
@@ -55,12 +56,24 @@ async def timed_span(
     if parent_span_id:
         trace_context_dict["parent_span_id"] = parent_span_id
 
+    # Stamp the TID into span metadata so the Langfuse OTel export emits
+    # ``langfuse.observation.metadata.tid``. Consumers that filter spans by TID
+    # (the full-stack-test span capture) would otherwise drop every nested
+    # worker span — only the root spans that already stamp the tid (HTTP-entry
+    # trace, worker "Meta Agent" observation) would survive. Mirrors the worker's
+    # Meta Agent span metadata. Omitted when there's no active TID so we don't
+    # write a misleading ``tid=None``.
+    span_metadata: Dict[str, Any] = dict(metadata or {})
+    tid = get_tid()
+    if tid:
+        span_metadata.setdefault("tid", tid)
+
     try:
         cm = langfuse.start_as_current_observation(
             name=name,
             as_type="span",
             trace_context=cast(TraceContext, trace_context_dict),
-            metadata=metadata or {},
+            metadata=span_metadata,
         )
     except Exception as e:
         # If span creation itself fails, don't lose the work.

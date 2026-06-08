@@ -439,18 +439,43 @@ class MemorySourceManager:
           writers always converge to the same value
         - SQLAlchemy only UPDATEs dirty columns, so this won't overwrite
           concurrent changes to other fields (e.g. summary)
+
+        Tolerant of a missing row: when a source was deduped (external_id /
+        batch_hash conflict, either caught up front or having lost an
+        INSERT ... ON CONFLICT race) the minted id never became a persisted
+        row, so there is nothing to mark — the *winning* row from the prior
+        submission marks itself complete. The provider raises
+        ProviderNotFoundError for a missing row; we swallow it as a benign
+        no-op (DEBUG) so a deduped source doesn't emit a spurious finalize
+        ERROR. Real update failures still propagate.
         """
         # Relational provider delegation (partial update)
         from mirix.database.relational_provider import get_relational_provider
+        from mirix.errors import ProviderNotFoundError
+        from mirix.orm.errors import NoResultFound
 
         provider = get_relational_provider()
         if provider:
-            await provider.update("memory_sources", memory_source_id, {"processing_complete": True})
+            try:
+                await provider.update("memory_sources", memory_source_id, {"processing_complete": True})
+            except ProviderNotFoundError:
+                logger.debug(
+                    "mark_processing_complete: memory source %s not found (deduped) — no-op",
+                    memory_source_id,
+                )
+                return
             logger.info("Marked memory source %s as processing complete", memory_source_id)
             return
 
         async with self.session_maker() as session:
-            record = await MemorySourceModel.read(db_session=session, identifier=memory_source_id)
+            try:
+                record = await MemorySourceModel.read(db_session=session, identifier=memory_source_id)
+            except NoResultFound:
+                logger.debug(
+                    "mark_processing_complete: memory source %s not found (deduped) — no-op",
+                    memory_source_id,
+                )
+                return
             record.processing_complete = True
             await record.update_with_redis(session)
             logger.info("Marked memory source %s as processing complete", memory_source_id)
