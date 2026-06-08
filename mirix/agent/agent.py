@@ -14,7 +14,6 @@ from mirix.agent.tool_validators import validate_tool_args
 from mirix.constants import (
     CHAINING_FOR_MEMORY_UPDATE,
     CLI_WARNING_PREFIX,
-    ERROR_MESSAGE_PREFIX,
     FIRST_MESSAGE_ATTEMPTS,
     FUNC_FAILED_HEARTBEAT_MESSAGE,
     HYBRID_READ_WINDOW_SECONDS,
@@ -28,7 +27,12 @@ from mirix.constants import (
     REQ_HEARTBEAT_MESSAGE,
 )
 from mirix.embeddings import embedding_model
-from mirix.errors import ContextWindowExceededError
+from mirix.errors import (
+    ContextWindowExceededError,
+    CorrectableToolError,
+    LLMBadResponseShapeError,
+    LLMChainingExhaustedError,
+)
 from mirix.functions.functions import get_function_from_module
 from mirix.helpers import ToolRulesSolver
 from mirix.helpers.message_helpers import prepare_input_message_create
@@ -491,98 +495,93 @@ class Agent(BaseAgent):
                 continue  # Don't include 'self' in trace
             args_for_trace[key] = str(value)
 
-        async def _execute_tool_inner() -> Tuple[str, bool]:
-            """Inner function to execute tool. Returns (response, is_error)."""
+        async def _execute_tool_inner() -> str:
+            """Inner function to execute tool. Returns the tool's response string.
+
+            Exceptions are NOT caught here. The outer `_handle_ai_response`
+            catches `CorrectableToolError` exclusively for the bounded
+            re-prompt path (LLM produced bad args / malformed JSON / failed
+            validation). Everything else (DB / provider / code bug)
+            propagates out so `process_with_policy` can classify it.
+            """
             nonlocal function_args  # Allow modification of outer function_args
-            function_response = ""
-            is_error = False
 
-            try:
-                _preprocess_episodic_tool_args(
-                    function_name,
-                    function_args,
-                    timezone_str=self.user.timezone,
-                    occurred_at_override=getattr(self, "occurred_at", None),
-                )
+            _preprocess_episodic_tool_args(
+                function_name,
+                function_args,
+                timezone_str=self.user.timezone,
+                occurred_at_override=getattr(self, "occurred_at", None),
+            )
 
+            if function_name in [
+                "search_in_memory",
+                "list_memory_within_timerange",
+            ]:
+                function_args["timezone_str"] = self.user.timezone
+
+            if target_mirix_tool.tool_type == ToolType.MIRIX_CORE:
+                # base tools are allowed to access the `Agent` object and run on the database
+                callable_func = get_function_from_module(MIRIX_CORE_TOOL_MODULE_NAME, function_name)
+                function_args["self"] = self  # need to attach self to arg since it's dynamically linked
+                if function_name in ["send_message", "send_intermediate_message"]:
+                    agent_state_copy = self.agent_state.__deepcopy__()
+                    function_args["agent_state"] = (
+                        agent_state_copy  # need to attach self to arg since it's dynamically linked
+                    )
+                function_response = await callable_func(**function_args)
+                if function_name == "send_intermediate_message":
+                    # send intermediate message to the user
+                    if display_intermediate_message:
+                        display_intermediate_message("response", function_args["message"])
+
+            elif target_mirix_tool.tool_type == ToolType.MIRIX_MEMORY_CORE:
+                callable_func = get_function_from_module(MIRIX_MEMORY_TOOL_MODULE_NAME, function_name)
+                if function_name in ["core_memory_append", "core_memory_rewrite"]:
+                    from copy import deepcopy
+
+                    memory_copy = deepcopy(self.blocks_in_memory)
+                    function_args["blocks_in_memory"] = memory_copy
                 if function_name in [
-                    "search_in_memory",
-                    "list_memory_within_timerange",
+                    "check_episodic_memory",
+                    "check_semantic_memory",
                 ]:
                     function_args["timezone_str"] = self.user.timezone
+                function_args["self"] = self
 
-                if target_mirix_tool.tool_type == ToolType.MIRIX_CORE:
-                    # base tools are allowed to access the `Agent` object and run on the database
-                    callable_func = get_function_from_module(MIRIX_CORE_TOOL_MODULE_NAME, function_name)
-                    function_args["self"] = self  # need to attach self to arg since it's dynamically linked
-                    if function_name in ["send_message", "send_intermediate_message"]:
-                        agent_state_copy = self.agent_state.__deepcopy__()
-                        function_args["agent_state"] = (
-                            agent_state_copy  # need to attach self to arg since it's dynamically linked
-                        )
-                    function_response = await callable_func(**function_args)
-                    if function_name == "send_intermediate_message":
-                        # send intermediate message to the user
-                        if display_intermediate_message:
-                            display_intermediate_message("response", function_args["message"])
+                function_response = await callable_func(**function_args)
+                if function_name in ["core_memory_append", "core_memory_rewrite"]:
+                    await self.update_memory_if_changed(memory_copy)
 
-                elif target_mirix_tool.tool_type == ToolType.MIRIX_MEMORY_CORE:
-                    callable_func = get_function_from_module(MIRIX_MEMORY_TOOL_MODULE_NAME, function_name)
-                    if function_name in ["core_memory_append", "core_memory_rewrite"]:
-                        from copy import deepcopy
+            elif target_mirix_tool.tool_type == ToolType.MIRIX_EXTRA:
+                callable_func = get_function_from_module(MIRIX_EXTRA_TOOL_MODULE_NAME, function_name)
+                function_args["self"] = self  # need to attach self to arg since it's dynamically linked
+                function_response = await callable_func(**function_args)
 
-                        memory_copy = deepcopy(self.blocks_in_memory)
-                        function_args["blocks_in_memory"] = memory_copy
-                    if function_name in [
-                        "check_episodic_memory",
-                        "check_semantic_memory",
-                    ]:
-                        function_args["timezone_str"] = self.user.timezone
-                    function_args["self"] = self
+            elif target_mirix_tool.tool_type == ToolType.USER_DEFINED:
+                agent_state_copy = self.agent_state.__deepcopy__()
 
-                    function_response = await callable_func(**function_args)
-                    if function_name in ["core_memory_append", "core_memory_rewrite"]:
-                        await self.update_memory_if_changed(memory_copy)
+                # Execute user-defined tool in sandbox for security
+                sandbox = ToolExecutionSandbox(
+                    tool_name=function_name,
+                    args=function_args,
+                    actor=self.actor,
+                    tool_object=target_mirix_tool,
+                )
+                sandbox_result = await sandbox.run(agent_state=agent_state_copy)
+                function_response = sandbox_result.func_return
 
-                elif target_mirix_tool.tool_type == ToolType.MIRIX_EXTRA:
-                    callable_func = get_function_from_module(MIRIX_EXTRA_TOOL_MODULE_NAME, function_name)
-                    function_args["self"] = self  # need to attach self to arg since it's dynamically linked
-                    function_response = await callable_func(**function_args)
-
-                elif target_mirix_tool.tool_type == ToolType.USER_DEFINED:
-                    agent_state_copy = self.agent_state.__deepcopy__()
-
-                    # Execute user-defined tool in sandbox for security
-                    sandbox = ToolExecutionSandbox(
-                        tool_name=function_name,
-                        args=function_args,
-                        actor=self.actor,
-                        tool_object=target_mirix_tool,
-                    )
-                    sandbox_result = await sandbox.run(agent_state=agent_state_copy)
-                    function_response = sandbox_result.func_return
-
-                elif target_mirix_tool.tool_type == ToolType.MIRIX_MCP:
-                    function_response = await self._execute_mcp_tool(
-                        function_name,
-                        function_args,
-                        target_mirix_tool,
-                        request_user_confirmation,
-                    )
-
-                else:
-                    raise ValueError(f"Tool type {target_mirix_tool.tool_type} not supported")
-
-            except Exception as e:
-                # Need to catch error here, or else truncation wont happen
-                is_error = True
-                function_response = get_friendly_error_msg(
-                    function_name=function_name,
-                    exception_name=type(e).__name__,
-                    exception_message=str(e),
+            elif target_mirix_tool.tool_type == ToolType.MIRIX_MCP:
+                function_response = await self._execute_mcp_tool(
+                    function_name,
+                    function_args,
+                    target_mirix_tool,
+                    request_user_confirmation,
                 )
 
-            return function_response, is_error
+            else:
+                raise ValueError(f"Tool type {target_mirix_tool.tool_type} not supported")
+
+            return function_response
 
         # Execute with Langfuse tracing if available
         if langfuse and trace_id:
@@ -597,6 +596,15 @@ class Agent(BaseAgent):
 
             from mirix.observability.context import current_observation_id, set_trace_context
 
+            # The fallback below is for the case where the langfuse SDK
+            # itself fails *before* the tool body executes (so the tool
+            # never ran). Once we are about to invoke the body, set
+            # `inner_attempted=True` so any exception from the body — or
+            # from the langfuse machinery after the body — does NOT trigger
+            # a silent re-run of the tool. Non-correctable exceptions
+            # raised by the body propagate out so `process_with_policy`
+            # can classify them rather than being silently swallowed.
+            inner_attempted = False
             try:
                 with langfuse.start_as_current_observation(
                     name=f"tool: {function_name}",
@@ -626,31 +634,46 @@ class Agent(BaseAgent):
                             user_id=trace_context.get("user_id"),
                             session_id=trace_context.get("session_id"),
                         )
+                    inner_attempted = True
                     try:
-                        function_response, is_error = await _execute_tool_inner()
+                        function_response = await _execute_tool_inner()
                     finally:
                         # Restore the prior observation id (set_trace_context ignores
                         # a falsy observation_id, so set the ContextVar directly to
                         # also handle the None / no-parent case correctly).
                         current_observation_id.set(parent_span_id)
 
-                    span.update(
-                        output={
-                            "response": str(function_response),
-                            "is_error": is_error,
-                        },
-                        metadata={
-                            "tool_type": str(target_mirix_tool.tool_type),
-                            "tool_name": function_name,
-                            "is_error": is_error,
-                        },
-                        level="ERROR" if is_error else "DEFAULT",
-                    )
+                    try:
+                        # We only reach here on a clean run — _execute_tool_inner
+                        # either returns the response string or raises (which
+                        # propagates past the span.update call).
+                        span.update(
+                            output={"response": str(function_response)},
+                            metadata={
+                                "tool_type": str(target_mirix_tool.tool_type),
+                                "tool_name": function_name,
+                            },
+                        )
+                    except Exception as span_exc:
+                        # span.update failure is observability-only — log at
+                        # WARNING so a sustained tracing problem is visible
+                        # without taking the save path down.
+                        self.logger.warning("Langfuse span.update failed: %s", span_exc)
             except Exception as e:
-                self.logger.debug(f"Langfuse tool execution trace failed: {e}")
-                function_response, _ = await _execute_tool_inner()
+                if inner_attempted:
+                    # Tool body already ran (and may have raised). Do NOT
+                    # re-execute; propagate the original exception unchanged.
+                    raise
+                # Langfuse SDK failed before the tool body ran — fall back
+                # to running without tracing. Sustained breakage here means
+                # we're losing observability across many saves; log at
+                # WARNING so it's not silent.
+                self.logger.warning(
+                    "Langfuse tool execution trace failed before body ran: %s", e
+                )
+                function_response = await _execute_tool_inner()
         else:
-            function_response, _ = await _execute_tool_inner()
+            function_response = await _execute_tool_inner()
 
         return function_response
 
@@ -757,24 +780,30 @@ class Agent(BaseAgent):
                     )
                 log_telemetry(self.logger, "_get_ai_reply create finish")
 
-                # Validate the response shape. These ValueErrors are caught
-                # below and classified as Transient (provider quirks worth
-                # retrying), not Permanent.
+                # Validate the response shape. LLMBadResponseShapeError is in
+                # _TRANSIENT_TYPES, so the catch below + classify() treat
+                # these as provider quirks worth retrying (not as code bugs).
                 if len(response.choices) == 0 or response.choices[0] is None:
-                    raise ValueError(f"API call returned an empty message: {response}")
+                    raise LLMBadResponseShapeError(
+                        f"API call returned an empty message: {response}"
+                    )
 
                 for choice in response.choices:
                     if choice.message.content == "" and len(choice.message.tool_calls) == 0:
-                        raise ValueError(f"API call returned an empty message: {response}")
+                        raise LLMBadResponseShapeError(
+                            f"API call returned an empty message: {response}"
+                        )
 
                 if response.choices[0].finish_reason not in [
                     "stop",
                     "function_call",
                     "tool_calls",
                 ]:
-                    # "length" historically retried; treat the same way via ValueError
-                    # so the unified classifier handles it.
-                    raise ValueError(f"Bad finish reason from API: {response.choices[0].finish_reason}")
+                    # "length" finish_reason historically retried — same
+                    # classification path as the other shape failures.
+                    raise LLMBadResponseShapeError(
+                        f"Bad finish reason from API: {response.choices[0].finish_reason}"
+                    )
 
                 log_telemetry(self.logger, "_handle_ai_response finish")
                 return response
@@ -793,7 +822,12 @@ class Agent(BaseAgent):
                     )
                     raise
                 if attempt >= max_attempts:
-                    # Budget exhausted on a Transient. Let the outer layer decide.
+                    # Budget exhausted on a Transient. Tag with the inner-
+                    # exhausted marker so process_with_policy doesn't add
+                    # another whole-step retry cycle on top — that would
+                    # multiply inner × whole-step attempts (an exhausted
+                    # 3-tier inner × 3-tier whole-step = 9 LLM calls per
+                    # save under a sustained 429).
                     log_telemetry(self.logger, "_get_ai_reply transient exhausted")
                     self.logger.warning(
                         "[Mirix.Agent.%s] _get_ai_reply: transient retries exhausted after %d attempts: %s",
@@ -801,7 +835,9 @@ class Agent(BaseAgent):
                         max_attempts + 1,
                         f"{type(exc).__name__}: {exc!r}",
                     )
-                    raise
+                    from mirix.queue.error_policy import mark_inner_exhausted
+
+                    raise mark_inner_exhausted(exc)
                 delay = min(base * (2**attempt), cap)
                 printv(
                     f"[Mirix.Agent.{self.agent_state.name}] WARNING: Attempt {attempt + 1} failed: "
@@ -934,117 +970,98 @@ class Agent(BaseAgent):
                 tool_call_id = tool_call.id
                 function_call = tool_call.function
                 function_name = function_call.name
+                function_args = {}  # Populated below; ensured set for the except cleanup.
 
                 printv(
                     f"[Mirix.Agent.{self.agent_state.name}] INFO: Processing tool call {tool_call_idx + 1}/{len(response_message.tool_calls)}: {function_name} with tool_call_id: {tool_call_id}"
                 )
 
-                # Failure case 1: function name is wrong (not in agent_state.tools)
-                target_mirix_tool = None
-                for t in self.agent_state.tools:
-                    if t.name == function_name:
-                        target_mirix_tool = t
-
-                if not target_mirix_tool:
-                    error_msg = f"No function named {function_name}"
-                    function_response = package_function_response(False, error_msg)
-                    messages.append(
-                        Message.dict_to_message(
-                            agent_id=self.agent_state.id,
-                            model=self.model,
-                            openai_message_dict={
-                                "role": "tool",
-                                "name": function_name,
-                                "content": function_response,
-                                "tool_call_id": tool_call_id,
-                            },
-                        )
-                    )  # extend conversation with function response
-                    self.interface.function_message(f"Error: {error_msg}", msg_obj=messages[-1])
-                    overall_function_failed = True
-                    continue  # Continue with next tool call
-
-                # Failure case 2: function name is OK, but function args are bad JSON
+                # Every per-tool-call failure mode that the LLM can self-correct
+                # on a re-prompt is funneled through `CorrectableToolError`:
+                # unknown tool name, malformed JSON args, validation failure,
+                # and anything raised by the tool body that subclasses this
+                # type. The single `except` below converts the exception to
+                # the tool-role message the LLM reads next iteration and flags
+                # function_failed so the meta-loop re-prompts.
+                #
+                # Anything else (DB blip, provider 503, AttributeError, code
+                # bug) is intentionally NOT caught here — it propagates out of
+                # `_handle_ai_response` -> `step()` so `process_with_policy`
+                # sees the typed exception and classifies it. Without this
+                # rule, real bugs get turned into friendly strings that make
+                # the source appear "complete" (silent data loss).
                 try:
-                    raw_function_args = function_call.arguments
-                    function_args = parse_json(raw_function_args)
-                except Exception:
-                    error_msg = (
-                        f"Error parsing JSON for function '{function_name}' arguments: {function_call.arguments}"
-                    )
-                    function_response = package_function_response(False, error_msg)
-                    messages.append(
-                        Message.dict_to_message(
-                            agent_id=self.agent_state.id,
-                            model=self.model,
-                            openai_message_dict={
-                                "role": "tool",
-                                "name": function_name,
-                                "content": function_response,
-                                "tool_call_id": tool_call_id,
-                            },
+                    # Failure case 1: function name is wrong (not in agent_state.tools)
+                    target_mirix_tool = None
+                    for t in self.agent_state.tools:
+                        if t.name == function_name:
+                            target_mirix_tool = t
+
+                    if not target_mirix_tool:
+                        raise CorrectableToolError(f"No function named {function_name}")
+
+                    # Failure case 2: function name is OK, but function args are bad JSON
+                    try:
+                        raw_function_args = function_call.arguments
+                        function_args = parse_json(raw_function_args)
+                    except Exception as parse_exc:
+                        raise CorrectableToolError(
+                            f"Error parsing JSON for function '{function_name}' "
+                            f"arguments: {function_call.arguments}"
+                        ) from parse_exc
+                    # parse_json may coerce malformed input (e.g. "{invalid")
+                    # into the wrong shape (a list) without raising. Treat
+                    # anything not-a-dict as LLM-correctable so the LLM can
+                    # re-emit the call rather than crashing downstream.
+                    if not isinstance(function_args, dict):
+                        raise CorrectableToolError(
+                            f"Function '{function_name}' arguments did not "
+                            f"parse to a JSON object: {function_call.arguments}"
                         )
-                    )  # extend conversation with function response
-                    self.interface.function_message(f"Error: {error_msg}", msg_obj=messages[-1])
-                    overall_function_failed = True
-                    continue  # Continue with next tool call
 
-                # Filter out unexpected arguments that LLMs sometimes hallucinate
-                # (e.g., 'internal_monologue'). This must run BEFORE validators.
-                function_args = _filter_function_args(function_name, function_args, target_mirix_tool)
+                    # Filter out unexpected arguments that LLMs sometimes hallucinate
+                    # (e.g., 'internal_monologue'). This must run BEFORE validators.
+                    function_args = _filter_function_args(function_name, function_args, target_mirix_tool)
 
-                if function_name == "trigger_memory_update":
-                    function_args["user_message"] = {
-                        "message": input_message,
-                        "existing_file_uris": existing_file_uris,
-                        "retrieved_memories": retrieved_memories,
-                        "chaining": CHAINING_FOR_MEMORY_UPDATE,
-                    }
-                    if message_queue is not None:
-                        function_args["user_message"]["message_queue"] = message_queue
+                    if function_name == "trigger_memory_update":
+                        function_args["user_message"] = {
+                            "message": input_message,
+                            "existing_file_uris": existing_file_uris,
+                            "retrieved_memories": retrieved_memories,
+                            "chaining": CHAINING_FOR_MEMORY_UPDATE,
+                        }
+                        if message_queue is not None:
+                            function_args["user_message"]["message_queue"] = message_queue
 
-                elif function_name == "trigger_memory_update_with_instruction":
-                    function_args["user_message"] = {
-                        "existing_file_uris": existing_file_uris,
-                        "retrieved_memories": retrieved_memories,
-                    }
+                    elif function_name == "trigger_memory_update_with_instruction":
+                        function_args["user_message"] = {
+                            "existing_file_uris": existing_file_uris,
+                            "retrieved_memories": retrieved_memories,
+                        }
 
-                # The content if then internal monologue, not chat
-                if response_message.content and not nonnull_content:
-                    self.interface.internal_monologue(response_message.content, msg_obj=messages[-1])
-                    printv(
-                        f"[Mirix.Agent.{self.agent_state.name}] INFO: Inner thoughts (from function call) emitted: "
-                        f"len={len(response_message.content or '')}"
-                    )
-
-                continue_chaining = True
-
-                # Failure case 3: function arguments fail validation
-                validation_error = validate_tool_args(function_name, function_args)
-                if validation_error:
-                    function_response = package_function_response(False, validation_error)
-                    messages.append(
-                        Message.dict_to_message(
-                            agent_id=self.agent_state.id,
-                            model=self.model,
-                            openai_message_dict={
-                                "role": "tool",
-                                "name": function_name,
-                                "content": function_response,
-                                "tool_call_id": tool_call_id,
-                            },
+                    # The content if then internal monologue, not chat
+                    if response_message.content and not nonnull_content:
+                        self.interface.internal_monologue(response_message.content, msg_obj=messages[-1])
+                        printv(
+                            f"[Mirix.Agent.{self.agent_state.name}] INFO: Inner thoughts (from function call) emitted: "
+                            f"len={len(response_message.content or '')}"
                         )
-                    )
-                    self.interface.function_message(f"Validation Error: {validation_error}", msg_obj=messages[-1])
-                    overall_function_failed = True
-                    continue  # Skip execution, let LLM retry
 
-                # Failure case 5: function failed during execution
-                # NOTE: the msg_obj associated with the "Running " message is the prior assistant message, not the function/tool role message
-                #       this is because the function/tool role message is only created once the function/tool has executed/returned
-                self.interface.function_message(f"Running {function_name}()", msg_obj=messages[-1])
+                    continue_chaining = True
 
-                try:
+                    # Failure case 3: function arguments fail validation
+                    validation_error = validate_tool_args(function_name, function_args)
+                    if validation_error:
+                        raise CorrectableToolError(f"Validation Error: {validation_error}")
+
+                    # Failure case 4: function body raises CorrectableToolError
+                    # (or any non-correctable exception, which propagates).
+                    # NOTE: the msg_obj associated with the "Running " message
+                    # is the prior assistant message, not the function/tool
+                    # role message — the function/tool role message is only
+                    # created once the function/tool has executed/returned.
+                    self.interface.function_message(f"Running {function_name}()", msg_obj=messages[-1])
+
                     if display_intermediate_message:
                         # send intermediate message to the user
                         display_intermediate_message("internal_monologue", response_message.content)
@@ -1095,20 +1112,21 @@ class Agent(BaseAgent):
                     function_response = package_function_response(True, function_response_string)
                     function_failed = False
 
-                except Exception as e:
-                    function_args.pop("self", None)
-                    # error_msg = f"Error calling function {function_name} with args {function_args}: {str(e)}"
-                    # Less detailed - don't provide full args, idea is that it should be in recent context so no need (just adds noise)
+                except CorrectableToolError as e:
+                    # function_args might not be a dict (parse_json can coerce
+                    # malformed input to a list before we shape-check it).
+                    if isinstance(function_args, dict):
+                        function_args.pop("self", None)
                     error_msg = get_friendly_error_msg(
                         function_name=function_name,
                         exception_name=type(e).__name__,
                         exception_message=str(e),
                     )
-                    error_msg_user = f"{error_msg}\n{traceback.format_exc()}"
-                    printv(f"[Mirix.Agent.{self.agent_state.name}] ERROR: {error_msg_user}")
+                    printv(
+                        f"[Mirix.Agent.{self.agent_state.name}] ERROR: {error_msg}\n{traceback.format_exc()}"
+                    )
                     function_response = package_function_response(False, error_msg)
                     self.last_function_response = function_response
-                    # TODO: truncate error message somehow
                     messages.append(
                         Message.dict_to_message(
                             agent_id=self.agent_state.id,
@@ -1121,29 +1139,7 @@ class Agent(BaseAgent):
                             },
                         )
                     )  # extend conversation with function response
-                    self.interface.function_message(f"Ran {function_name}()", msg_obj=messages[-1])
                     self.interface.function_message(f"Error: {error_msg}", msg_obj=messages[-1])
-                    overall_function_failed = True
-                    continue  # Continue with next tool call
-
-                # Step 4: check if function response is an error
-                if function_response_string.startswith(ERROR_MESSAGE_PREFIX):
-                    function_response = package_function_response(False, function_response_string)
-                    # TODO: truncate error message somehow
-                    messages.append(
-                        Message.dict_to_message(
-                            agent_id=self.agent_state.id,
-                            model=self.model,
-                            openai_message_dict={
-                                "role": "tool",
-                                "name": function_name,
-                                "content": function_response,
-                                "tool_call_id": tool_call_id,
-                            },
-                        )
-                    )  # extend conversation with function response
-                    self.interface.function_message(f"Ran {function_name}()", msg_obj=messages[-1])
-                    self.interface.function_message(f"Error: {function_response_string}", msg_obj=messages[-1])
                     overall_function_failed = True
                     continue  # Continue with next tool call
 
@@ -1389,8 +1385,11 @@ class Agent(BaseAgent):
             # deduped or already-processed sources short-circuit before this runs.
             if self.agent_state.is_type(AgentType.meta_memory_agent) and self.direct_writes:
                 await self._apply_direct_writes_traced()
-                if self.memory_source_id:
-                    await self.memory_source_manager.mark_processing_complete(self.memory_source_id)
+                # step() does not finalize. On clean return, dispatch_save
+                # calls finalize_source(SUCCESS) in the post-policy handler.
+                # If _apply_direct_writes_traced raises, the exception
+                # propagates and dispatch_save records the appropriate
+                # failure outcome.
                 return MirixUsageStatistics(step_count=0)
 
             if self.agent_state.is_type(AgentType.meta_memory_agent):
@@ -1541,11 +1540,11 @@ class Agent(BaseAgent):
                 try:
                     await summary_task
                 except Exception as e:
-                    # VEPAGE-1157: this task runs CONCURRENTLY with the sub-agent
-                    # gather via asyncio.create_task. Its exceptions surface here
-                    # only at await time. Log the full cause chain — the original
-                    # warning swallowed the stack and made the asyncpg / MissingGreenlet
-                    # signature invisible.
+                    # The summary task runs CONCURRENTLY with the sub-agent
+                    # gather via asyncio.create_task. Its exceptions surface
+                    # here only at await time. Log the full cause chain so
+                    # wrapped exceptions (e.g. asyncpg / MissingGreenlet
+                    # signatures) stay visible.
                     try:
                         from mirix.queue.error_policy import format_exc_chain
 
@@ -1553,7 +1552,7 @@ class Agent(BaseAgent):
                     except Exception:
                         chain = "<chain-format-failed>"
                     logger.error(
-                        "VEPAGE-1157 summary_task EXC: source=%s exc_type=%s — chain: %s",
+                        "summary_task failed: source=%s exc_type=%s — chain: %s",
                         self.memory_source_id,
                         type(e).__name__,
                         chain,
@@ -1561,13 +1560,26 @@ class Agent(BaseAgent):
                     )
                     raise
 
-            # Mark memory source as fully processed after all agents complete
-            if self.agent_state.is_type(AgentType.meta_memory_agent) and self.memory_source_id:
-                try:
-                    await self.memory_source_manager.mark_processing_complete(self.memory_source_id)
-                except Exception as e:
-                    logger.warning("Failed to mark source %s complete: %s", self.memory_source_id, e)
-                    raise
+            # If the LLM loop exited with `function_failed=True`, the meta-agent
+            # LLM emitted a malformed tool call (CorrectableToolError-shape) on
+            # the last iteration AND the bounded re-prompt didn't recover.
+            # Raise a typed exception so process_with_policy classifies this as
+            # PERMANENT (no value in retrying — the LLM already had its
+            # budget) and the post-policy handler records the right outcome.
+            #
+            # Non-correctable failures (DB / provider / code bug) never reach
+            # this point: they raised out of `inner_step` earlier.
+            #
+            # step() does NOT finalize on the success path either — that's
+            # `dispatch_save`'s job after process_with_policy returns SUCCESS.
+            if (
+                self.agent_state.is_type(AgentType.meta_memory_agent)
+                and function_failed
+            ):
+                raise LLMChainingExhaustedError(
+                    f"meta-agent LLM produced malformed tool calls past chaining budget "
+                    f"(counter={counter}, max_chaining_steps={max_chaining_steps})"
+                )
 
             return MirixUsageStatistics(**total_usage.model_dump(), step_count=step_count)
 

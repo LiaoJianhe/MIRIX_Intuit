@@ -1,24 +1,24 @@
-"""Worker error-handling contract across the two consumption paths.
+"""Worker error-handling contract for the internal _consume_loop path.
 
-Design (after consolidating the policy):
+After VEPAGE-1251 consolidation:
 
   * ``_process_message_async`` (the shared core) does NOT classify or mark the
-    source complete — it runs the agent step and RE-RAISES on any failure. This
-    is what lets the external consumer's ``process_with_policy`` actually see the
-    exception (previously the core swallowed it, so the external policy was dead).
+    source complete — it runs the agent step and RE-RAISES on any failure.
+  * Both the external (numaflow) path and the internal _consume_loop use
+    the shared `error_policy.dispatch_save` helper, which runs
+    `process_with_policy` then routes the verdict to the single finalize
+    chokepoint.
+  * step() does not finalize internally — `dispatch_save` calls
+    finalize_source for all outcomes including SUCCESS (Option B).
 
-  * The internal ``_consume_loop`` has no redelivery (``queue.get`` already
-    consumed the message), so on a propagated failure it marks the source
-    ``processing_complete`` and swallows — otherwise the source hangs and the
-    SDK's ``wait_for_save`` polls to its timeout.
-
-These tests pin both halves without a DB/LLM.
+These tests pin the core's re-raise contract and the consume-loop's
+delegation to dispatch_save.
 """
 
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -37,7 +37,7 @@ def _message(source_id: str | None) -> QueueMessage:
 
 
 # ---------------------------------------------------------------------------
-# Core re-raises (so external process_with_policy can classify)
+# Core re-raises (so dispatch_save's process_with_policy can classify)
 # ---------------------------------------------------------------------------
 
 
@@ -62,74 +62,63 @@ async def test_core_reraises_on_failure(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Internal finalize-on-failure
+# Consume loop: delegates to dispatch_save
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_finalize_marks_source_complete(monkeypatch):
-    mark_complete = AsyncMock()
-    monkeypatch.setattr(
-        "mirix.services.memory_source_manager.MemorySourceManager",
-        Mock(return_value=Mock(mark_processing_complete=mark_complete)),
-    )
-    worker = QueueWorker(queue=Mock(), server=Mock())
-    await worker._finalize_source_on_failure(_message("src-finalize"))
-    mark_complete.assert_awaited_once_with("src-finalize")
-
-
-@pytest.mark.asyncio
-async def test_finalize_is_noop_without_source_id(monkeypatch):
-    mark_complete = AsyncMock()
-    monkeypatch.setattr(
-        "mirix.services.memory_source_manager.MemorySourceManager",
-        Mock(return_value=Mock(mark_processing_complete=mark_complete)),
-    )
-    worker = QueueWorker(queue=Mock(), server=Mock())
-    # No memory_source_id on the message, and a None message: both no-op.
-    await worker._finalize_source_on_failure(_message(None))
-    await worker._finalize_source_on_failure(None)
-    mark_complete.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_finalize_never_raises_on_mark_error(monkeypatch):
-    monkeypatch.setattr(
-        "mirix.services.memory_source_manager.MemorySourceManager",
-        Mock(return_value=Mock(mark_processing_complete=AsyncMock(side_effect=RuntimeError("db down")))),
-    )
-    worker = QueueWorker(queue=Mock(), server=Mock())
-    # Must swallow the mark failure — a debugging/cleanup aid must not crash the loop.
-    await worker._finalize_source_on_failure(_message("src-err"))
-
-
-# ---------------------------------------------------------------------------
-# Consume loop: a processing failure → finalize + swallow + keep looping
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_consume_loop_finalizes_and_swallows_on_failure(monkeypatch):
+async def test_consume_loop_delegates_to_dispatch_save(monkeypatch):
+    """The consume loop pulls a message, then calls dispatch_save with a
+    run_step closure that wraps _process_message_async. dispatch_save
+    handles classification, retry, and finalize."""
     source_id = "src-loop"
     worker = QueueWorker(queue=Mock(), server=Mock())
 
-    # One message, then stop the loop so it doesn't spin.
     msg = _message(source_id)
 
     async def fake_get(timeout=None):
-        worker._running = False  # stop after this iteration
+        worker._running = False
         return msg
 
     worker.queue.get = fake_get
 
-    # Core raises (simulating a processing failure).
-    monkeypatch.setattr(worker, "_process_message_async", AsyncMock(side_effect=RuntimeError("boom")))
-    finalize = AsyncMock()
-    monkeypatch.setattr(worker, "_finalize_source_on_failure", finalize)
+    monkeypatch.setattr(
+        worker, "_process_message_async", AsyncMock(return_value=None)
+    )
+
+    dispatch_mock = AsyncMock()
+    with patch("mirix.queue.error_policy.dispatch_save", dispatch_mock):
+        worker._running = True
+        await worker._consume_loop()
+
+    dispatch_mock.assert_awaited_once()
+    # Called with run_step closure and the source_id.
+    kwargs = dispatch_mock.await_args.kwargs
+    assert kwargs["memory_source_id"] == source_id
+
+
+@pytest.mark.asyncio
+async def test_consume_loop_continues_on_unexpected_loop_body_error(monkeypatch):
+    """If something other than dispatch_save raises in the loop body
+    (e.g. a queue protocol error), the loop swallows and keeps running.
+    No finalize call happens because we don't know the save's outcome."""
+    worker = QueueWorker(queue=Mock(), server=Mock())
+
+    call_count = {"n": 0}
+
+    async def fake_get(timeout=None):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            # First call: deliberately raise something unrecognized to
+            # exercise the bare-except safety net.
+            raise RuntimeError("queue protocol blew up")
+        # Second call: stop the loop.
+        worker._running = False
+        raise __import__("asyncio").TimeoutError("loop drain")
+
+    worker.queue.get = fake_get
 
     worker._running = True
-    await worker._consume_loop()  # must not raise
-
-    finalize.assert_awaited_once()
-    # The finalize was called with the message that failed.
-    assert finalize.await_args.args[0] is msg
+    # Must not raise — the safety-net except swallows and logs.
+    await worker._consume_loop()
+    assert call_count["n"] >= 1

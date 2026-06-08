@@ -16,7 +16,7 @@ import openai
 import pytest
 
 from mirix.errors import LLMUnprocessableEntityError
-from mirix.queue.error_policy import Bucket, OutcomeKind, classify, process_with_policy
+from mirix.queue.error_policy import Bucket, SaveOutcome, classify, process_with_policy
 from mirix.schemas.llm_config import LLMConfig
 
 # Real prod LXS 422 body, captured by Lucas from Langfuse traces.
@@ -94,7 +94,7 @@ async def test_full_chain_openai_422_classifies_as_permanent_and_acks():
 
     outcome = await process_with_policy(run_step, memory_source_id="src-test")
 
-    assert outcome.kind is OutcomeKind.PERMANENT_FAILURE
+    assert outcome.kind is SaveOutcome.PERMANENT_FAILURE
     assert outcome.bucket is Bucket.PERMANENT
     assert isinstance(outcome.cause, LLMUnprocessableEntityError)
     # The mapped error message should reference the upstream LXS reason.

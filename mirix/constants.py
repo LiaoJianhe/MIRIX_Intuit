@@ -188,8 +188,6 @@ INITIAL_BOOT_MESSAGE_SEND_MESSAGE_FIRST_MSG = STARTUP_QUOTES[2]
 
 CLI_WARNING_PREFIX = "Warning: "
 
-ERROR_MESSAGE_PREFIX = "Error"
-
 NON_USER_MSG_PREFIX = "[This is an automated system message hidden from the user] "
 
 # The error message that Mirix will receive

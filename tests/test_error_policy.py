@@ -22,7 +22,7 @@ from mirix.errors import (
     LLMUnprocessableEntityError,
 )
 from mirix.queue import error_policy as ep
-from mirix.queue.error_policy import Bucket, Outcome, OutcomeKind, classify, process_with_policy
+from mirix.queue.error_policy import Bucket, Outcome, SaveOutcome, classify, process_with_policy
 
 # ---------- classify() ----------
 
@@ -61,11 +61,20 @@ def test_classify_unknown_defaults_to_transient(caplog):
 
 
 def test_classify_unknown_warns_once_per_class(caplog):
-    ep._unknown_warned.discard(KeyError)
+    """Unknown types that aren't pure-Python bug shapes default to
+    TRANSIENT with a one-shot warning. (After VEPAGE-1251 S4, bug shapes
+    like KeyError without a provider traceback frame are routed to
+    PERMANENT by the origin-split, so they intentionally bypass this
+    warning path — see test_classify_db_and_unknown_origin.py.)"""
+
+    class _UnmappedException(Exception):
+        pass
+
+    ep._unknown_warned.discard(_UnmappedException)
     with caplog.at_level("WARNING", logger="mirix.queue.error_policy"):
-        classify(KeyError("a"))
-        classify(KeyError("b"))
-    warnings = [r for r in caplog.records if "KeyError" in r.message]
+        classify(_UnmappedException("a"))
+        classify(_UnmappedException("b"))
+    warnings = [r for r in caplog.records if "_UnmappedException" in r.message]
     assert len(warnings) == 1, "expected one-shot warning per class"
 
 
@@ -80,7 +89,7 @@ async def test_process_with_policy_completed_path():
         calls["n"] += 1
 
     out = await process_with_policy(run_step, memory_source_id="src-ok")
-    assert out.kind is OutcomeKind.COMPLETED
+    assert out.kind is SaveOutcome.SUCCESS
     assert out.cause is None
     assert calls["n"] == 1
 
@@ -100,7 +109,7 @@ async def test_process_with_policy_permanent_path_invokes_callback_and_short_cir
         memory_source_id="src-422",
         on_permanent=on_perm,
     )
-    assert out.kind is OutcomeKind.PERMANENT_FAILURE
+    assert out.kind is SaveOutcome.PERMANENT_FAILURE
     assert out.bucket is Bucket.PERMANENT
     assert isinstance(out.cause, LLMUnprocessableEntityError)
     # Single attempt — Permanent does not retry.
@@ -122,7 +131,7 @@ async def test_process_with_policy_permanent_callback_failure_is_swallowed():
         raise LLMBadRequestError("400 schema")
 
     out = await process_with_policy(run_step, memory_source_id="src-cb", on_permanent=on_perm)
-    assert out.kind is OutcomeKind.PERMANENT_FAILURE
+    assert out.kind is SaveOutcome.PERMANENT_FAILURE
     assert out.bucket is Bucket.PERMANENT
 
 
@@ -139,7 +148,7 @@ async def test_process_with_policy_transient_retry_then_success(monkeypatch):
             raise LLMRateLimitError("429 try again")
 
     out = await process_with_policy(run_step, memory_source_id="src-flaky")
-    assert out.kind is OutcomeKind.COMPLETED
+    assert out.kind is SaveOutcome.SUCCESS
     assert attempts["n"] == 2
 
 
@@ -158,7 +167,7 @@ async def test_process_with_policy_transient_exhausted(monkeypatch):
         raise LLMRateLimitError("still 429")
 
     out = await process_with_policy(run_step, memory_source_id="src-tx")
-    assert out.kind is OutcomeKind.TRANSIENT_EXHAUSTED
+    assert out.kind is SaveOutcome.TRANSIENT_EXHAUSTED
     assert out.bucket is Bucket.TRANSIENT
     assert isinstance(out.cause, LLMRateLimitError)
     assert attempts["n"] == expected_total
@@ -182,7 +191,7 @@ async def test_process_with_policy_unknown_exception_treated_as_transient(monkey
         raise ValueError("oops, a bug")
 
     out = await process_with_policy(run_step, memory_source_id="src-bug", on_permanent=on_perm)
-    assert out.kind is OutcomeKind.TRANSIENT_EXHAUSTED
+    assert out.kind is SaveOutcome.TRANSIENT_EXHAUSTED
     assert perm_calls == [], "on_permanent must not fire for Transient outcomes"
 
 
@@ -190,9 +199,9 @@ async def test_process_with_policy_unknown_exception_treated_as_transient(monkey
 
 
 def test_outcome_is_frozen():
-    out = Outcome(kind=OutcomeKind.COMPLETED)
+    out = Outcome(kind=SaveOutcome.SUCCESS)
     with pytest.raises(Exception):
-        out.kind = OutcomeKind.PERMANENT_FAILURE  # type: ignore[misc]
+        out.kind = SaveOutcome.PERMANENT_FAILURE  # type: ignore[misc]
 
 
 # ---------- classify() walks __cause__ ----------

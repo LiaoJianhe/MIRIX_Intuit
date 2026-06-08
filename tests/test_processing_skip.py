@@ -81,6 +81,7 @@ def _setup_agent(memory_source_id, source_processing_complete=None):
     else:
         agent.memory_source_manager.get_by_id = AsyncMock(return_value=None)
     agent.memory_source_manager.mark_processing_complete = AsyncMock()
+    agent.memory_source_manager.finalize_source = AsyncMock()
     agent._persist_memory_source = AsyncMock()
     agent.interface = MagicMock()
     agent.filter_tags = None
@@ -168,7 +169,9 @@ class TestProcessingSkip:
 
         assert isinstance(result, MirixUsageStatistics)
         agent.inner_step.assert_called_once()
-        agent.memory_source_manager.mark_processing_complete.assert_called_once_with("src-abc123")
+        from mirix.queue.error_policy import SaveOutcome
+
+        agent.memory_source_manager.finalize_source.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_no_skip_check_without_memory_source_id(self):
@@ -223,6 +226,7 @@ class TestProcessingSkip:
                 )
 
         agent.memory_source_manager.mark_processing_complete.assert_not_called()
+        agent.memory_source_manager.finalize_source.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_continues_when_source_not_found(self):

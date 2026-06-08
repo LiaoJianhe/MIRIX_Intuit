@@ -730,7 +730,7 @@ class AgentManager:
     async def update_llm_config(
         self, agent_id: str, llm_config: LLMConfig, actor: PydanticClient
     ) -> PydanticAgentState:
-        # Skip the write when the persisted config already matches (VEPAGE-1228).
+        # Skip the write when the persisted config already matches.
         # Callers on the registration / initialize-meta-agent path invoke this
         # per agent; an unchanged config otherwise produces a needless write.
         current = await self.get_agent_by_id(agent_id=agent_id, actor=actor)
@@ -1384,7 +1384,7 @@ class AgentManager:
 
     async def list_agents_with_tools(self, parent_id: str, actor: PydanticClient) -> List[PydanticAgentState]:
         """Fetch all child agents of ``parent_id`` WITH their tools in a single
-        IPS-R roundtrip (VEPAGE-1228).
+        relational-provider roundtrip.
 
         Replaces the N+1 where ``list_agents(parent_id=...)`` returns the agents
         and the provider then resolves each agent's ``tools`` relationship with a

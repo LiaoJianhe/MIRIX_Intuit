@@ -81,7 +81,6 @@ class MemoryCitationManager:
         from mirix.database.provider_write_retry import (
             is_conflict,
             is_transient,
-            retry_transient,
         )
         from mirix.database.relational_provider import get_relational_provider
         from mirix.observability.skip_spans import emit_idempotency_skip_span
@@ -95,10 +94,9 @@ class MemoryCitationManager:
                 "updated_at": now.isoformat(),
             }
             try:
-                await retry_transient(
-                    lambda: provider.create("memory_citations", payload),
-                    op=f"memory_citations.create({memory_type}/{memory_id})",
-                )
+                # The relational provider has its own inner-retry tier
+                # (event_retry.retry_with_backoff) — no extra wrapper here.
+                await provider.create("memory_citations", payload)
                 logger.info(
                     "Created citation %s: %s/%s -> source %s",
                     citation_id,
@@ -188,7 +186,7 @@ class MemoryCitationManager:
 
         provider = get_relational_provider()
         if provider:
-            # VEPAGE-1107: route through named query so the response shape
+            # route through named query so the response shape
             # matches the Pydantic model (memory_source_id flat column).
             records = await provider.find_using_named_query(
                 "memory_citations",
@@ -257,7 +255,7 @@ class MemoryCitationManager:
 
         provider = get_relational_provider()
         if provider:
-            # VEPAGE-1107: use a dedicated MAX(occurredAt) named query to
+            # use a dedicated MAX(occurredAt) named query to
             # avoid pulling the full citation set client-side. Returns a
             # single scalar row keyed ``max_occurred_at``.
             #
@@ -306,7 +304,7 @@ class MemoryCitationManager:
 
         provider = get_relational_provider()
         if provider:
-            # VEPAGE-1107: NQ projects memorysource_id so Pydantic
+            # NQ projects memorysource_id so Pydantic
             # construction works.
             records = await provider.find_using_named_query(
                 "memory_citations",
@@ -375,7 +373,7 @@ class MemoryCitationManager:
         # so loop per (memory_type, memory_id) and group. Search hits are typically
         # 10-50 per query, so per-memory call volume is acceptable.
         #
-        # VEPAGE-1107: route through ``memory_citation_manager.get_citations_for_memory``
+        # route through ``memory_citation_manager.get_citations_for_memory``
         # named query instead of the generic ``provider.list``. The adhoc
         # filter-query endpoint does NOT populate the ``memorySource`` MANY_TO_ONE
         # relationship on returned entities, which causes

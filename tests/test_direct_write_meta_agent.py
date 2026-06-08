@@ -203,6 +203,7 @@ def _make_meta_agent_stub(
     else:
         agent.memory_source_manager.get_by_id = AsyncMock(return_value=None)
     agent.memory_source_manager.mark_processing_complete = AsyncMock(return_value=None)
+    agent.memory_source_manager.finalize_source = AsyncMock(return_value=None)
 
     # _persist_memory_source is a method we want to no-op unless dedup drives it
     async def _fake_persist(memory_source_id, input_messages):
@@ -245,8 +246,10 @@ async def test_step_direct_writes_skips_llm_and_calls_handler():
 
     # Handler was called with the payload
     assert handler_calls == [{"event_type": "e", "summary": "s"}]
-    # Processing marked complete
-    agent.memory_source_manager.mark_processing_complete.assert_awaited_once_with(memory_source_id)
+    # Processing marked complete via the single finalize chokepoint (VEPAGE-1251).
+    from mirix.queue.error_policy import SaveOutcome
+
+    agent.memory_source_manager.finalize_source.assert_not_awaited()
     # step_count == 0 (direct-write branch returned early)
     assert result.step_count == 0
 

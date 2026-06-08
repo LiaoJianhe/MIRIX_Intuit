@@ -1,6 +1,32 @@
 """
 Background worker that consumes messages from the queue.
 Runs as an asyncio.Task in the main event loop (async-native).
+
+Save dispatch is unified across all 3 run modes (numaflow / kafka /
+in-memory) via `error_policy.dispatch_save`. Each mode does the same
+thing: receive a message, run the save under process_with_policy, route
+the verdict through the single finalize chokepoint.
+
+* numaflow (external) — process_external_message in queue/__init__.py.
+* internal kafka manual / in-memory sim — this file, _consume_loop.
+
+The only mode-specific behavior is HOW messages are obtained (broker
+delivery vs in-process queue.get()) and what happens on
+TRANSIENT_EXHAUSTED — numaflow could in principle let the broker
+redeliver, but we treat exhausted-transient as dead-letter in all modes.
+Broker-level redelivery is reserved for *process-death* cases (message
+not ack'd), not for failures we classified.
+
+ONE classifier (error_policy.classify), ONE policy
+(error_policy.process_with_policy), ONE save dispatcher
+(error_policy.dispatch_save), ONE finalize chokepoint
+(memory_source_manager.finalize_source).
+
+NOTE — boolean schema today. finalize_source records the SaveOutcome
+in the log line but writes `processing_complete=True` for every outcome
+(SUCCESS / PERMANENT_FAILURE / TRANSIENT_EXHAUSTED). A future
+status-column migration will diversify column writes per outcome; this
+file does not enforce "complete = success only" at the DB level.
 """
 
 import asyncio
@@ -37,7 +63,7 @@ logger = get_logger(__name__)
 def reconcile_user_org_to_actor(user, actor):
     """Return ``user`` with its org corrected to the actor's (client's) org.
 
-    The ``users`` row is a global, id-only-PK shared stub (VEPAGE-1155): its
+    The ``users`` row is a global, id-only-PK shared stub: its
     ``organization_id`` records whichever org first created the user, and
     per-org isolation lives on the child tables (blocks, memories). On the save
     path the resolved user therefore carries its *first-seen* org, not the org
@@ -470,40 +496,15 @@ class QueueWorker:
             # never leaks from one message into the next on a reused worker task.
             clear_tid()
 
-    async def _finalize_source_on_failure(self, message: Optional[QueueMessage]) -> None:
-        """Mark a message's memory source processing_complete after a failure.
-
-        Used by the internal consume loop (which has no redelivery): finalizing
-        the source unblocks SDK wait_for_save() and short-circuits any future
-        reprocessing of the same poison input. Best-effort and None-safe — never
-        raises (the loop has already logged the original failure).
-        """
-        if message is None:
-            return
-        source_id = (
-            message.memory_source_id
-            if hasattr(message, "memory_source_id") and message.HasField("memory_source_id")
-            else None
-        )
-        if not source_id:
-            return
-        try:
-            from mirix.services.memory_source_manager import MemorySourceManager
-
-            await MemorySourceManager().mark_processing_complete(source_id)
-            logger.info(
-                "Marked memory_source=%s processing_complete after a failure on the "
-                "internal consume loop (no redelivery path).",
-                source_id,
-            )
-        except Exception:
-            logger.exception(
-                "Failed to mark memory_source=%s processing_complete after consume-loop failure",
-                source_id,
-            )
-
     async def _consume_loop(self) -> None:
-        """Async consume loop running as an asyncio.Task in the main event loop."""
+        """Async consume loop running as an asyncio.Task in the main event loop.
+
+        Every received message goes through the shared `dispatch_save` helper
+        in `error_policy.py`. That helper runs process_with_policy (classify
+        + bounded retry) and then routes the verdict to the single finalize
+        chokepoint. No mode-specific outcome dispatch lives here — the same
+        helper handles numaflow's `process_external_message` too.
+        """
         partition_info = f", partition={self._partition_id}" if self._partition_id is not None else ""
         logger.info("Queue worker task started%s", partition_info)
 
@@ -523,7 +524,18 @@ class QueueWorker:
                     len(message.input_messages),
                 )
 
-                await self._process_message_async(message)
+                from mirix.queue.error_policy import dispatch_save
+
+                source_id = (
+                    message.memory_source_id
+                    if message.HasField("memory_source_id")
+                    else None
+                )
+
+                async def _run() -> None:
+                    await self._process_message_async(message)
+
+                await dispatch_save(_run, memory_source_id=source_id)
 
             except asyncio.TimeoutError:
                 continue
@@ -533,16 +545,14 @@ class QueueWorker:
             except Exception as e:
                 if type(e).__name__ in ["Empty", "StopIteration"]:
                     continue
-                # A processing failure propagated out of _process_message_async
-                # (the core re-raises). The internal consume loop has NO
-                # redelivery — get() already consumed the message — so we must
-                # finalize the source here (mark processing_complete) and
-                # swallow, otherwise it stays "in progress" forever and the SDK's
-                # wait_for_save() polls to its timeout. We finalize regardless of
-                # permanent/transient: there is nothing to redeliver to, so a
-                # transient failure can't be retried on this path anyway.
+                # Defense in depth: dispatch_save catches its own classified
+                # failures and finalizes through the chokepoint. A genuinely
+                # unexpected error elsewhere in the loop body (queue protocol
+                # shape, message deserialization, etc.) lands here and is
+                # swallowed so the worker task keeps running. We do NOT
+                # finalize the source here — we don't know the outcome of
+                # the save (it may have succeeded before the protocol error).
                 logger.error("Error in message consumption loop: %s", e, exc_info=True)
-                await self._finalize_source_on_failure(message)
 
     async def start(self) -> None:
         """Start the background worker as an asyncio.Task."""

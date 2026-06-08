@@ -3,7 +3,7 @@
 import base64
 import json
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, Optional, Union
 
 from sqlalchemy import select
 
@@ -11,10 +11,21 @@ from mirix.log import get_logger
 from mirix.orm.memory_source import MemorySource as MemorySourceModel
 from mirix.schemas.client import Client as PydanticClient
 from mirix.schemas.memory_source import MemorySource as PydanticMemorySource
+
+if TYPE_CHECKING:
+    from mirix.queue.error_policy import SaveOutcome
 from mirix.schemas.memory_source import PaginatedResponse
 from mirix.utils import enforce_types
 
 logger = get_logger(__name__)
+
+
+# NOTE: The outcome vocabulary lives in `mirix.queue.error_policy.SaveOutcome`.
+# `finalize_source` takes a SaveOutcome value; today (boolean schema) it writes
+# `processing_complete=True` for every outcome and records the value in a log
+# line. A future status-column migration will diversify the actual column
+# writes per outcome by touching only `finalize_source` — upstream callers
+# already produce the right value.
 
 # Hard ceiling on the per-request page size we'll forward to IPSR. The IPSR
 # named-query runner caps page_size at 1500 server-side; we cap a little
@@ -119,7 +130,6 @@ class MemorySourceManager:
         from mirix.database.provider_write_retry import (
             is_conflict,
             is_transient,
-            retry_transient,
         )
         from mirix.database.relational_provider import get_relational_provider
 
@@ -149,10 +159,9 @@ class MemorySourceManager:
                 "is_deleted": False,
             }
             try:
-                result = await retry_transient(
-                    lambda: provider.create("memory_sources", data_dict),
-                    op=f"memory_sources.create({memory_source_id})",
-                )
+                # The relational provider has its own inner-retry tier
+                # (event_retry.retry_with_backoff) — no extra wrapper here.
+                result = await provider.create("memory_sources", data_dict)
                 return PydanticMemorySource(**result)
             except Exception as e:
                 if not is_conflict(e):
@@ -175,8 +184,8 @@ class MemorySourceManager:
                 #
                 # We still confirm the pre-existing row exists (defensive: a
                 # conflict with no recoverable row indicates a different failure,
-                # so re-raise). VEPAGE-1107: named queries explicitly project all
-                # columns + FK columns so PydanticMemorySource construction works.
+                # so re-raise). Named queries explicitly project all columns
+                # plus FK columns so PydanticMemorySource construction works.
                 logger.debug(
                     "memory_sources conflict for %s — deduped against existing row",
                     memory_source_id,
@@ -343,10 +352,11 @@ class MemorySourceManager:
 
         provider = get_relational_provider()
         if provider:
-            # VEPAGE-1144: real offset pagination against list_sources_admin
-            # NQ. The NQ filters and orders server-side (occurredAt DESC
+            # Real offset pagination against the list_sources_admin named
+            # query. The NQ filters and orders server-side (occurredAt DESC
             # NULLS LAST, ipsrcreatedon DESC); page_num + page_size are
-            # forwarded to IPSR's slice-pagination contract.
+            # forwarded to the relational provider's slice-pagination
+            # contract.
             if not organization_id:
                 raise ValueError(
                     "list_sources requires organization_id when an IPSR "
@@ -444,6 +454,43 @@ class MemorySourceManager:
             record.processing_complete = True
             await record.update_with_redis(session)
             logger.info("Marked memory source %s as processing complete", memory_source_id)
+
+    async def finalize_source(
+        self,
+        memory_source_id: Optional[str],
+        outcome: "SaveOutcome",
+    ) -> None:
+        """Single finalize chokepoint — all save-path "mark done" decisions
+        flow through here.
+
+        Called by `dispatch_save` in error_policy.py with the SaveOutcome that
+        the policy returned. Every outcome (SUCCESS / PERMANENT_FAILURE /
+        TRANSIENT_EXHAUSTED) flows through this one function.
+
+        Today (boolean schema): every outcome writes `processing_complete=True`
+        and records the SaveOutcome value in the log line.
+
+        Tomorrow (status-column migration): this function fans out into
+        distinct `status` writes per outcome. Upstream callers don't change.
+        """
+        if not memory_source_id:
+            return
+
+        # Best-effort: never mask the original exception by raising from
+        # the finalize chokepoint. The caller has already logged the cause.
+        try:
+            await self.mark_processing_complete(memory_source_id)
+            logger.info(
+                "Finalized memory_source=%s outcome=%s",
+                memory_source_id,
+                outcome.value,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to finalize memory_source=%s outcome=%s",
+                memory_source_id,
+                outcome.value,
+            )
 
     @enforce_types
     async def update_summary(self, memory_source_id: str, summary: str, summary_source: str) -> None:
