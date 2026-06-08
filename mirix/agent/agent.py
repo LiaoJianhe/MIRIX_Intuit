@@ -81,6 +81,7 @@ from mirix.services.tool_execution_sandbox import ToolExecutionSandbox
 from mirix.services.user_manager import UserManager
 from mirix.settings import settings
 from mirix.system import get_contine_chaining, get_token_limit_warning, package_function_response, package_user_message
+from mirix.testing import fault_injection
 from mirix.tracing import trace_method
 from mirix.utils import (
     convert_timezone_to_utc,
@@ -511,6 +512,20 @@ class Agent(BaseAgent):
                 function_args,
                 timezone_str=self.user.timezone,
                 occurred_at_override=getattr(self, "occurred_at", None),
+            )
+
+            # Test-only fault injection (inert in prod): inject a fault in the
+            # tool body for sources whose directive targets "tool_body"
+            # (optionally scoped to this tool name). Raising here — inside the
+            # tool body, in pure agent code with no provider frame — is what
+            # makes an `attribute_error` shape classify PERMANENT via the
+            # error_policy origin-split, and a `correctable` shape feed the
+            # bounded LLM re-prompt. Sub-agents inherit memory_source_id from the
+            # meta-agent, so the per-source directive matches across the fan-out.
+            fault_injection.maybe_raise(
+                "tool_body",
+                source_key=getattr(self, "memory_source_id", None),
+                tool=function_name,
             )
 
             if function_name in [
@@ -1370,6 +1385,17 @@ class Agent(BaseAgent):
                     )
                     return MirixUsageStatistics(step_count=0)
 
+                # Test-only fault injection (inert in prod): register per-source
+                # fault directives carried in source_metadata. Placed AFTER the
+                # dedup / processing-complete short-circuits so a redelivery of
+                # an already-processed source never injects. No-op when injection
+                # is disabled. The active-source ContextVar that the provider
+                # hooks read is set/cleared at the per-save boundary in
+                # dispatch_save, not here — so it can't go stale across messages.
+                fault_injection.resolve_directives(
+                    self.memory_source_id, getattr(self, "source_metadata", None)
+                )
+
                 # Dispatch summary generation in parallel with the memory sub-agents.
                 # Awaited before mark_processing_complete; on failure the exception
                 # propagates out of step() so the Kafka worker redelivers the message.
@@ -1559,6 +1585,14 @@ class Agent(BaseAgent):
                         exc_info=True,
                     )
                     raise
+
+            # Test-only fault injection (inert in prod): a `llm` directive forces
+            # the malformed-tool-calls-past-budget path deterministically,
+            # without having to make a real LLM emit broken output. The shape
+            # llm_chaining_exhausted raises LLMChainingExhaustedError, taking the
+            # exact same propagation path as the natural raise below.
+            if self.agent_state.is_type(AgentType.meta_memory_agent):
+                fault_injection.maybe_raise("llm", source_key=getattr(self, "memory_source_id", None))
 
             # If the LLM loop exited with `function_failed=True`, the meta-agent
             # LLM emitted a malformed tool call (CorrectableToolError-shape) on

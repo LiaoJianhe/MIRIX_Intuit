@@ -450,7 +450,20 @@ async def dispatch_save(
     Step() no longer finalizes internally; ALL finalize calls flow through
     this function.
     """
-    outcome = await process_with_policy(run_step, memory_source_id=memory_source_id)
+    # Test-only fault injection (inert in prod): publish the save in flight on
+    # this async context for the whole save, then ALWAYS clear it. This is the
+    # per-save boundary for every run mode, so injection hooks at sites without a
+    # source-id handle (the registered-provider boundary) read the right source,
+    # and no stale value can leak into the next message — which matters when one
+    # worker processes several messages sequentially in a single task (batching).
+    # set_active_source no-ops (returns None) when injection is disabled.
+    from mirix.testing import fault_injection
+
+    fi_token = fault_injection.set_active_source(memory_source_id)
+    try:
+        outcome = await process_with_policy(run_step, memory_source_id=memory_source_id)
+    finally:
+        fault_injection.reset_active_source(fi_token)
 
     if memory_source_id is not None:
         # Late import to avoid cycle (memory_source_manager doesn't import
