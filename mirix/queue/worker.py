@@ -12,10 +12,10 @@ the verdict through the single finalize chokepoint.
 
 The only mode-specific behavior is HOW messages are obtained (broker
 delivery vs in-process queue.get()) and what happens on
-TRANSIENT_EXHAUSTED — numaflow could in principle let the broker redeliver,
-but post-VEPAGE-1251 we treat exhausted-transient as dead-letter in all
-modes. Broker-level redelivery is reserved for *process-death* cases
-(message not ack'd), not for failures we classified.
+TRANSIENT_EXHAUSTED — numaflow could in principle let the broker
+redeliver, but we treat exhausted-transient as dead-letter in all modes.
+Broker-level redelivery is reserved for *process-death* cases (message
+not ack'd), not for failures we classified.
 
 ONE classifier (error_policy.classify), ONE policy
 (error_policy.process_with_policy), ONE save dispatcher
@@ -24,9 +24,9 @@ ONE classifier (error_policy.classify), ONE policy
 
 NOTE — boolean schema today. finalize_source records the SaveOutcome
 in the log line but writes `processing_complete=True` for every outcome
-(SUCCESS / PERMANENT_FAILURE / TRANSIENT_EXHAUSTED). VEPAGE-1250 will
-diversify the actual column writes per outcome via a `status` column;
-this story does not enforce "complete = success only" at the DB level.
+(SUCCESS / PERMANENT_FAILURE / TRANSIENT_EXHAUSTED). A future
+status-column migration will diversify column writes per outcome; this
+file does not enforce "complete = success only" at the DB level.
 """
 
 import asyncio
@@ -63,7 +63,7 @@ logger = get_logger(__name__)
 def reconcile_user_org_to_actor(user, actor):
     """Return ``user`` with its org corrected to the actor's (client's) org.
 
-    The ``users`` row is a global, id-only-PK shared stub (VEPAGE-1155): its
+    The ``users`` row is a global, id-only-PK shared stub: its
     ``organization_id`` records whichever org first created the user, and
     per-org isolation lives on the child tables (blocks, memories). On the save
     path the resolved user therefore carries its *first-seen* org, not the org

@@ -8,12 +8,13 @@ agent.step, so the contract is consistent.
 Callers run an agent step under process_with_policy; the returned Outcome
 tells the consumer loop whether to ack the message or let it be redelivered.
 
-CONTRACT (VEPAGE-1251):
+CONTRACT:
 
 * classify(exc) is PURE-ISINSTANCE against MIRIX-owned types — no
-  string-matching. The three Provider*Error types are how ECMS providers
-  speak to this module across the ECMS -> MIRIX dependency direction:
-  the boundary translates SDK exceptions; classify maps the result.
+  string-matching. The three Provider*Error types are how registered
+  providers speak to this module across the dependency boundary: each
+  provider catches its SDK exceptions and re-raises one of the MIRIX
+  types; classify maps the result.
 
 * mark_inner_exhausted(exc) tags a propagated exception so
   process_with_policy returns TRANSIENT_EXHAUSTED after exactly one
@@ -23,8 +24,10 @@ CONTRACT (VEPAGE-1251):
 
 * Origin-split for pure-Python bug shapes: AttributeError / KeyError /
   TypeError / IndexError / NameError with no provider frame in the
-  traceback classify PERMANENT (the VEPAGE-1228 shape). With a provider
-  frame on the chain, fall back to the historical Transient default.
+  traceback classify PERMANENT (a deterministic code bug will never
+  succeed on retry — retrying it just burns redeliveries). With a
+  provider frame on the chain, fall back to the historical Transient
+  default.
 """
 
 from __future__ import annotations
@@ -42,6 +45,7 @@ from sqlalchemy.exc import DataError, DBAPIError, IntegrityError, OperationalErr
 from mirix.errors import (
     LLMAuthenticationError,
     LLMBadRequestError,
+    LLMBadResponseShapeError,
     LLMChainingExhaustedError,
     LLMConnectionError,
     LLMPermissionDeniedError,
@@ -68,8 +72,9 @@ class SaveOutcome(str, Enum):
 
     Same enum used by `process_with_policy` (the policy's verdict) AND by
     `MemorySourceManager.finalize_source` (what gets recorded on the source).
-    One vocabulary, one set of values — the seam that VEPAGE-1250 will use
-    to diversify column writes per outcome.
+    One vocabulary, one set of values — the seam that a future
+    status-column migration will use to diversify column writes per
+    outcome.
     """
 
     SUCCESS = "success"
@@ -89,11 +94,11 @@ class Outcome:
 # Subclass matches use isinstance — order is not significant for correctness,
 # but kept stable for readability.
 #
-# Provider* types are MIRIX-owned and re-raised by the ECMS provider boundary
-# from SDK-specific exceptions. This keeps `classify()` pure isinstance and
-# respects the dependency direction (ECMS -> MIRIX): MIRIX cannot import the
-# IPS-R / IPS-Search / SDK exception classes, so the seam that *can* (the
-# provider) is responsible for the translation. See VEPAGE-1251 design §5.6.
+# Provider* types are MIRIX-owned and re-raised by each registered provider's
+# boundary from its SDK-specific exceptions. This keeps `classify()` pure
+# isinstance and respects the dependency direction: MIRIX does not import
+# provider SDK exception classes, so the seam that *can* (the provider) is
+# responsible for the translation.
 _PERMANENT_TYPES: tuple[type[BaseException], ...] = (
     LLMUnprocessableEntityError,  # 422
     LLMBadRequestError,  # 400
@@ -109,18 +114,20 @@ _TRANSIENT_TYPES: tuple[type[BaseException], ...] = (
     LLMRateLimitError,  # 429
     LLMServerError,  # 5xx
     LLMConnectionError,
+    LLMBadResponseShapeError,  # empty choices / bad finish_reason / etc.
     ProviderTransientError,  # provider boundary: 429, 5xx, timeout
     OperationalError,  # SQLAlchemy: connection / serialization / lock
     DBAPIError,  # SQLAlchemy generic DBAPI failure
-    asyncio.TimeoutError,  # I/O stall worth one retry
+    asyncio.TimeoutError,  # I/O stall; retry budget is governed by settings
 )
 
 # Pure-Python bug shapes. When an exception of one of these types reaches
 # `classify()` without a provider/SDK frame in its traceback, treat as
-# PERMANENT (it'll never succeed on retry). This is the origin-split for
-# the VEPAGE-1228 AttributeError shape — see design §5.4. With a provider
-# frame in the traceback, the exception is treated as transient (the
-# provider might have wrapped a real infra failure).
+# PERMANENT — a deterministic AttributeError / KeyError / TypeError in
+# agent code will never succeed on retry; treating it transient just burns
+# redeliveries and hides the bug. With a provider frame in the traceback,
+# the exception is treated as transient (the provider might have wrapped
+# a real infra failure).
 _PYTHON_BUG_TYPES: tuple[type[BaseException], ...] = (
     AttributeError,
     KeyError,
@@ -148,9 +155,27 @@ _PROVIDER_FRAME_HINTS: tuple[str, ...] = (
 
 
 def _traceback_has_provider_frame(tb: Optional[types.TracebackType]) -> bool:
-    """Walk the traceback looking for a frame in provider/SDK code. If any
-    such frame is on the chain, the exception is not purely an agent-logic
-    bug and should keep the default Transient classification."""
+    """Walk ``exc.__traceback__`` looking for a frame from provider/SDK code.
+
+    Powers the origin-split for pure-Python bug shapes (AttributeError,
+    KeyError, etc.). The reasoning:
+
+    * If the exception is raised purely in agent code (no provider frame
+      anywhere on the traceback), it's almost certainly a deterministic
+      bug — retrying won't help, classify PERMANENT.
+    * If a provider/SDK module appears anywhere on the chain (e.g. an
+      sqlalchemy session-management edge case re-raises as KeyError, or
+      httpx's response parsing raises TypeError), the exception might
+      reflect a real infra hiccup that retrying could clear — keep the
+      historical Transient default.
+
+    Detection is by substring match of `frame.f_globals["__name__"]`
+    against the `_PROVIDER_FRAME_HINTS` set above. Substring matching is
+    intentional: `sqlalchemy.dialects.postgresql` matches "sqlalchemy",
+    `httpx._client` matches "httpx", etc. The depth cap (64) is a safety
+    net for pathological tracebacks; production tracebacks are usually
+    <10 frames.
+    """
     cur = tb
     depth = 0
     while cur is not None and depth < 64:
@@ -205,9 +230,9 @@ _unknown_warned: set[type[BaseException]] = set()
 def format_exc_chain(exc: BaseException, max_depth: int = 8) -> str:
     """Render an exception's __cause__ chain as a compact one-line string.
 
-    VEPAGE-1157 instrumentation. Used to capture wrapped-exception cascades
-    in log lines so we can see the original type even when intermediate code
-    re-raised with `raise X(...) from y`.
+    Used to capture wrapped-exception cascades in log lines so we can see
+    the original type even when intermediate code re-raised with
+    `raise X(...) from y`.
 
     Example output: "RuntimeError: foo <- LLMUnprocessableEntityError: 422"
     """
@@ -263,12 +288,12 @@ def classify(exc: BaseException) -> Bucket:
         current = current.__cause__
         depth += 1
 
-    # Origin-split for pure-Python bug shapes (VEPAGE-1251 §5.4). If the
-    # exception is a recognized bug class AND its traceback has no
-    # provider/SDK frame, treat as permanent — retrying a deterministic
-    # AttributeError just burns redeliveries. With a provider frame on
-    # the chain, fall through to the historical Transient default (the
-    # provider might have wrapped real infra trouble).
+    # Origin-split for pure-Python bug shapes. If the exception is a
+    # recognized bug class AND its traceback has no provider/SDK frame,
+    # treat as permanent — retrying a deterministic AttributeError just
+    # burns redeliveries. With a provider frame on the chain, fall
+    # through to the historical Transient default (the provider might
+    # have wrapped real infra trouble).
     if isinstance(exc, _PYTHON_BUG_TYPES) and not _traceback_has_provider_frame(
         exc.__traceback__
     ):
@@ -330,8 +355,10 @@ async def process_with_policy(
             last_exc = exc
             if bucket is Bucket.PERMANENT:
                 error_message = f"{type(exc).__name__}: {exc}"
-                logger.info(
-                    "error_policy: permanent failure (%s) on memory_source=%s — %s " "— chain: %s",
+                # Permanent failure means a save is dead-lettered with no
+                # memories written — surface at ERROR so alerting catches it.
+                logger.error(
+                    "error_policy: permanent failure (%s) on memory_source=%s — %s — chain: %s",
                     type(exc).__name__,
                     memory_source_id,
                     exc,
@@ -350,9 +377,11 @@ async def process_with_policy(
             # exhausted its budget on this exact failure — repeating the whole
             # step is wasted work that just re-runs persist/extract/sub-agent
             # spawns. Verdict as TRANSIENT_EXHAUSTED immediately. This kills
-            # the inner × whole-step multiplication (VEPAGE-1251 §5.6).
+            # the inner × whole-step multiplication.
             if is_inner_exhausted(exc):
-                logger.info(
+                # Inner tier already exhausted its budget AND the save did not
+                # succeed — surface at ERROR so alerting catches it.
+                logger.error(
                     "error_policy: inner-exhausted transient (%s) on memory_source=%s — "
                     "skipping whole-step retry — chain: %s",
                     type(exc).__name__,
@@ -374,8 +403,10 @@ async def process_with_policy(
                 )
                 await asyncio.sleep(sleep_s)
                 continue
-            logger.warning(
-                "error_policy: transient retries exhausted on memory_source=%s after %d attempts: %s " "— chain: %s",
+            # Whole-step retry budget exhausted on a transient. The save is
+            # dead-lettered with no memories — surface at ERROR for alerting.
+            logger.error(
+                "error_policy: transient retries exhausted on memory_source=%s after %d attempts: %s — chain: %s",
                 memory_source_id,
                 max_attempts + 1,
                 exc,
@@ -409,12 +440,13 @@ async def dispatch_save(
     classified.
 
     Today (boolean schema) finalize_source records the SaveOutcome in a log
-    line and writes `processing_complete=True` regardless of outcome.
-    VEPAGE-1250 will diversify the actual column writes per outcome by
-    touching only `finalize_source` — this dispatcher doesn't change.
+    line and writes `processing_complete=True` regardless of outcome. A
+    future status-column migration will diversify the actual column writes
+    per outcome by touching only `finalize_source` — this dispatcher
+    doesn't change.
 
     Step() no longer finalizes internally; ALL finalize calls flow through
-    this function. (VEPAGE-1251 Option B.)
+    this function.
     """
     outcome = await process_with_policy(run_step, memory_source_id=memory_source_id)
 

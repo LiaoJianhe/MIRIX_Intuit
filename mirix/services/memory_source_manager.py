@@ -23,9 +23,9 @@ logger = get_logger(__name__)
 # NOTE: The outcome vocabulary lives in `mirix.queue.error_policy.SaveOutcome`.
 # `finalize_source` takes a SaveOutcome value; today (boolean schema) it writes
 # `processing_complete=True` for every outcome and records the value in a log
-# line. VEPAGE-1250 will diversify the actual column writes per outcome by
-# touching only `finalize_source` — upstream callers already produce the
-# right value.
+# line. A future status-column migration will diversify the actual column
+# writes per outcome by touching only `finalize_source` — upstream callers
+# already produce the right value.
 
 # Hard ceiling on the per-request page size we'll forward to IPSR. The IPSR
 # named-query runner caps page_size at 1500 server-side; we cap a little
@@ -186,8 +186,8 @@ class MemorySourceManager:
                 #
                 # We still confirm the pre-existing row exists (defensive: a
                 # conflict with no recoverable row indicates a different failure,
-                # so re-raise). VEPAGE-1107: named queries explicitly project all
-                # columns + FK columns so PydanticMemorySource construction works.
+                # so re-raise). Named queries explicitly project all columns
+                # plus FK columns so PydanticMemorySource construction works.
                 logger.debug(
                     "memory_sources conflict for %s — deduped against existing row",
                     memory_source_id,
@@ -354,10 +354,11 @@ class MemorySourceManager:
 
         provider = get_relational_provider()
         if provider:
-            # VEPAGE-1144: real offset pagination against list_sources_admin
-            # NQ. The NQ filters and orders server-side (occurredAt DESC
+            # Real offset pagination against the list_sources_admin named
+            # query. The NQ filters and orders server-side (occurredAt DESC
             # NULLS LAST, ipsrcreatedon DESC); page_num + page_size are
-            # forwarded to IPSR's slice-pagination contract.
+            # forwarded to the relational provider's slice-pagination
+            # contract.
             if not organization_id:
                 raise ValueError(
                     "list_sources requires organization_id when an IPSR "
@@ -471,8 +472,8 @@ class MemorySourceManager:
         Today (boolean schema): every outcome writes `processing_complete=True`
         and records the SaveOutcome value in the log line.
 
-        Tomorrow (VEPAGE-1250): this function fans out into distinct `status`
-        writes per outcome. Upstream callers don't change.
+        Tomorrow (status-column migration): this function fans out into
+        distinct `status` writes per outcome. Upstream callers don't change.
         """
         if not memory_source_id:
             return

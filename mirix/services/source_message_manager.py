@@ -298,7 +298,7 @@ class SourceMessageManager:
 
         provider = get_relational_provider()
         if provider:
-            # VEPAGE-1107: route through named query. The generic
+            # route through named query. The generic
             # ``provider.list`` against source_messages was failing with
             # ``Unable to Construct Filter Query`` (relationship logical
             # name resolution) and the response also dropped the FK

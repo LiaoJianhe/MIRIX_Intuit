@@ -801,8 +801,7 @@ class AsyncServer(Server):
         except Exception:
             # `logger.exception` attaches the traceback automatically; the
             # previous `logger.error(traceback.print_exc())` was logging
-            # `None` because `print_exc` returns nothing — see noise audit
-            # during VEPAGE-1251 FST validation.
+            # `None` because `print_exc` returns nothing.
             logger.exception("Error in server._step")
             raise
         finally:

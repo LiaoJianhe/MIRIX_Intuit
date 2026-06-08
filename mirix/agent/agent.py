@@ -27,7 +27,12 @@ from mirix.constants import (
     REQ_HEARTBEAT_MESSAGE,
 )
 from mirix.embeddings import embedding_model
-from mirix.errors import ContextWindowExceededError, CorrectableToolError, LLMChainingExhaustedError
+from mirix.errors import (
+    ContextWindowExceededError,
+    CorrectableToolError,
+    LLMBadResponseShapeError,
+    LLMChainingExhaustedError,
+)
 from mirix.functions.functions import get_function_from_module
 from mirix.helpers import ToolRulesSolver
 from mirix.helpers.message_helpers import prepare_input_message_create
@@ -598,7 +603,7 @@ class Agent(BaseAgent):
             # from the langfuse machinery after the body — does NOT trigger
             # a silent re-run of the tool. Non-correctable exceptions
             # raised by the body propagate out so `process_with_policy`
-            # can classify them (VEPAGE-1228 fix).
+            # can classify them rather than being silently swallowed.
             inner_attempted = False
             try:
                 with langfuse.start_as_current_observation(
@@ -650,14 +655,22 @@ class Agent(BaseAgent):
                             },
                         )
                     except Exception as span_exc:
-                        # span.update failure is observability-only.
-                        self.logger.debug(f"Langfuse span.update failed: {span_exc}")
+                        # span.update failure is observability-only — log at
+                        # WARNING so a sustained tracing problem is visible
+                        # without taking the save path down.
+                        self.logger.warning("Langfuse span.update failed: %s", span_exc)
             except Exception as e:
                 if inner_attempted:
                     # Tool body already ran (and may have raised). Do NOT
                     # re-execute; propagate the original exception unchanged.
                     raise
-                self.logger.debug(f"Langfuse tool execution trace failed before body ran: {e}")
+                # Langfuse SDK failed before the tool body ran — fall back
+                # to running without tracing. Sustained breakage here means
+                # we're losing observability across many saves; log at
+                # WARNING so it's not silent.
+                self.logger.warning(
+                    "Langfuse tool execution trace failed before body ran: %s", e
+                )
                 function_response = await _execute_tool_inner()
         else:
             function_response = await _execute_tool_inner()
@@ -767,24 +780,30 @@ class Agent(BaseAgent):
                     )
                 log_telemetry(self.logger, "_get_ai_reply create finish")
 
-                # Validate the response shape. These ValueErrors are caught
-                # below and classified as Transient (provider quirks worth
-                # retrying), not Permanent.
+                # Validate the response shape. LLMBadResponseShapeError is in
+                # _TRANSIENT_TYPES, so the catch below + classify() treat
+                # these as provider quirks worth retrying (not as code bugs).
                 if len(response.choices) == 0 or response.choices[0] is None:
-                    raise ValueError(f"API call returned an empty message: {response}")
+                    raise LLMBadResponseShapeError(
+                        f"API call returned an empty message: {response}"
+                    )
 
                 for choice in response.choices:
                     if choice.message.content == "" and len(choice.message.tool_calls) == 0:
-                        raise ValueError(f"API call returned an empty message: {response}")
+                        raise LLMBadResponseShapeError(
+                            f"API call returned an empty message: {response}"
+                        )
 
                 if response.choices[0].finish_reason not in [
                     "stop",
                     "function_call",
                     "tool_calls",
                 ]:
-                    # "length" historically retried; treat the same way via ValueError
-                    # so the unified classifier handles it.
-                    raise ValueError(f"Bad finish reason from API: {response.choices[0].finish_reason}")
+                    # "length" finish_reason historically retried — same
+                    # classification path as the other shape failures.
+                    raise LLMBadResponseShapeError(
+                        f"Bad finish reason from API: {response.choices[0].finish_reason}"
+                    )
 
                 log_telemetry(self.logger, "_handle_ai_response finish")
                 return response
@@ -805,9 +824,10 @@ class Agent(BaseAgent):
                 if attempt >= max_attempts:
                     # Budget exhausted on a Transient. Tag with the inner-
                     # exhausted marker so process_with_policy doesn't add
-                    # another 3-attempt whole-step cycle on top — that
-                    # multiplication used to make a sustained 429 cost
-                    # 9 LLM calls per save (VEPAGE-1251 §5.6).
+                    # another whole-step retry cycle on top — that would
+                    # multiply inner × whole-step attempts (an exhausted
+                    # 3-tier inner × 3-tier whole-step = 9 LLM calls per
+                    # save under a sustained 429).
                     log_telemetry(self.logger, "_get_ai_reply transient exhausted")
                     self.logger.warning(
                         "[Mirix.Agent.%s] _get_ai_reply: transient retries exhausted after %d attempts: %s",
@@ -967,9 +987,9 @@ class Agent(BaseAgent):
                 # Anything else (DB blip, provider 503, AttributeError, code
                 # bug) is intentionally NOT caught here — it propagates out of
                 # `_handle_ai_response` -> `step()` so `process_with_policy`
-                # sees the typed exception and classifies it. This is the
-                # VEPAGE-1228 silent-data-loss fix: stop turning real bugs
-                # into friendly strings that make the source appear "complete".
+                # sees the typed exception and classifies it. Without this
+                # rule, real bugs get turned into friendly strings that make
+                # the source appear "complete" (silent data loss).
                 try:
                     # Failure case 1: function name is wrong (not in agent_state.tools)
                     target_mirix_tool = None
@@ -1365,11 +1385,11 @@ class Agent(BaseAgent):
             # deduped or already-processed sources short-circuit before this runs.
             if self.agent_state.is_type(AgentType.meta_memory_agent) and self.direct_writes:
                 await self._apply_direct_writes_traced()
-                # step() does NOT finalize anymore (VEPAGE-1251 Option B).
-                # On clean return, dispatch_save calls finalize_source(SUCCESS)
-                # in the post-policy handler. If _apply_direct_writes_traced
-                # raises, the exception propagates and dispatch_save records
-                # the appropriate failure outcome.
+                # step() does not finalize. On clean return, dispatch_save
+                # calls finalize_source(SUCCESS) in the post-policy handler.
+                # If _apply_direct_writes_traced raises, the exception
+                # propagates and dispatch_save records the appropriate
+                # failure outcome.
                 return MirixUsageStatistics(step_count=0)
 
             if self.agent_state.is_type(AgentType.meta_memory_agent):
@@ -1520,11 +1540,11 @@ class Agent(BaseAgent):
                 try:
                     await summary_task
                 except Exception as e:
-                    # VEPAGE-1157: this task runs CONCURRENTLY with the sub-agent
-                    # gather via asyncio.create_task. Its exceptions surface here
-                    # only at await time. Log the full cause chain — the original
-                    # warning swallowed the stack and made the asyncpg / MissingGreenlet
-                    # signature invisible.
+                    # The summary task runs CONCURRENTLY with the sub-agent
+                    # gather via asyncio.create_task. Its exceptions surface
+                    # here only at await time. Log the full cause chain so
+                    # wrapped exceptions (e.g. asyncpg / MissingGreenlet
+                    # signatures) stay visible.
                     try:
                         from mirix.queue.error_policy import format_exc_chain
 
@@ -1532,7 +1552,7 @@ class Agent(BaseAgent):
                     except Exception:
                         chain = "<chain-format-failed>"
                     logger.error(
-                        "VEPAGE-1157 summary_task EXC: source=%s exc_type=%s — chain: %s",
+                        "summary_task failed: source=%s exc_type=%s — chain: %s",
                         self.memory_source_id,
                         type(e).__name__,
                         chain,
@@ -1551,8 +1571,7 @@ class Agent(BaseAgent):
             # this point: they raised out of `inner_step` earlier.
             #
             # step() does NOT finalize on the success path either — that's
-            # `dispatch_save`'s job after process_with_policy returns SUCCESS
-            # (VEPAGE-1251 Option B).
+            # `dispatch_save`'s job after process_with_policy returns SUCCESS.
             if (
                 self.agent_state.is_type(AgentType.meta_memory_agent)
                 and function_failed

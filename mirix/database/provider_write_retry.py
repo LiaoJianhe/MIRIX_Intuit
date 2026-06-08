@@ -1,11 +1,11 @@
 """Retry + classification helpers for relational-provider writes.
 
-The provider boundary in ECMS translates each SDK exception into one of the
-MIRIX-owned types (`ProviderTransientError`, `ProviderPermanentError`,
-`ProviderConflictError`, `ProviderNotFoundError`) via
-`common/ipsr/sdk_exception_translation.py` (VEPAGE-1251 §5.6). With
-translation in place, classification here is **pure isinstance** — no
-structural detection, no string-matching, no SDK class imports in core.
+Each registered provider catches its SDK exceptions at the boundary and
+re-raises one of the MIRIX-owned types (`ProviderTransientError`,
+`ProviderPermanentError`, `ProviderConflictError`, `ProviderNotFoundError`).
+With translation in place, classification here is **pure isinstance** —
+no structural detection, no string-matching, no SDK class imports in
+core.
 
 Three failure classes the manager call sites care about:
 
@@ -18,12 +18,12 @@ Three failure classes the manager call sites care about:
 * **Permanent** — anything else (auth, unknown entity, malformed request).
   Raised immediately, no retry.
 
-KNOWN STACKING (follow-up): The ECMS provider's own `_retry_transient` /
-`retry_with_backoff` already retries 5xx/429 before exceptions reach this
-helper, so callers that wrap a provider call in `retry_transient` get
-N×M attempts. The inner-exhausted marker short-circuits the second tier,
-but the cleaner long-term fix is to delete this helper and let the
-provider's own retry tier be the only one. Tracked separately.
+KNOWN STACKING (follow-up): A registered provider may have its own
+inner-retry tier (e.g. one that retries 5xx/429 before exceptions reach
+this helper), so callers that wrap a provider call in `retry_transient`
+can get N×M attempts. The inner-exhausted marker short-circuits the
+second tier, but the cleaner long-term fix is to delete this helper and
+let the provider's own retry tier be the only one. Tracked separately.
 """
 
 import asyncio
@@ -82,7 +82,8 @@ async def retry_transient(
 
     On exhausted budget, the propagated exception is tagged with the
     inner-exhausted marker so `process_with_policy` does NOT add another
-    whole-step retry cycle on top (VEPAGE-1251 §5.6).
+    whole-step retry cycle on top (kills the inner × whole-step
+    multiplication).
 
     If the exception arrives already inner-exhausted from a deeper tier
     (e.g. the provider's own `_retry_transient` already retried 3×), this

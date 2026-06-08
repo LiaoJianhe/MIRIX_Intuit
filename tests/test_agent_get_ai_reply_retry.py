@@ -180,11 +180,10 @@ async def test_get_ai_reply_transient_then_success(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_get_ai_reply_empty_response_retries(monkeypatch):
-    """An empty-choices response is a ValueError → Transient → retry.
+    """An empty-choices response raises LLMBadResponseShapeError → Transient → retry.
 
     Guards the Gemini-quirk path: providers occasionally return empty content,
-    and the old code retried via the ValueError branch. New code must still
-    retry these via the unified classifier.
+    and this is treated as a transient provider quirk that retrying may fix.
     """
     monkeypatch.setattr("mirix.agent.agent.asyncio.sleep", AsyncMock())
 
@@ -216,7 +215,10 @@ async def test_get_ai_reply_empty_response_retries(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_get_ai_reply_bad_finish_reason_retries(monkeypatch):
-    """A finish_reason that isn't stop/function_call/tool_calls raises ValueError."""
+    """A finish_reason that isn't stop/function_call/tool_calls raises
+    LLMBadResponseShapeError, which classifies TRANSIENT and gets retried."""
+    from mirix.errors import LLMBadResponseShapeError
+
     monkeypatch.setattr("mirix.agent.agent.asyncio.sleep", AsyncMock())
 
     bad = SimpleNamespace(
@@ -232,13 +234,13 @@ async def test_get_ai_reply_bad_finish_reason_retries(monkeypatch):
     # Convert the lambda to a coroutine return path: use AsyncMock side_effect
     llm_client.send_llm_request = AsyncMock(return_value=bad)
 
-    with pytest.raises(ValueError):
+    with pytest.raises(LLMBadResponseShapeError):
         await Agent._get_ai_reply(
             stub,
             message_sequence=[],
             llm_client=llm_client,
         )
-    # Initial + retries — bad finish_reason persists, budget exhausts, ValueError raised
+    # Initial + retries — bad finish_reason persists, budget exhausts.
     from mirix.settings import settings
 
     expected_total = settings.llm_inline_retry_max_attempts + 1

@@ -128,6 +128,18 @@ class LLMUnprocessableEntityError(LLMError):
     pass
 
 
+class LLMBadResponseShapeError(LLMError):
+    """LLM returned a response with the wrong shape — empty choices, empty
+    content + no tool calls, or an unexpected finish_reason like ``length``.
+
+    These look like transient provider quirks: the LLM should produce a
+    well-shaped response on retry. Classified TRANSIENT; ``_get_ai_reply``'s
+    inner retry loop handles it like any other transient.
+    """
+
+    pass
+
+
 class LLMChainingExhaustedError(MirixError):
     """The meta-agent LLM loop ran out of chaining budget with the last
     iteration still flagging a CorrectableToolError-shape failure.
@@ -140,8 +152,8 @@ class LLMChainingExhaustedError(MirixError):
     Classified as Bucket.PERMANENT — retrying the whole step would just
     re-run the same prompt against the same LLM and get the same broken
     output. Surfaces as a save-path PERMANENT_FAILURE so the source can be
-    dead-lettered with a distinct outcome value (VEPAGE-1250 will give it
-    its own `status` column value).
+    dead-lettered with a distinct outcome value when a future status-column
+    migration distinguishes outcomes at the DB level.
     """
 
     pass

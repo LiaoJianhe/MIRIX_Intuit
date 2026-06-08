@@ -95,7 +95,8 @@ def retry_db_operation(
                             )
                             # Inner-retry budget exhausted on a DB transient.
                             # Tag so process_with_policy doesn't add another
-                            # whole-step retry cycle on top (VEPAGE-1251 §5.6).
+                            # whole-step retry cycle on top (the inner ×
+                            # whole-step multiplication).
                             from mirix.queue.error_policy import mark_inner_exhausted
 
                             raise mark_inner_exhausted(e)
@@ -811,10 +812,11 @@ class SqlalchemyBase(CommonSqlalchemyMetaMixins, Base):
             return self
         except Exception as e:
             if _TRACE_MISSING_GREENLET:
-                # VEPAGE-1157: log pre-rollback exception detail BEFORE further
-                # DB ops. self.id is touched best-effort — if it lazy-loads and
-                # raises (the suspected root cause), report <id-load-raised:..>
-                # rather than letting the log line itself raise.
+                # Log pre-rollback exception detail BEFORE further DB ops.
+                # self.id is touched best-effort — if it lazy-loads and
+                # raises (a suspected cause of MissingGreenlet cascades),
+                # report <id-load-raised:..> rather than letting the log
+                # line itself raise.
                 try:
                     _id = self.id
                 except Exception as id_exc:
@@ -826,7 +828,7 @@ class SqlalchemyBase(CommonSqlalchemyMetaMixins, Base):
                 except Exception:
                     _chain = "<chain-format-failed>"
                 logger.error(
-                    "VEPAGE-1157 update_with_redis EXC: cls=%s id=%s exc_type=%s "
+                    "update_with_redis EXC: cls=%s id=%s exc_type=%s "
                     "session_in_tx=%s session_active=%s — chain: %s",
                     self.__class__.__name__,
                     _id,
