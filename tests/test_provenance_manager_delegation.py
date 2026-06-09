@@ -104,14 +104,16 @@ class TestMemorySourceManagerDelegation:
             assert out.id == "src-aaaaaaaa"
 
     @pytest.mark.asyncio
-    async def test_create_on_conflict_returns_none_for_dedup(self):
-        """On conflict the manager looks up the pre-existing record (defensive
-        check that something actually exists) and returns None to signal
-        "deduped" to the caller. It must NOT return the pre-existing row —
-        the caller (Agent._persist_memory_source) treats None as "skip this
-        save," and returning the pre-existing row would make the worker
-        re-run the pipeline and produce duplicate memories."""
-        existing = _memory_source_row()
+    async def test_create_same_id_conflict_returns_the_row(self):
+        """A conflict whose existing row has the SAME id as the requested id is a
+        retry / redelivery of *this* submission (the id PK is what conflicted).
+
+        The manager returns that row so the caller resumes it. Finalize keys off
+        the unchanged queue id, so marking it complete later lands on this row.
+        Completion is the caller's decision (it reads processing_complete); the
+        manager just hands back the canonical row.
+        """
+        existing = _memory_source_row(id="src-aaaaaaaa", processing_complete=False)
         mock_provider = MagicMock()
         mock_provider.create = AsyncMock(side_effect=_ProviderConflictError("uq_test"))
         mock_provider.find_using_named_query = AsyncMock(return_value=[existing])
@@ -122,14 +124,49 @@ class TestMemorySourceManagerDelegation:
         ):
             mgr = _memory_source_mgr()
             out = await mgr.create(
-                memory_source_id="src-new",
+                memory_source_id="src-aaaaaaaa",
                 actor=_mock_actor(),
                 user_id="user-1",
                 organization_id="org-1",
                 external_id="ext-1",
             )
-            mock_provider.find_using_named_query.assert_awaited_once()
-            assert out is None
+            assert out is not None
+            assert out.id == "src-aaaaaaaa"
+
+    @pytest.mark.asyncio
+    async def test_create_different_id_conflict_returns_none(self):
+        """A conflict whose existing row has a DIFFERENT id is NOT a retry — it is
+        a separate duplicate submission that another worker owns (the conflict is
+        on the external_id / batch_hash index, not the id PK).
+
+        The manager returns None ("skip") regardless of the existing row's
+        completion state: a completed row is a genuine duplicate, and an
+        incomplete row is owned by the other submission, which finishes it on its
+        own (or via same-id redelivery). Resuming a different-id row here would
+        race the owner and mis-target finalize (which keys off this submission's
+        id), so we never do it.
+        """
+        for complete in (True, False):
+            existing = _memory_source_row(id="src-bbbbbbbb", processing_complete=complete)
+            mock_provider = MagicMock()
+            mock_provider.create = AsyncMock(
+                side_effect=_ProviderConflictError("uq_test")
+            )
+            mock_provider.find_using_named_query = AsyncMock(return_value=[existing])
+
+            with patch(
+                "mirix.database.relational_provider.get_relational_provider",
+                return_value=mock_provider,
+            ):
+                mgr = _memory_source_mgr()
+                out = await mgr.create(
+                    memory_source_id="src-aaaaaaaa",
+                    actor=_mock_actor(),
+                    user_id="user-1",
+                    organization_id="org-1",
+                    external_id="ext-1",
+                )
+                assert out is None, f"different-id conflict (complete={complete})"
 
     @pytest.mark.asyncio
     async def test_get_by_id_delegates_to_provider(self):

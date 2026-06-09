@@ -191,7 +191,6 @@ def _make_meta_agent_stub(
     agent.summarize = False
     agent.source_messages = None
     agent._block_scopes = ["test"]
-    agent._source_deduped = source_deduped
 
     # Managers — stubbed to record calls; message_manager retention read must return []
     agent.message_manager = MagicMock()
@@ -205,11 +204,10 @@ def _make_meta_agent_stub(
     agent.memory_source_manager.mark_processing_complete = AsyncMock(return_value=None)
     agent.memory_source_manager.finalize_source = AsyncMock(return_value=None)
 
-    # _persist_memory_source is a method we want to no-op unless dedup drives it
+    # _persist_memory_source returns whether to continue: False simulates a
+    # different-id dedup (skip), True a normal persist / same-id resume.
     async def _fake_persist(memory_source_id, input_messages):
-        # Let tests control whether dedup fires via source_deduped flag
-        if source_deduped:
-            agent._source_deduped = True
+        return not source_deduped
 
     agent._persist_memory_source = _fake_persist
     return agent

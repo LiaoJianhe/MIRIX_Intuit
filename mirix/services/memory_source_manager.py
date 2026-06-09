@@ -99,19 +99,22 @@ class MemorySourceManager:
         filter_tags: Optional[Dict[str, Any]] = None,
         use_cache: bool = True,
     ) -> Optional[PydanticMemorySource]:
-        """Create a memory source record using INSERT ON CONFLICT DO NOTHING.
+        """Create (or resolve) the canonical memory source row, idempotently.
 
         Enforces scope injection: filter_tags["scope"] is always set to
         actor.write_scope, matching the pattern in raw_memory_manager.
         Client-provided filter_tags are preserved but scope cannot be overridden.
 
-        Returns the newly-created ``PydanticMemorySource`` on success, or ``None``
-        when the write was deduped — i.e. a prior submission already created a
-        source under the same dedup key (external_id / batch_hash). A ``None``
-        return is the caller's signal to short-circuit agent processing. Both the
-        IPS-Relational provider path and the PG ON CONFLICT DO NOTHING path honor
-        this contract.
+        Returns the row to process, or ``None`` to skip:
+          * No conflict -> the newly-created row.
+          * Conflict whose existing row has the SAME id (the id PK conflicted) ->
+            that row. A retry / redelivery of this submission; the caller resumes
+            it and finalize (keyed off the unchanged id) completes it.
+          * Conflict whose existing row has a DIFFERENT id (external_id /
+            batch_hash conflicted) -> ``None``. A separate duplicate submission
+            owns the content; the caller skips and that owner finishes its row.
 
+        Both the IPS-Relational and PG ON CONFLICT DO NOTHING paths honor this.
         Cache write handled by the ORM layer via create_or_ignore_with_redis.
         """
         # Enforce scope from actor's write_scope (same pattern as raw_memory_manager)
@@ -172,24 +175,23 @@ class MemorySourceManager:
                             e,
                         )
                     raise
-                # Conflict — a prior submission already created this source under
-                # the same dedup key (external_id or batch_hash). Signal dedup to
-                # the caller by returning None, matching the PG ON CONFLICT DO
-                # NOTHING path (get_by_id(this_id) is None because this call's row
-                # was never inserted). The caller (Agent._persist_memory_source)
-                # treats a None return as "deduped" and short-circuits agent
-                # processing, so we must NOT return the pre-existing (different-id)
-                # row here — doing so would make the worker re-run the pipeline and
-                # produce duplicate memories.
+                # Conflict on a unique index. Resolve the winning row by the key
+                # that conflicted, then decide resume vs skip by id identity:
                 #
-                # We still confirm the pre-existing row exists (defensive: a
-                # conflict with no recoverable row indicates a different failure,
-                # so re-raise). Named queries explicitly project all columns
-                # plus FK columns so PydanticMemorySource construction works.
-                logger.debug(
-                    "memory_sources conflict for %s — deduped against existing row",
-                    memory_source_id,
-                )
+                #   * SAME id (the id PK conflicted) -> a retry / redelivery of
+                #     *this* submission. Return the row so the caller resumes it;
+                #     finalize keys off the unchanged id, so completion lands on
+                #     this row.
+                #   * DIFFERENT id (external_id / batch_hash conflicted) -> a
+                #     separate duplicate submission owns this content. Return None
+                #     so the caller skips: a completed row is a true duplicate, and
+                #     an incomplete one is finished by its owner (or that owner's
+                #     own same-id redelivery). Resuming it here would race the
+                #     owner and mis-target finalize (which keys off this id).
+                #
+                # The lookup also confirms the row exists (a conflict with no
+                # recoverable row is a different failure — re-raise). Named queries
+                # project all columns + FK columns so PydanticMemorySource builds.
                 if external_id is not None:
                     records = await provider.find_using_named_query(
                         "memory_sources",
@@ -220,10 +222,17 @@ class MemorySourceManager:
                     )
                 else:
                     raise
-                if records:
-                    # Deduped: a pre-existing row won the unique constraint.
-                    return None
-                raise
+                if not records:
+                    raise
+                existing = PydanticMemorySource(**records[0])
+                if existing.id == memory_source_id:
+                    return existing
+                logger.debug(
+                    "memory_sources conflict for %s — owned by different source %s; skipping",
+                    memory_source_id,
+                    existing.id,
+                )
+                return None
 
         async with self.session_maker() as session:
             now = datetime.now(timezone.utc)
