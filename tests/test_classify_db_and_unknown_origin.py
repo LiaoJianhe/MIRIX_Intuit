@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from pydantic import BaseModel, ValidationError
 from sqlalchemy.exc import (
     DataError,
     IntegrityError,
@@ -30,6 +31,12 @@ from sqlalchemy.exc import (
 )
 
 from mirix.queue.error_policy import Bucket, classify
+
+
+class _Model(BaseModel):
+    """Tiny model to raise a real pydantic ValidationError in tests."""
+
+    filter_tags: dict
 
 
 # ---------- SQLAlchemy mappings ----------
@@ -104,6 +111,39 @@ class TestUnknownOriginSplit:
             undefined_variable_xyz  # noqa: F821
         except NameError as exc:
             assert classify(exc) is Bucket.PERMANENT
+
+    def test_validation_error_pure_python_is_permanent(self):
+        """A pydantic ValidationError raised constructing a schema from
+        already-fetched data (e.g. PydanticKnowledgeVaultItem(**row) when the
+        row's filter_tags shape doesn't match) is deterministic — the same
+        bytes re-validate to the same failure. With no provider frame it must
+        classify PERMANENT so the save fails fast instead of looping a
+        whole-step retry that can never pass."""
+        try:
+            _Model(filter_tags=[{"key": "seller_id", "values": ["x"]}])
+        except ValidationError as exc:
+            assert classify(exc) is Bucket.PERMANENT
+
+    def test_validation_error_with_provider_frame_is_transient(self, monkeypatch):
+        """A ValidationError surfacing through a provider/SDK frame may wrap a
+        flaky upstream that returned a partial body once; a retry might get a
+        valid body. The origin-split keeps it TRANSIENT when a provider frame
+        is on the traceback — same escape hatch as the bug-shape types.
+
+        Provider frames are detected by the raising frame's module __name__
+        (not function name). We register this test module as a provider hint so
+        a ValidationError raised here is treated as "surfaced from provider
+        code," exercising the escape-hatch branch.
+        """
+        import mirix.queue.error_policy as ep
+
+        monkeypatch.setattr(
+            ep, "_PROVIDER_FRAME_HINTS", ep._PROVIDER_FRAME_HINTS + (__name__,)
+        )
+        try:
+            _Model(filter_tags=[{"bad": "shape"}])
+        except ValidationError as exc:
+            assert classify(exc) is Bucket.TRANSIENT
 
     def test_unknown_non_bug_exception_still_transient(self):
         """A genuinely-unknown exception type (not a code-bug shape)

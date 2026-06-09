@@ -120,6 +120,57 @@ async def test_observation_id_restored_to_none_when_no_prior_parent():
 
 
 @pytest.mark.asyncio
+async def test_timed_span_stamps_tid_in_metadata():
+    """Every timed_span span carries the current TID in its metadata, so the
+    Langfuse OTel export emits ``langfuse.observation.metadata.tid`` and the
+    full-stack span-capture (which filters spans by that attribute) keeps these
+    nested worker spans instead of dropping them.
+
+    Without this, only the root spans that stamp the tid (the HTTP-entry trace
+    and the worker "Meta Agent" observation) survive the FST filter — every
+    timed_span span (Resolve Child Agents, Persist Memory Source, Agent Step,
+    ...) is silently dropped, and span-count guards see 0.
+    """
+    obs_context.clear_trace_context()
+    obs_context.set_trace_context(trace_id="trace-1", observation_id="outer-obs")
+    langfuse, _span = _make_langfuse_with_span("timed-span-obs")
+
+    with (
+        patch("mirix.observability.timed_spans.get_langfuse_client", return_value=langfuse),
+        patch("mirix.observability.timed_spans.mark_observation_as_child"),
+        patch("mirix.observability.timed_spans.get_tid", return_value="tid-xyz"),
+    ):
+        async with timed_span("Resolve Child Agents", metadata={"k": "v"}):
+            pass
+
+    call = langfuse.start_as_current_observation.call_args
+    md = call.kwargs["metadata"]
+    assert md.get("tid") == "tid-xyz", f"timed_span must stamp tid in metadata; got {md}"
+    # Caller-supplied metadata is preserved alongside the tid.
+    assert md.get("k") == "v"
+
+
+@pytest.mark.asyncio
+async def test_timed_span_omits_tid_when_absent():
+    """When there is no current TID, no tid key is forced into metadata (avoids
+    a misleading ``tid=None`` in the trace)."""
+    obs_context.clear_trace_context()
+    obs_context.set_trace_context(trace_id="trace-1", observation_id="outer-obs")
+    langfuse, _span = _make_langfuse_with_span("timed-span-obs")
+
+    with (
+        patch("mirix.observability.timed_spans.get_langfuse_client", return_value=langfuse),
+        patch("mirix.observability.timed_spans.mark_observation_as_child"),
+        patch("mirix.observability.timed_spans.get_tid", return_value=None),
+    ):
+        async with timed_span("Resolve Child Agents"):
+            pass
+
+    md = langfuse.start_as_current_observation.call_args.kwargs["metadata"]
+    assert "tid" not in md
+
+
+@pytest.mark.asyncio
 async def test_no_op_when_langfuse_disabled_leaves_context_untouched():
     """When tracing is unavailable the block still runs and the ContextVar is
     left untouched."""

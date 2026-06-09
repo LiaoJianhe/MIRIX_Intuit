@@ -54,3 +54,39 @@ class MaxOccurredAtResult:
     """
 
     max_occurred_at: Optional[object] = None
+
+
+@dataclass
+class AgentToolRow:
+    """For ``agent_manager.list_agents_with_tools_by_parent`` — one flat
+    ``(agent, tool)`` join row (LEFT JOIN, so tool columns are NULL for an agent
+    with no tools).
+
+    Field order is contractual with the NQ SELECT order: the relational
+    provider returns positional rows under ``skip_entity_mapping=True`` and zips
+    each row against these field names to produce a uniform dict. All fields
+    default to ``None`` so tool-less rows (and any short positional rows)
+    hydrate cleanly. If the NQ projection order changes, this must change in
+    lockstep.
+    """
+
+    agent_id: Optional[str] = None
+    agent_type: Optional[str] = None
+    agent_name: Optional[str] = None
+    agent_description: Optional[str] = None
+    agent_llm_config: Optional[str] = None
+    agent_embedding_config: Optional[str] = None
+    agent_system: Optional[str] = None
+    agent_tool_rules: Optional[str] = None
+    agent_mcp_tools: Optional[str] = None
+    agent_parent_id: Optional[str] = None
+    agent_organization_id: Optional[str] = None
+    agent_owner: Optional[str] = None
+    agent_created_at: Optional[str] = None
+    agent_updated_at: Optional[str] = None
+    tool_id: Optional[str] = None
+    tool_name: Optional[str] = None
+    tool_description: Optional[str] = None
+    tool_json_schema: Optional[str] = None
+    tool_type: Optional[str] = None
+    tool_organization_id: Optional[str] = None

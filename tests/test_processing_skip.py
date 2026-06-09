@@ -144,6 +144,39 @@ class TestProcessingSkip:
         assert result.total_tokens == 0
 
     @pytest.mark.asyncio
+    async def test_redelivery_of_complete_source_skips_before_persist(self):
+        """An already-complete source (redelivery) must short-circuit BEFORE
+        _persist_memory_source runs.
+
+        This is the ordering that lets fault directives resolve before persist
+        (so a tool=source_messages fault can fire on the dedup write) without
+        ever injecting on a redelivery of a completed source: the
+        processing-complete check sits before persist, so a completed
+        redelivery returns before any source_messages write happens.
+        """
+        agent, actor, user = _setup_agent("src-abc123", source_processing_complete=True)
+
+        from mirix.schemas.message import MessageCreate
+
+        input_msg = MessageCreate(role="user", content="test message")
+
+        with patch("mirix.agent.agent.LLMClient"):
+            result = await agent.step(
+                input_messages=[input_msg],
+                chaining=False,
+                max_chaining_steps=1,
+                stream=False,
+                skip_verify=True,
+                actor=actor,
+                user=user,
+            )
+
+        assert result.step_count == 0
+        # The whole point: no persist (hence no source_messages write) on a
+        # completed-source redelivery.
+        agent._persist_memory_source.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_no_skip_when_processing_incomplete(self):
         """Source with processing_complete=false proceeds normally."""
         agent, actor, user = _setup_agent("src-abc123", source_processing_complete=False)

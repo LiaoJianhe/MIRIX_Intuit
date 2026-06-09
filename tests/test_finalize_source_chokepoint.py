@@ -190,6 +190,87 @@ async def test_finalize_source_none_id_is_noop():
     mgr.mark_processing_complete.assert_not_awaited()
 
 
+# ---------- deduped source: finalize must not log a spurious ERROR ----------
+#
+# When a source is deduped (external_id / batch_hash conflict — either caught
+# up front or lost an INSERT ... ON CONFLICT race), the minted memory_source_id
+# never became a persisted row (the *winning* row from the prior submission is
+# already processing_complete=True). finalize_source still runs for the deduped
+# id with outcome=SUCCESS — marking complete is the correct intent (incomplete
+# = actively-processing ONLY) — but the underlying row doesn't exist, so the
+# provider's update raises not-found. That must be a benign no-op, NOT an
+# ERROR-level "Failed to finalize" line (which fails assert_no_error_logs in the
+# idempotency FST). See VEPAGE-1228 expansion / VEPAGE-1165.
+
+
+@pytest.mark.asyncio
+async def test_mark_processing_complete_tolerates_missing_row():
+    """mark_processing_complete on a row that doesn't exist (deduped loser)
+    is a benign no-op — it must not raise."""
+    from mirix.errors import ProviderNotFoundError
+    from mirix.services.memory_source_manager import MemorySourceManager
+
+    mgr = MemorySourceManager.__new__(MemorySourceManager)
+
+    fake_provider = MagicMock()
+    fake_provider.update = AsyncMock(side_effect=ProviderNotFoundError("memory_sources/src-x not found"))
+
+    with patch(
+        "mirix.database.relational_provider.get_relational_provider",
+        return_value=fake_provider,
+    ):
+        # Must not raise.
+        await mgr.mark_processing_complete("src-deduped")
+
+    fake_provider.update.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_mark_processing_complete_reraises_real_update_errors():
+    """A genuine update failure (not a missing row) must still propagate, so
+    finalize_source's ERROR safety net still fires for real problems."""
+    from mirix.services.memory_source_manager import MemorySourceManager
+
+    mgr = MemorySourceManager.__new__(MemorySourceManager)
+
+    fake_provider = MagicMock()
+    fake_provider.update = AsyncMock(side_effect=RuntimeError("connection reset"))
+
+    with patch(
+        "mirix.database.relational_provider.get_relational_provider",
+        return_value=fake_provider,
+    ):
+        with pytest.raises(RuntimeError):
+            await mgr.mark_processing_complete("src-real")
+
+
+@pytest.mark.asyncio
+async def test_finalize_source_does_not_log_error_for_deduped_source():
+    """End-to-end: finalize_source(SUCCESS) on a deduped (missing) source must
+    complete without going through the logger.exception ERROR branch."""
+    from mirix.errors import ProviderNotFoundError
+    from mirix.queue.error_policy import SaveOutcome
+    from mirix.services.memory_source_manager import MemorySourceManager
+
+    mgr = MemorySourceManager.__new__(MemorySourceManager)
+
+    fake_provider = MagicMock()
+    fake_provider.update = AsyncMock(
+        side_effect=ProviderNotFoundError("Entity memory_sources/src-x not found for update")
+    )
+
+    with (
+        patch(
+            "mirix.database.relational_provider.get_relational_provider",
+            return_value=fake_provider,
+        ),
+        patch("mirix.services.memory_source_manager.logger") as mock_logger,
+    ):
+        await mgr.finalize_source("src-deduped", SaveOutcome.SUCCESS)
+
+    mock_logger.exception.assert_not_called()
+
+
 # ---------- LLM-path: complete = success only ----------
 
 

@@ -42,6 +42,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Awaitable, Callable, Optional
 
+from pydantic import ValidationError
 from sqlalchemy.exc import DataError, DBAPIError, IntegrityError, OperationalError
 
 from mirix.errors import (
@@ -130,12 +131,20 @@ _TRANSIENT_TYPES: tuple[type[BaseException], ...] = (
 # redeliveries and hides the bug. With a provider frame in the traceback,
 # the exception is treated as transient (the provider might have wrapped
 # a real infra failure).
+#
+# ValidationError is included via the same origin-split: a pydantic schema
+# mismatch built from already-fetched data (e.g. PydanticKnowledgeVaultItem(**row)
+# when the row's shape doesn't match the model) is deterministic — re-validating
+# the same bytes fails identically, so it must not loop a whole-step retry. With a
+# provider/SDK frame on the traceback (parsing a possibly-partial upstream body)
+# it stays transient, since a retry might fetch a valid body.
 _PYTHON_BUG_TYPES: tuple[type[BaseException], ...] = (
     AttributeError,
     KeyError,
     TypeError,
     IndexError,
     NameError,
+    ValidationError,
 )
 
 # Frame module-name fragments that signal "this exception came from

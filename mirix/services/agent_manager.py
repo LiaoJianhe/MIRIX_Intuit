@@ -1394,17 +1394,23 @@ class AgentManager:
         tools, via LEFT JOIN); we group them agent-side into
         ``PydanticAgentState`` objects with ``tools`` populated.
 
-        Rows arrive as raw projection dicts (``skip_entity_mapping=True``) whose
-        keys are the NQ's column aliases (``agent_*`` / ``tool_*``) — they do NOT
-        go through ``FieldMapper`` camel/snake mapping, so we map and JSON-parse
-        the aliased columns here, mirroring the ECMS
-        ``_ips_get_clients_with_agents`` precedent.
+        Rows are projected by the NQ (``skip_entity_mapping=True``) and do NOT go
+        through ``FieldMapper`` camel/snake mapping. The deployed NQ via the
+        IPS-R SDK returns each row as a *positional* list (the column-order
+        contract of a multi-column projection), not a named dict — so we pass a
+        ``result_set_entity_class`` (``AgentToolRow``) whose field order matches
+        the NQ SELECT order. The relational provider zips each positional row
+        against those field names and hands back uniform dicts keyed by the
+        aliases, which we then JSON-parse and group below. This is the same
+        ``result_set_entity_class`` mechanism the other manager NQs use for
+        non-entity projections (see ``mirix/database/named_query_results.py``).
 
         Falls back to ``list_agents`` (legacy per-agent tool hydration) when no
         relational provider is active (e.g. PostgreSQL-backed tests).
         """
         import json
 
+        from mirix.database.named_query_results import AgentToolRow
         from mirix.database.relational_provider import get_relational_provider
         from mirix.schemas.tool import Tool as PydanticTool
 
@@ -1422,6 +1428,7 @@ class AgentManager:
             },
             page_size=1000,
             skip_entity_mapping=True,
+            result_set_entity_class=AgentToolRow,
         )
 
         def _parse_json(value):

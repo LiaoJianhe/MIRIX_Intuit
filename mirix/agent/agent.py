@@ -1347,30 +1347,10 @@ class Agent(BaseAgent):
             # the meta_memory_agent type so sub-agents don't re-persist.
             summary_task: Optional[asyncio.Task] = None
             if self.agent_state.is_type(AgentType.meta_memory_agent) and self.memory_source_id:
-                self._source_deduped = False
-
-                async with timed_span(
-                    "Persist Memory Source",
-                    metadata={"memory_source_id": self.memory_source_id},
-                ):
-                    await self._persist_memory_source(
-                        memory_source_id=self.memory_source_id,
-                        input_messages=raw_input_messages,
-                    )
-
-                # Source was deduped at DB level (external_id or batch_hash conflict).
-                # A prior submission already created the source and was processed.
-                # Skip all agent processing to avoid duplicate memories.
-                if self._source_deduped:
-                    logger.info("Source %s deduped, skipping agent processing", self.memory_source_id)
-                    emit_idempotency_skip_span(
-                        name="Idempotency Skip: source deduped",
-                        reason="source-deduped",
-                        metadata={"memory_source_id": self.memory_source_id},
-                    )
-                    return MirixUsageStatistics(step_count=0)
-
-                # Skip processing if this source was already fully processed (redelivery case).
+                # Skip already-processed sources (redelivery)
+                # Note: this catches scenarios where the same source (same id) is being retried.
+                # It does not catch scenarios where the same source with a different id was queued as a separate message/
+                # It also ONLY short circuits if the matched result has been marked as complete.
                 async with timed_span(
                     "Check Source Processing State",
                     metadata={"memory_source_id": self.memory_source_id},
@@ -1385,16 +1365,41 @@ class Agent(BaseAgent):
                     )
                     return MirixUsageStatistics(step_count=0)
 
-                # Test-only fault injection (inert in prod): register per-source
-                # fault directives carried in source_metadata. Placed AFTER the
-                # dedup / processing-complete short-circuits so a redelivery of
-                # an already-processed source never injects. No-op when injection
-                # is disabled. The active-source ContextVar that the provider
-                # hooks read is set/cleared at the per-save boundary in
-                # dispatch_save, not here — so it can't go stale across messages.
+                # Test-only fault injection (inert in prod). Resolved BEFORE
+                # persist so a directive scoped to the source_messages write (in
+                # persist, incl. the conflict path) can fire. Only registers;
+                # idempotent; no-op when disabled.
+                # TODO: This is currently placed AFTER the check above so that the fault injection for the
+                # persist memory source wont accidentally trigger early, but the need to manage the placement
+                # of this call is a hack and the underlying mechanism should be redesigned to be more robust.
                 fault_injection.resolve_directives(
                     self.memory_source_id, getattr(self, "source_metadata", None)
                 )
+
+                # Persist the memory source and its messages before we process it.
+                async with timed_span(
+                    "Persist Memory Source",
+                    metadata={"memory_source_id": self.memory_source_id},
+                ):
+                    # In a race condition scenario (kafka redelivery while still processing),
+                    # this relies on DB unique constraints to avoid writing duplicate rows.
+                    # Note: should_continue is
+                    should_continue = await self._persist_memory_source(
+                        memory_source_id=self.memory_source_id,
+                        input_messages=raw_input_messages,
+                    )
+
+                # The content is owned by a different submission (true duplicate,
+                # or one another worker is finishing) — skip to avoid duplicate
+                # memories. A same-id retry returns True and resumes here.
+                if not should_continue:
+                    logger.info("Source %s deduped, skipping agent processing", self.memory_source_id)
+                    emit_idempotency_skip_span(
+                        name="Idempotency Skip: source deduped",
+                        reason="source-deduped",
+                        metadata={"memory_source_id": self.memory_source_id},
+                    )
+                    return MirixUsageStatistics(step_count=0)
 
                 # Dispatch summary generation in parallel with the memory sub-agents.
                 # Awaited before mark_processing_complete; on failure the exception
@@ -1761,15 +1766,18 @@ class Agent(BaseAgent):
         self,
         memory_source_id: str,
         input_messages: list,
-    ) -> None:
+    ) -> bool:
         """Persist a MemorySource and its SourceMessages at the start of meta-agent processing.
 
-        Uses INSERT ON CONFLICT DO NOTHING for idempotent redelivery.
-        Called only by meta_memory_agent before sub-agent dispatch.
+        Returns True if processing should continue, False if this submission
+        should be skipped (the content is owned by a different submission — a
+        true duplicate, or one another worker is finishing). A same-id conflict
+        (retry / redelivery of this submission) returns True and resumes.
 
-        Before persisting, computes batch_hash and auto-derives external_id
-        so that duplicate submissions are caught by the partial unique indexes
-        on memory_sources.
+        Uses INSERT ON CONFLICT DO NOTHING for idempotent redelivery. Called only
+        by meta_memory_agent before sub-agent dispatch. Computes batch_hash and
+        auto-derives external_id so duplicate submissions hit the partial unique
+        indexes on memory_sources.
         """
         from mirix.services.source_message_manager import (
             compute_batch_hash,
@@ -1834,10 +1842,9 @@ class Agent(BaseAgent):
             )
 
             if source is None:
-                # Deduped — source already exists from a prior submission.
-                # Skip message persistence and signal caller to skip agent processing.
-                self._source_deduped = True
-                return
+                # Content owned by a different submission/ kafaka message (true duplicate, or one
+                # another worker is finishing) — skip without persisting messages.
+                return False
 
             if msg_dicts:
                 await self.source_message_manager.bulk_insert(
@@ -1853,6 +1860,7 @@ class Agent(BaseAgent):
                 memory_source_id,
                 len(msg_dicts),
             )
+            return True
         except Exception as e:
             logger.error("Failed to persist memory source %s: %s", memory_source_id, e)
             raise
