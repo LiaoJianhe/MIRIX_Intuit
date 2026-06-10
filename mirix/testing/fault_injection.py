@@ -62,7 +62,6 @@ SaveOutcome is read from finalize_source's existing log line — no extra seam.
 from __future__ import annotations
 
 import contextvars
-import logging
 import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
@@ -74,9 +73,10 @@ from mirix.errors import (
     ProviderPermanentError,
     ProviderTransientError,
 )
+from mirix.log import get_logger
 from mirix.settings import settings
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Prefix on every fire log line so the full-stack tests can grep the aggregated
 # service log for fires (and count them) the same way assert_no_error_logs
@@ -149,7 +149,9 @@ class SyntheticProviderError(Exception):
         self.status_code = status_code
 
 
-def _make_exception(shape: str, ctx: str, *, provider_site: bool = False) -> BaseException:
+def _make_exception(
+    shape: str, ctx: str, *, provider_site: bool = False
+) -> BaseException:
     """Map a fault shape to the exception that drives the documented outcome.
 
     The shapes deliberately mirror the typed save-path vocabulary so the
@@ -180,7 +182,9 @@ def _make_exception(shape: str, ctx: str, *, provider_site: bool = False) -> Bas
         return ProviderPermanentError(msg)
     if shape in _PROVIDER_SHAPE_STATUS:
         if provider_site:
-            return SyntheticProviderError(msg, status_code=_PROVIDER_SHAPE_STATUS[shape])
+            return SyntheticProviderError(
+                msg, status_code=_PROVIDER_SHAPE_STATUS[shape]
+            )
         # Off the provider boundary: raise the typed error directly.
         if shape == "transient":
             return ProviderTransientError(msg)
@@ -319,9 +323,13 @@ def resolve_directives(source_key: str, source_metadata: Optional[dict]) -> None
         site = raw.get("site")
         shape = raw.get("shape")
         if site not in SITES:
-            raise ValueError(f"fault-injection: unknown site {site!r} (valid: {sorted(SITES)})")
+            raise ValueError(
+                f"fault-injection: unknown site {site!r} (valid: {sorted(SITES)})"
+            )
         if shape not in _VALID_SHAPES:
-            raise ValueError(f"fault-injection: unknown shape {shape!r} (valid: {sorted(_VALID_SHAPES)})")
+            raise ValueError(
+                f"fault-injection: unknown shape {shape!r} (valid: {sorted(_VALID_SHAPES)})"
+            )
         parsed.append(
             FaultDirective(
                 site=site,
@@ -332,10 +340,14 @@ def resolve_directives(source_key: str, source_metadata: Optional[dict]) -> None
         )
 
     _directives.setdefault(source_key, []).extend(parsed)
-    logger.info("%s resolved %d directive(s) for source=%s", LOG_PREFIX, len(parsed), source_key)
+    logger.info(
+        "%s resolved %d directive(s) for source=%s", LOG_PREFIX, len(parsed), source_key
+    )
 
 
-def _take_matching_directive(site: str, source_key: Optional[str], tool: Optional[str]) -> Optional[FaultDirective]:
+def _take_matching_directive(
+    site: str, source_key: Optional[str], tool: Optional[str]
+) -> Optional[FaultDirective]:
     """Find a matching directive for (source_key, site, tool), and if it should
     fire on this call, increment its budget + the fire counter and return it.
     Returns None when injection is disabled or nothing matches/fires."""
@@ -365,7 +377,9 @@ def _log_fire(shape: str, site: str, source_key: str, tool: Optional[str]) -> No
     )
 
 
-def maybe_raise(site: str, *, source_key: Optional[str] = None, tool: Optional[str] = None) -> None:
+def maybe_raise(
+    site: str, *, source_key: Optional[str] = None, tool: Optional[str] = None
+) -> None:
     """Raise the configured fault for ``site`` if one matches; otherwise no-op.
 
     Call sites invoke this unconditionally — both the enabled flag and the
@@ -379,7 +393,9 @@ def maybe_raise(site: str, *, source_key: Optional[str] = None, tool: Optional[s
     raise _make_exception(directive.shape, ctx, provider_site=site in _PROVIDER_SITES)
 
 
-def next_fault(site: str, *, source_key: Optional[str] = None, tool: Optional[str] = None) -> Optional[str]:
+def next_fault(
+    site: str, *, source_key: Optional[str] = None, tool: Optional[str] = None
+) -> Optional[str]:
     """Like :func:`maybe_raise`, but RETURN the matched shape (and record the
     fire) instead of raising. For hook sites that must raise a native exception
     shape of their own — e.g. a search-read boundary that retries ``httpx``

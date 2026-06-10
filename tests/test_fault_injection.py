@@ -54,7 +54,11 @@ def test_maybe_raise_is_noop_when_flag_off():
         # A directive is present, but the flag gates everything.
         fi.resolve_directives(
             "src-1",
-            {"__fault_injection__": {"faults": [{"site": "tool_body", "shape": "attribute_error"}]}},
+            {
+                "__fault_injection__": {
+                    "faults": [{"site": "tool_body", "shape": "attribute_error"}]
+                }
+            },
         )
         # Must not raise, must not record a fire.
         fi.maybe_raise("tool_body", source_key="src-1")
@@ -66,11 +70,17 @@ def test_resolve_directives_is_noop_when_flag_off():
     with patch.object(fi.settings, "fault_injection_enabled", False):
         fi.resolve_directives(
             "src-x",
-            {"__fault_injection__": {"faults": [{"site": "relational_write", "shape": "permanent"}]}},
+            {
+                "__fault_injection__": {
+                    "faults": [{"site": "relational_write", "shape": "permanent"}]
+                }
+            },
         )
     # Re-enabling and asking should find nothing registered.
     with patch.object(fi.settings, "fault_injection_enabled", True):
-        fi.maybe_raise("relational_write", source_key="src-x")  # no directive -> no raise
+        fi.maybe_raise(
+            "relational_write", source_key="src-x"
+        )  # no directive -> no raise
 
 
 # --------------------------------------------------------------------------- #
@@ -105,7 +115,11 @@ def test_unknown_shape_raises_valueerror_at_resolve():
     with pytest.raises(ValueError):
         fi.resolve_directives(
             "src-bad",
-            {"__fault_injection__": {"faults": [{"site": "tool_body", "shape": "nope"}]}},
+            {
+                "__fault_injection__": {
+                    "faults": [{"site": "tool_body", "shape": "nope"}]
+                }
+            },
         )
 
 
@@ -117,7 +131,11 @@ def test_unknown_shape_raises_valueerror_at_resolve():
 def test_only_matching_site_fires():
     fi.resolve_directives(
         "src-2",
-        {"__fault_injection__": {"faults": [{"site": "relational_write", "shape": "transient"}]}},
+        {
+            "__fault_injection__": {
+                "faults": [{"site": "relational_write", "shape": "transient"}]
+            }
+        },
     )
     # Different site: no-op.
     fi.maybe_raise("tool_body", source_key="src-2")
@@ -134,7 +152,11 @@ def test_directive_keyed_per_source():
     """A directive on src-A never fires for src-B (parallel-safety)."""
     fi.resolve_directives(
         "src-A",
-        {"__fault_injection__": {"faults": [{"site": "relational_write", "shape": "permanent"}]}},
+        {
+            "__fault_injection__": {
+                "faults": [{"site": "relational_write", "shape": "permanent"}]
+            }
+        },
     )
     # src-B has no directive.
     fi.maybe_raise("relational_write", source_key="src-B")
@@ -148,7 +170,17 @@ def test_tool_scoped_directive_only_fires_for_named_tool():
     """A directive scoped to a tool/memory_type fires only when ctx matches."""
     fi.resolve_directives(
         "src-tool",
-        {"__fault_injection__": {"faults": [{"site": "subagent", "shape": "subagent_permanent", "tool": "episodic"}]}},
+        {
+            "__fault_injection__": {
+                "faults": [
+                    {
+                        "site": "subagent",
+                        "shape": "subagent_permanent",
+                        "tool": "episodic",
+                    }
+                ]
+            }
+        },
     )
     # Non-matching tool: no-op.
     fi.maybe_raise("subagent", source_key="src-tool", tool="semantic")
@@ -167,11 +199,25 @@ def test_fail_attempts_recovers_after_n():
     """fail_attempts=1 -> fires once then succeeds (recovers on attempt 2)."""
     fi.resolve_directives(
         "src-recover",
-        {"__fault_injection__": {"faults": [{"site": "relational_write", "shape": "transient", "fail_attempts": 1}]}},
+        {
+            "__fault_injection__": {
+                "faults": [
+                    {
+                        "site": "relational_write",
+                        "shape": "transient",
+                        "fail_attempts": 1,
+                    }
+                ]
+            }
+        },
     )
     with pytest.raises(SyntheticProviderError):
-        fi.maybe_raise("relational_write", source_key="src-recover")  # attempt 1 -> fail
-    fi.maybe_raise("relational_write", source_key="src-recover")  # attempt 2 -> recovered
+        fi.maybe_raise(
+            "relational_write", source_key="src-recover"
+        )  # attempt 1 -> fail
+    fi.maybe_raise(
+        "relational_write", source_key="src-recover"
+    )  # attempt 2 -> recovered
     assert fi.fire_count("src-recover", "relational_write") == 1
 
 
@@ -179,7 +225,11 @@ def test_no_fail_attempts_means_sustained():
     """Omitting fail_attempts fires on every call (sustained failure)."""
     fi.resolve_directives(
         "src-sustained",
-        {"__fault_injection__": {"faults": [{"site": "search_read", "shape": "transient"}]}},
+        {
+            "__fault_injection__": {
+                "faults": [{"site": "search_read", "shape": "transient"}]
+            }
+        },
     )
     for _ in range(3):
         with pytest.raises(SyntheticProviderError):
@@ -194,21 +244,42 @@ def test_no_fail_attempts_means_sustained():
 
 def test_fire_emits_prefixed_log_line(caplog):
     """Each fire logs a [FAULT INJECTION] line carrying site + source so the FST
-    can grep the aggregated service log and count fires."""
+    can grep the aggregated service log and count fires.
+    """
+    import logging
+
     fi.resolve_directives(
         "src-log",
-        {"__fault_injection__": {"faults": [{"site": "relational_write", "shape": "permanent"}]}},
+        {
+            "__fault_injection__": {
+                "faults": [{"site": "relational_write", "shape": "permanent"}]
+            }
+        },
     )
-    with caplog.at_level("WARNING", logger="mirix.testing.fault_injection"):
-        with pytest.raises(SyntheticProviderError):
-            fi.maybe_raise("relational_write", source_key="src-log")
-    fire_lines = [
-        r.getMessage() for r in caplog.records if fi.LOG_PREFIX in r.getMessage() and "fired" in r.getMessage()
+    # The "Mirix" logger sets propagate=False, so caplog (which captures via the
+    # root logger) needs propagation re-enabled for the duration of the assert.
+    mirix_logger = logging.getLogger("Mirix")
+    prior_propagate = mirix_logger.propagate
+    mirix_logger.propagate = True
+    try:
+        with caplog.at_level("WARNING", logger="Mirix"):
+            with pytest.raises(SyntheticProviderError):
+                fi.maybe_raise("relational_write", source_key="src-log")
+    finally:
+        mirix_logger.propagate = prior_propagate
+
+    fire_records = [
+        r
+        for r in caplog.records
+        if fi.LOG_PREFIX in r.getMessage() and "fired" in r.getMessage()
     ]
-    assert len(fire_lines) == 1
-    assert "site=relational_write" in fire_lines[0]
-    assert "source=src-log" in fire_lines[0]
-    assert "shape=permanent" in fire_lines[0]
+    assert len(fire_records) == 1
+    # Pin the logger tree: the fire line must ride the "Mirix" handler stack.
+    assert fire_records[0].name == "Mirix"
+    fire_line = fire_records[0].getMessage()
+    assert "site=relational_write" in fire_line
+    assert "source=src-log" in fire_line
+    assert "shape=permanent" in fire_line
 
 
 def test_next_fault_returns_shape_without_raising():
@@ -216,7 +287,11 @@ def test_next_fault_returns_shape_without_raising():
     matched shape so the caller can raise its own native (httpx) exception."""
     fi.resolve_directives(
         "src-next",
-        {"__fault_injection__": {"faults": [{"site": "search_read", "shape": "transient"}]}},
+        {
+            "__fault_injection__": {
+                "faults": [{"site": "search_read", "shape": "transient"}]
+            }
+        },
     )
     shape = fi.next_fault("search_read", source_key="src-next")
     assert shape == "transient"
@@ -229,7 +304,11 @@ def test_next_fault_is_noop_when_off():
     with patch.object(fi.settings, "fault_injection_enabled", True):
         fi.resolve_directives(
             "src-no",
-            {"__fault_injection__": {"faults": [{"site": "search_read", "shape": "transient"}]}},
+            {
+                "__fault_injection__": {
+                    "faults": [{"site": "search_read", "shape": "transient"}]
+                }
+            },
         )
     with patch.object(fi.settings, "fault_injection_enabled", False):
         assert fi.next_fault("search_read", source_key="src-no") is None
@@ -248,7 +327,11 @@ def test_prod_env_hard_disables_even_when_flag_on(prod_env, monkeypatch):
     monkeypatch.setenv("APP_ENV", prod_env)
     fi.resolve_directives(
         "src-prod",
-        {"__fault_injection__": {"faults": [{"site": "tool_body", "shape": "attribute_error"}]}},
+        {
+            "__fault_injection__": {
+                "faults": [{"site": "tool_body", "shape": "attribute_error"}]
+            }
+        },
     )
     # resolve was a no-op under prod, so nothing fires.
     fi.maybe_raise("tool_body", source_key="src-prod")
@@ -259,7 +342,11 @@ def test_non_prod_env_allows_injection(monkeypatch):
     monkeypatch.setenv("APP_ENV", "test")
     fi.resolve_directives(
         "src-test-env",
-        {"__fault_injection__": {"faults": [{"site": "tool_body", "shape": "attribute_error"}]}},
+        {
+            "__fault_injection__": {
+                "faults": [{"site": "tool_body", "shape": "attribute_error"}]
+            }
+        },
     )
     with pytest.raises(AttributeError):
         fi.maybe_raise("tool_body", source_key="src-test-env")
