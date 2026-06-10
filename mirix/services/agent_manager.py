@@ -1253,6 +1253,7 @@ class AgentManager:
         parent_id: Optional[str] = None,
         user: Optional[PydanticUser] = None,
         sort_desc: bool = False,
+        include_tools: bool = True,
         **kwargs,
     ) -> List[PydanticAgentState]:
         """
@@ -1265,8 +1266,32 @@ class AgentManager:
 
         ``sort_desc`` selects descending vs ascending creation-time ordering for the
         Relational DB provider path (``agent_manager.list_agents_desc`` vs ``agent_manager.list_agents_asc``).
+
+        ``include_tools`` controls whether each returned agent's ``tools``
+        relationship is hydrated. Under the IPS Relational provider that
+        hydration costs one ``tool_manager.list_tools_by_ids`` round-trip PER
+        agent (an N+1). Callers that only need an agent's config (e.g. the
+        search / topic-extraction read paths, which use a single agent's
+        ``llm_config`` / ``embedding_config`` and never its tools) should pass
+        ``include_tools=False`` — typically with ``limit=1`` — to avoid that
+        per-agent tool fan-out. Defaults to True so existing callers that rely
+        on populated ``tools`` are unchanged.
         """
         from mirix.database.relational_provider import get_relational_provider
+
+        # Tools are an M2M relationship hydrated per-agent by the relational
+        # provider; only request it when the caller actually needs tools.
+        rel_include = ["tools"] if include_tools else None
+
+        def _to_agent_state(row: dict) -> PydanticAgentState:
+            # When tools are not hydrated (include_tools=False) the provider row
+            # has no ``tools`` key, but AgentState.tools is a required field.
+            # Default it to an empty list so the model still validates — callers
+            # that pass include_tools=False (search / embedding-config reads) do
+            # not consume ``tools``.
+            if "tools" not in row:
+                row = {**row, "tools": []}
+            return PydanticAgentState(**row)
 
         rel_provider = get_relational_provider()
         # A-4: query_text path (new provider branch — replaces SQLAlchemy fallback)
@@ -1280,9 +1305,9 @@ class AgentManager:
                     "queryText": f"%{query_text}%",
                 },
                 page_size=limit or 50,
-                include_relationships=["tools"],
+                include_relationships=rel_include,
             )
-            return [PydanticAgentState(**r) for r in results]
+            return [_to_agent_state(r) for r in results]
 
         # A-3: default provider list path — choose ascending vs descending NQ based on sort_desc
         if rel_provider and parent_id is None and not query_text and not kwargs:
@@ -1297,9 +1322,9 @@ class AgentManager:
                     "parentId": None,
                 },
                 page_size=limit or 50,
-                include_relationships=["tools"],
+                include_relationships=rel_include,
             )
-            return [PydanticAgentState(**r) for r in results]
+            return [_to_agent_state(r) for r in results]
 
         # A-11: parent_id wide list (named query lists up to 1000 by org+client, parent_id
         # filtered in Python). PostgreSQL doesn't hold the data when
@@ -1313,10 +1338,10 @@ class AgentManager:
                     "createdById": actor.id,
                 },
                 page_size=1000,
-                include_relationships=["tools"],
+                include_relationships=rel_include,
             )
             results = [r for r in all_agents if r.get("parent_id") == parent_id]
-            return [PydanticAgentState(**r) for r in results]
+            return [_to_agent_state(r) for r in results]
 
         # Optimization: Use Redis cache for list_agents(parent_id=X)
         if parent_id is not None:

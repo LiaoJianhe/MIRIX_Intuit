@@ -2604,8 +2604,12 @@ async def retrieve_memory_with_conversation(
 
     filter_tags = dict(request.filter_tags) if request.filter_tags is not None else {}
 
-    # Get all agents for this client (automatically filtered by client via apply_access_predicate)
-    all_agents = await server.agent_manager.list_agents(actor=client, limit=1000)
+    # Fetch one agent for this client (filtered by client via apply_access_predicate)
+    # for its llm/embedding config only — no tools needed here, so skip the
+    # per-agent tool hydration (include_tools=False) and the full-roster list.
+    all_agents = await server.agent_manager.list_agents(
+        actor=client, limit=1, include_tools=False
+    )
 
     if not all_agents:
         return {
@@ -2787,8 +2791,12 @@ async def retrieve_memory_with_topic(
     if parsed_filter_tags is None:
         parsed_filter_tags = {}
 
-    # Get all agents for this client (automatically filtered by client via apply_access_predicate)
-    all_agents = await server.agent_manager.list_agents(actor=client, limit=1000)
+    # Fetch one agent for this client (filtered by client via apply_access_predicate)
+    # for its llm/embedding config only — no tools needed here, so skip the
+    # per-agent tool hydration (include_tools=False) and the full-roster list.
+    all_agents = await server.agent_manager.list_agents(
+        actor=client, limit=1, include_tools=False
+    )
 
     if not all_agents:
         return {
@@ -3033,8 +3041,12 @@ async def search_memory(
         user_id = ClientAuthManager.get_admin_user_id_for_client(client.id)
         logger.debug("No user_id provided, using admin user: %s", user_id)
 
-    # Get all agents for this client (automatically filtered by client via apply_access_predicate)
-    all_agents = await server.agent_manager.list_agents(actor=client, limit=1000)
+    # Fetch one agent for this client (filtered by client via apply_access_predicate)
+    # for its llm/embedding config only — no tools needed here, so skip the
+    # per-agent tool hydration (include_tools=False) and the full-roster list.
+    all_agents = await server.agent_manager.list_agents(
+        actor=client, limit=1, include_tools=False
+    )
 
     if not all_agents:
         return {
@@ -3674,8 +3686,11 @@ async def search_memory_all_users(
         except ValueError as e:
             logger.warning("Invalid end_date format: %s", e)
 
-    # Get agents for this client
-    all_agents = await server.agent_manager.list_agents(actor=client, limit=1000)
+    # Fetch one agent for this client for its embedding config only — no tools
+    # needed here, so skip per-agent tool hydration and the full-roster list.
+    all_agents = await server.agent_manager.list_agents(
+        actor=client, limit=1, include_tools=False
+    )
     if not all_agents:
         return {
             "success": False,
