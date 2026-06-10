@@ -1383,15 +1383,15 @@ class Agent(BaseAgent):
                 ):
                     # In a race condition scenario (kafka redelivery while still processing),
                     # this relies on DB unique constraints to avoid writing duplicate rows.
-                    # Note: should_continue is
+                    # Note: should_continue will be False in a scenario where a source with the
+                    # same externalId or batchHash, but a different primary Id, was found in the
+                    # database. In this scenario, we short circuit (even if the row has not been
+                    # marked as complete, because it indicates that the source is handled by a different
+                    # worker process (different kafka message)
                     should_continue = await self._persist_memory_source(
                         memory_source_id=self.memory_source_id,
                         input_messages=raw_input_messages,
                     )
-
-                # The content is owned by a different submission (true duplicate,
-                # or one another worker is finishing) — skip to avoid duplicate
-                # memories. A same-id retry returns True and resumes here.
                 if not should_continue:
                     logger.info("Source %s deduped, skipping agent processing", self.memory_source_id)
                     emit_idempotency_skip_span(
