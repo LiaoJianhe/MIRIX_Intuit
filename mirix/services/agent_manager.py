@@ -1618,8 +1618,20 @@ class AgentManager:
         return list(agents_by_id.values())
 
     @enforce_types
-    async def get_agent_by_id(self, agent_id: str, actor: PydanticClient) -> PydanticAgentState:
-        """Fetch an agent by its ID (with cache and Redis pipeline for tools/blocks)."""
+    async def get_agent_by_id(
+        self, agent_id: str, actor: PydanticClient, include_tools: bool = True
+    ) -> PydanticAgentState:
+        """Fetch an agent by its ID (with cache and Redis pipeline for tools/blocks).
+
+        ``include_tools`` controls whether the agent's ``tools`` relationship is
+        hydrated. Under the IPS Relational provider that hydration costs an extra
+        per-agent tool round-trip (and fatter payload); on the cache path it costs
+        a Redis tool pipeline fetch. Callers that only need the agent's identity /
+        config and never read ``tools`` (e.g. the save path's meta-agent existence
+        check in ``add_memory``) should pass ``include_tools=False`` to skip that
+        work. Defaults to True so existing callers that rely on populated ``tools``
+        are unchanged.
+        """
         import json
 
         from mirix.database.cache_provider import get_cache_provider
@@ -1664,9 +1676,11 @@ class AgentManager:
                             else cached_data["mcp_tools"]
                         )
 
-                    # Retrieve tools from Redis using pipeline (denormalized tools_agents)
+                    # Retrieve tools from Redis using pipeline (denormalized tools_agents).
+                    # Skipped when the caller does not need tools (include_tools=False),
+                    # avoiding the per-tool Redis fetch on the save path.
                     tools = []
-                    if "tool_ids" in cached_data and cached_data["tool_ids"]:
+                    if include_tools and "tool_ids" in cached_data and cached_data["tool_ids"]:
                         tool_ids = (
                             json.loads(cached_data["tool_ids"])
                             if isinstance(cached_data["tool_ids"], str)
@@ -1717,6 +1731,10 @@ class AgentManager:
             # than provider.read(actor=actor) so we get include_relationships=["tools"] in
             # a single round trip.  The actor param on provider.read would handle org/client
             # isolation identically but does not support relationship expansion.
+            # Tools are an M2M relationship hydrated by the provider; only request
+            # it when the caller actually needs tools (avoids an extra per-agent
+            # tool round-trip on the save path's meta-agent lookup).
+            rel_include = ["tools"] if include_tools else None
             rows = await rel_provider.find_using_named_query(
                 "agents",
                 "agent_manager.get_agent_by_id",
@@ -1726,11 +1744,18 @@ class AgentManager:
                     "createdById": actor.id,
                 },
                 page_size=1,
-                include_relationships=["tools"],
+                include_relationships=rel_include,
             )
             if not rows:
                 raise NoResultFound(f"Agent {agent_id} not found")
-            agent_state = PydanticAgentState(**rows[0])
+            # When tools are not hydrated the provider row has no ``tools`` key,
+            # but AgentState.tools is a required field — default it to [] so the
+            # model still validates (callers that pass include_tools=False do not
+            # consume ``tools``).
+            row = rows[0]
+            if "tools" not in row:
+                row = {**row, "tools": []}
+            agent_state = PydanticAgentState(**row)
             # created_by_id security check is enforced at the query level (ipsrentityowner
             # == :createdById in the YAML NQ), so no additional Python check is needed.
 

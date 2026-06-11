@@ -2109,11 +2109,14 @@ async def add_memory(
                 detail=f"Client {client_id} not found. Please create the client first.",
             )
 
-    # Get the meta agent by ID
-    # TODO: need to check if we really need to check if the meta_agent exists here
+    # Get the meta agent by ID. The save path only needs meta_agent.id (and to
+    # confirm the agent exists); it never reads meta_agent.tools, so opt out of
+    # tool hydration to avoid an extra IPS-R round-trip / Redis tool fetch before
+    # the message is queued.
     meta_agent = await server.agent_manager.get_agent_by_id(
         request.meta_agent_id,
         client,
+        include_tools=False,
     )
 
     # If user_id is not provided, use the admin user for this client
