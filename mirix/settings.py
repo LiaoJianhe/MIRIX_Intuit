@@ -226,6 +226,24 @@ class Settings(BaseSettings):
     # Must match regex: ^(?!langfuse)[a-z0-9-_]+$ with max 40 chars
     langfuse_environment: str = Field("dev", env="MIRIX_LANGFUSE_ENVIRONMENT")
 
+    # Test-only: write every finished span to this JSONL file (one span per line)
+    # via a synchronous OTel exporter attached to the same TracerProvider Langfuse
+    # uses. Lets full-stack tests read spans off disk (the service runs in a
+    # separate process) and assert on them, with NO remote Langfuse needed. Off
+    # by default; intended to point at a bind-mounted path (e.g. /app/logs).
+    span_export_file: Optional[Path] = Field(None, env="MIRIX_SPAN_EXPORT_FILE")
+
+    # Test-only: deterministic fault injection on the save path. When False (the
+    # production default), every injection hook takes a no-op fast path with zero
+    # behavioral change. When True (AND not in a production app env — checked
+    # separately as defense in depth), hooks consult the per-source directive
+    # registry in mirix/testing/fault_injection.py and may raise the configured
+    # exception shape. Intended ONLY for full-stack tests that need to drive
+    # specific SaveOutcome terminal states through the real worker. Never enable
+    # in prod. Fires are emitted on the logger with a stable prefix so tests can
+    # read them off the aggregated service log.
+    fault_injection_enabled: bool = Field(False, env="MIRIX_FAULT_INJECTION_ENABLED")
+
     # JWT settings for dashboard authentication
     jwt_secret_key: Optional[str] = Field(None, env="MIRIX_JWT_SECRET_KEY")
     jwt_expiration_hours: int = Field(24, env="MIRIX_JWT_EXPIRATION_HOURS")

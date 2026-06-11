@@ -225,7 +225,7 @@ def with_langfuse_tracing(func):
     from langfuse.types import TraceContext
 
     from mirix.observability import get_langfuse_client, is_langfuse_enabled
-    from mirix.observability.context import clear_trace_context, set_trace_context
+    from mirix.observability.context import clear_trace_context, get_tid, set_trace_context
 
     @functools.wraps(func)
     async def wrapper(*args, **kwargs):
@@ -265,16 +265,23 @@ def with_langfuse_tracing(func):
                     f"LangFuse trace created: trace_id={trace_id}, observation_id={observation_id}, path={path}"
                 )
 
+                # Transaction id (TID): caller/gateway-provided request id. Put it
+                # in trace metadata (visible) AND tags (filterable in the Langfuse
+                # dashboard) so a broken trace surfaces its TID for a log pivot.
+                tid = get_tid()
+                trace_tags = [f"tid:{tid}"] if tid else None
                 langfuse.update_current_trace(
                     name=f"{method} {path}",
                     user_id=user_id or client_id,
                     session_id=session_id,
+                    tags=trace_tags,
                     metadata={
                         "method": method,
                         "path": path,
                         "client_id": client_id,
                         "org_id": org_id,
                         "user_agent": request.headers.get("user-agent"),
+                        "tid": tid,
                     },
                 )
 
@@ -353,6 +360,20 @@ async def get_client_and_org(
     Returns:
         tuple[str, str]: (client_id, org_id)
     """
+    # ECMS imports these route handlers and calls them as plain async
+    # functions (not through FastAPI's HTTP layer), so FastAPI never resolves
+    # ``Header(None)`` defaults — direct callers that omit a Header arg pass
+    # the ``Header(None)`` FieldInfo sentinel instead of ``None``. That object
+    # is truthy, so ``x_org_id or DEFAULT_ORG_ID`` would yield the sentinel
+    # and later fail @enforce_types deep in the call. Normalize any non-str
+    # value back to None so the default-org fallback fires.
+    if not isinstance(x_org_id, str):
+        x_org_id = None
+    if not isinstance(x_client_id, str):
+        x_client_id = None
+    if not isinstance(x_api_key, str):
+        x_api_key = None
+
     server = get_server()
 
     if x_api_key:
@@ -587,9 +608,7 @@ async def extract_topics_with_local_model(messages: List[Dict[str, Any]], model_
             {
                 "role": "user",
                 "content": (
-                    "Conversation transcript:\n"
-                    f"{conversation}\n\n"
-                    "Respond ONLY with the topic(s) separated by ';'."
+                    f"Conversation transcript:\n{conversation}\n\nRespond ONLY with the topic(s) separated by ';'."
                 ),
             },
         ],
@@ -2275,20 +2294,64 @@ async def retrieve_memories_by_keywords(
             end_date.isoformat() if end_date else None,
         )
 
-    # Get timezone from user record (if exists)
+    # Get timezone from user record. If the user does not exist, return empty
+    # memory containers — downstream managers require a non-None PydanticUser
+    # (enforced via @enforce_types).
+    from mirix.orm.errors import NoResultFound
+
     try:
         user = await server.user_manager.get_user_by_id(user_id)
         timezone_str = user.timezone
-    except:
-        timezone_str = "UTC"
-    memories = {}
+    except NoResultFound:
+        logger.info(
+            "User %s not found during retrieve_memories_by_keywords; returning empty memories",
+            user_id,
+        )
+        return {
+            "episodic": {"total_count": 0, "recent": [], "relevant": []},
+            "semantic": {"total_count": 0, "items": []},
+            "resource": {"total_count": 0, "items": []},
+            "procedural": {"total_count": 0, "items": []},
+            "knowledge_vault": {"total_count": 0, "items": []},
+            "core": {"total_count": 0, "scopes": {}},
+        }
+    except Exception as e:
+        logger.warning(
+            "Unexpected error fetching user %s; returning empty memories: %s",
+            user_id,
+            e,
+        )
+        return {
+            "episodic": {"total_count": 0, "recent": [], "relevant": []},
+            "semantic": {"total_count": 0, "items": []},
+            "resource": {"total_count": 0, "items": []},
+            "procedural": {"total_count": 0, "items": []},
+            "knowledge_vault": {"total_count": 0, "items": []},
+            "core": {"total_count": 0, "scopes": {}},
+        }
+    import asyncio
 
-    # Get episodic memories (recent + relevant) with optional temporal filtering
-    try:
-        episodic_manager = server.episodic_memory_manager
+    memories: Dict[str, Any] = {}
 
-        # Get recent episodic memories with temporal filter
-        recent_episodic = await episodic_manager.list_episodic_memory(
+    # Fan out all per-memory-type backend reads concurrently. Each call is
+    # independent (different manager, different table) — running them serially
+    # adds the sum of latencies; running them in parallel adds the max. Any
+    # failure propagates out of the gather and bubbles to the route layer.
+    episodic_manager = server.episodic_memory_manager
+    semantic_manager = server.semantic_memory_manager
+    resource_manager = server.resource_memory_manager
+    procedural_manager = server.procedural_memory_manager
+    knowledge_vault_manager = server.knowledge_vault_manager
+    block_manager = server.block_manager
+
+    # Build the task list and a parallel index of (memory_type, slot) keys so
+    # we can route results back to the right per-type assembly.
+    tasks: list = []
+    keys: list = []
+
+    # Episodic: recent (always) + relevant (only when key_words present) + count
+    tasks.append(
+        episodic_manager.list_episodic_memory(
             agent_state=agent_state,  # Not accessed during BM25 search
             user=user,
             limit=limit,
@@ -2299,11 +2362,12 @@ async def retrieve_memories_by_keywords(
             start_date=start_date,
             end_date=end_date,
         )
+    )
+    keys.append(("episodic", "recent"))
 
-        # Get relevant episodic memories based on keywords with temporal filter
-        relevant_episodic = []
-        if key_words:
-            relevant_episodic = await episodic_manager.list_episodic_memory(
+    if key_words:
+        tasks.append(
+            episodic_manager.list_episodic_memory(
                 agent_state=agent_state,  # Not accessed during BM25 search
                 user=user,
                 query=key_words,
@@ -2316,37 +2380,15 @@ async def retrieve_memories_by_keywords(
                 start_date=start_date,
                 end_date=end_date,
             )
+        )
+        keys.append(("episodic", "relevant"))
 
-        memories["episodic"] = {
-            "total_count": await episodic_manager.get_total_number_of_items(user=user),
-            "recent": [
-                {
-                    "id": event.id,
-                    "timestamp": (event.occurred_at.isoformat() if event.occurred_at else None),
-                    "summary": event.summary,
-                    "details": event.details,
-                }
-                for event in recent_episodic
-            ],
-            "relevant": [
-                {
-                    "id": event.id,
-                    "timestamp": (event.occurred_at.isoformat() if event.occurred_at else None),
-                    "summary": event.summary,
-                    "details": event.details,
-                }
-                for event in relevant_episodic
-            ],
-        }
-    except Exception as e:
-        logger.error("Error retrieving episodic memories: %s", e)
-        memories["episodic"] = {"total_count": 0, "recent": [], "relevant": []}
+    tasks.append(episodic_manager.get_total_number_of_items(user=user))
+    keys.append(("episodic", "count"))
 
-    # Get semantic memories
-    try:
-        semantic_manager = server.semantic_memory_manager
-
-        semantic_items = await semantic_manager.list_semantic_items(
+    # Semantic
+    tasks.append(
+        semantic_manager.list_semantic_items(
             agent_state=agent_state,  # Not accessed during BM25 search
             user=user,
             query=key_words,
@@ -2358,28 +2400,14 @@ async def retrieve_memories_by_keywords(
             scopes=scopes,
             use_cache=use_cache,
         )
+    )
+    keys.append(("semantic", "items"))
+    tasks.append(semantic_manager.get_total_number_of_items(user=user))
+    keys.append(("semantic", "count"))
 
-        memories["semantic"] = {
-            "total_count": await semantic_manager.get_total_number_of_items(user=user),
-            "items": [
-                {
-                    "id": item.id,
-                    "name": item.name,
-                    "summary": item.summary,
-                    "details": item.details,
-                }
-                for item in semantic_items
-            ],
-        }
-    except Exception as e:
-        logger.error("Error retrieving semantic memories: %s", e)
-        memories["semantic"] = {"total_count": 0, "items": []}
-
-    # Get resource memories
-    try:
-        resource_manager = server.resource_memory_manager
-
-        resources = await resource_manager.list_resources(
+    # Resource
+    tasks.append(
+        resource_manager.list_resources(
             agent_state=agent_state,  # Not accessed during BM25 search
             user=user,
             query=key_words,
@@ -2391,28 +2419,14 @@ async def retrieve_memories_by_keywords(
             scopes=scopes,
             use_cache=use_cache,
         )
+    )
+    keys.append(("resource", "items"))
+    tasks.append(resource_manager.get_total_number_of_items(user=user))
+    keys.append(("resource", "count"))
 
-        memories["resource"] = {
-            "total_count": await resource_manager.get_total_number_of_items(user=user),
-            "items": [
-                {
-                    "id": resource.id,
-                    "title": resource.title,
-                    "summary": resource.summary,
-                    "resource_type": resource.resource_type,
-                }
-                for resource in resources
-            ],
-        }
-    except Exception as e:
-        logger.error("Error retrieving resource memories: %s", e)
-        memories["resource"] = {"total_count": 0, "items": []}
-
-    # Get procedural memories
-    try:
-        procedural_manager = server.procedural_memory_manager
-
-        procedures = await procedural_manager.list_procedures(
+    # Procedural
+    tasks.append(
+        procedural_manager.list_procedures(
             agent_state=agent_state,  # Not accessed during BM25 search
             user=user,
             query=key_words,
@@ -2424,27 +2438,14 @@ async def retrieve_memories_by_keywords(
             scopes=scopes,
             use_cache=use_cache,
         )
+    )
+    keys.append(("procedural", "items"))
+    tasks.append(procedural_manager.get_total_number_of_items(user=user))
+    keys.append(("procedural", "count"))
 
-        memories["procedural"] = {
-            "total_count": await procedural_manager.get_total_number_of_items(user=user),
-            "items": [
-                {
-                    "id": procedure.id,
-                    "entry_type": procedure.entry_type,
-                    "summary": procedure.summary,
-                }
-                for procedure in procedures
-            ],
-        }
-    except Exception as e:
-        logger.error("Error retrieving procedural memories: %s", e)
-        memories["procedural"] = {"total_count": 0, "items": []}
-
-    # Get knowledge vault items
-    try:
-        knowledge_vault_manager = server.knowledge_vault_manager
-
-        knowledge_items = await knowledge_vault_manager.list_knowledge(
+    # Knowledge vault
+    tasks.append(
+        knowledge_vault_manager.list_knowledge(
             agent_state=agent_state,  # Not accessed during BM25 search
             user=user,
             query=key_words,
@@ -2453,52 +2454,126 @@ async def retrieve_memories_by_keywords(
             limit=limit,
             timezone_str=timezone_str,
         )
+    )
+    keys.append(("knowledge_vault", "items"))
+    tasks.append(knowledge_vault_manager.get_total_number_of_items(user=user))
+    keys.append(("knowledge_vault", "count"))
 
-        memories["knowledge_vault"] = {
-            "total_count": await knowledge_vault_manager.get_total_number_of_items(user=user),
-            "items": [
-                {
-                    "id": item.id,
-                    "caption": item.caption,
-                }
-                for item in knowledge_items
-            ],
-        }
-    except Exception as e:
-        logger.error("Error retrieving knowledge vault items: %s", e)
-        memories["knowledge_vault"] = {"total_count": 0, "items": []}
-
-    # Get core memory blocks (filtered by client's read_scopes, grouped by scope)
-    try:
-        block_manager = server.block_manager
-
-        blocks = await block_manager.get_blocks(
+    # Core memory blocks (filtered by client's read_scopes, grouped by scope below)
+    tasks.append(
+        block_manager.get_blocks(
             user=user,
             any_scopes=client.read_scopes,
             auto_create_from_default=False,
         )
+    )
+    keys.append(("core", "blocks"))
 
-        # Group blocks by scope
-        scopes_dict: Dict[str, list] = {}
-        for block in blocks:
-            scope = (block.filter_tags or {}).get("scope", "default")
-            if scope not in scopes_dict:
-                scopes_dict[scope] = []
-            scopes_dict[scope].append(
-                {
-                    "id": block.id,
-                    "label": block.label,
-                    "value": block.value,
-                }
-            )
+    # Let any failure propagate — callers (search_service / route layer) already
+    # translate exceptions into the appropriate HTTP error response.
+    results = await asyncio.gather(*tasks)
 
-        memories["core"] = {
-            "total_count": len(blocks),
-            "scopes": {scope: {"items": items} for scope, items in scopes_dict.items()},
-        }
-    except Exception as e:
-        logger.error("Error retrieving core memory blocks: %s", e)
-        memories["core"] = {"total_count": 0, "scopes": {}}
+    # Bucket results by (memory_type, slot) so per-type assembly is straightforward.
+    bucket: Dict[str, Dict[str, Any]] = {}
+    for (memory_type, slot), result in zip(keys, results):
+        bucket.setdefault(memory_type, {})[slot] = result
+
+    # Episodic assembly
+    recent_episodic = bucket["episodic"]["recent"]
+    relevant_episodic = bucket["episodic"].get("relevant", []) or []
+    memories["episodic"] = {
+        "total_count": bucket["episodic"]["count"],
+        "recent": [
+            {
+                "id": event.id,
+                "timestamp": (event.occurred_at.isoformat() if event.occurred_at else None),
+                "summary": event.summary,
+                "details": event.details,
+            }
+            for event in recent_episodic
+        ],
+        "relevant": [
+            {
+                "id": event.id,
+                "timestamp": (event.occurred_at.isoformat() if event.occurred_at else None),
+                "summary": event.summary,
+                "details": event.details,
+            }
+            for event in relevant_episodic
+        ],
+    }
+
+    # Semantic assembly
+    memories["semantic"] = {
+        "total_count": bucket["semantic"]["count"],
+        "items": [
+            {
+                "id": item.id,
+                "name": item.name,
+                "summary": item.summary,
+                "details": item.details,
+            }
+            for item in bucket["semantic"]["items"]
+        ],
+    }
+
+    # Resource assembly
+    memories["resource"] = {
+        "total_count": bucket["resource"]["count"],
+        "items": [
+            {
+                "id": resource.id,
+                "title": resource.title,
+                "summary": resource.summary,
+                "resource_type": resource.resource_type,
+            }
+            for resource in bucket["resource"]["items"]
+        ],
+    }
+
+    # Procedural assembly
+    memories["procedural"] = {
+        "total_count": bucket["procedural"]["count"],
+        "items": [
+            {
+                "id": procedure.id,
+                "entry_type": procedure.entry_type,
+                "summary": procedure.summary,
+            }
+            for procedure in bucket["procedural"]["items"]
+        ],
+    }
+
+    # Knowledge vault assembly
+    memories["knowledge_vault"] = {
+        "total_count": bucket["knowledge_vault"]["count"],
+        "items": [
+            {
+                "id": item.id,
+                "caption": item.caption,
+            }
+            for item in bucket["knowledge_vault"]["items"]
+        ],
+    }
+
+    # Core memory blocks (group by scope after the fetch)
+    blocks = bucket["core"]["blocks"]
+    scopes_dict: Dict[str, list] = {}
+    for block in blocks:
+        scope = (block.filter_tags or {}).get("scope", "default")
+        if scope not in scopes_dict:
+            scopes_dict[scope] = []
+        scopes_dict[scope].append(
+            {
+                "id": block.id,
+                "label": block.label,
+                "value": block.value,
+            }
+        )
+    memories["core"] = {
+        "total_count": len(blocks),
+        "scopes": {scope: {"items": items} for scope, items in scopes_dict.items()},
+    }
 
     return memories
 
@@ -2529,8 +2604,12 @@ async def retrieve_memory_with_conversation(
 
     filter_tags = dict(request.filter_tags) if request.filter_tags is not None else {}
 
-    # Get all agents for this client (automatically filtered by client via apply_access_predicate)
-    all_agents = await server.agent_manager.list_agents(actor=client, limit=1000)
+    # Fetch one agent for this client (filtered by client via apply_access_predicate)
+    # for its llm/embedding config only — no tools needed here, so skip the
+    # per-agent tool hydration (include_tools=False) and the full-roster list.
+    all_agents = await server.agent_manager.list_agents(
+        actor=client, limit=1, include_tools=False
+    )
 
     if not all_agents:
         return {
@@ -2712,8 +2791,12 @@ async def retrieve_memory_with_topic(
     if parsed_filter_tags is None:
         parsed_filter_tags = {}
 
-    # Get all agents for this client (automatically filtered by client via apply_access_predicate)
-    all_agents = await server.agent_manager.list_agents(actor=client, limit=1000)
+    # Fetch one agent for this client (filtered by client via apply_access_predicate)
+    # for its llm/embedding config only — no tools needed here, so skip the
+    # per-agent tool hydration (include_tools=False) and the full-roster list.
+    all_agents = await server.agent_manager.list_agents(
+        actor=client, limit=1, include_tools=False
+    )
 
     if not all_agents:
         return {
@@ -2958,8 +3041,12 @@ async def search_memory(
         user_id = ClientAuthManager.get_admin_user_id_for_client(client.id)
         logger.debug("No user_id provided, using admin user: %s", user_id)
 
-    # Get all agents for this client (automatically filtered by client via apply_access_predicate)
-    all_agents = await server.agent_manager.list_agents(actor=client, limit=1000)
+    # Fetch one agent for this client (filtered by client via apply_access_predicate)
+    # for its llm/embedding config only — no tools needed here, so skip the
+    # per-agent tool hydration (include_tools=False) and the full-roster list.
+    all_agents = await server.agent_manager.list_agents(
+        actor=client, limit=1, include_tools=False
+    )
 
     if not all_agents:
         return {
@@ -2972,12 +3059,38 @@ async def search_memory(
 
     agent_state = all_agents[0]
 
-    # Get timezone from user record (if exists)
+    # Get timezone from user record. If the user does not exist, return empty
+    # results gracefully — searching memories for a non-existent user yields
+    # no matches, and downstream managers require a non-None PydanticUser
+    # (enforced via @enforce_types).
+    from mirix.orm.errors import NoResultFound
+
     try:
         user = await server.user_manager.get_user_by_id(user_id)
         timezone_str = user.timezone
-    except:
-        timezone_str = "UTC"
+    except NoResultFound:
+        logger.info(
+            "User %s not found during search_memory; returning empty results",
+            user_id,
+        )
+        return {
+            "success": True,
+            "query": query,
+            "results": [],
+            "count": 0,
+        }
+    except Exception as e:
+        logger.warning(
+            "Unexpected error fetching user %s; returning empty results: %s",
+            user_id,
+            e,
+        )
+        return {
+            "success": True,
+            "query": query,
+            "results": [],
+            "count": 0,
+        }
 
     # Parse filter_tags from JSON string to dict
     parsed_filter_tags = None
@@ -3573,8 +3686,11 @@ async def search_memory_all_users(
         except ValueError as e:
             logger.warning("Invalid end_date format: %s", e)
 
-    # Get agents for this client
-    all_agents = await server.agent_manager.list_agents(actor=client, limit=1000)
+    # Fetch one agent for this client for its embedding config only — no tools
+    # needed here, so skip per-agent tool hydration and the full-roster list.
+    all_agents = await server.agent_manager.list_agents(
+        actor=client, limit=1, include_tools=False
+    )
     if not all_agents:
         return {
             "success": False,
@@ -5137,9 +5253,7 @@ async def cleanup_raw_memories(
         result = delete_stale_raw_memories(days_threshold=days_threshold)
 
         # Add success message to result
-        result["message"] = (
-            f"Deleted {result['deleted_count']} stale raw memories " f"(older than {days_threshold} days)"
-        )
+        result["message"] = f"Deleted {result['deleted_count']} stale raw memories (older than {days_threshold} days)"
 
         logger.info(
             "Cleanup job completed: deleted %d, errors %d",

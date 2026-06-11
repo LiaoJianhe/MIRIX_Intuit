@@ -1,6 +1,32 @@
 """
 Background worker that consumes messages from the queue.
 Runs as an asyncio.Task in the main event loop (async-native).
+
+Save dispatch is unified across all 3 run modes (numaflow / kafka /
+in-memory) via `error_policy.dispatch_save`. Each mode does the same
+thing: receive a message, run the save under process_with_policy, route
+the verdict through the single finalize chokepoint.
+
+* numaflow (external) — process_external_message in queue/__init__.py.
+* internal kafka manual / in-memory sim — this file, _consume_loop.
+
+The only mode-specific behavior is HOW messages are obtained (broker
+delivery vs in-process queue.get()) and what happens on
+TRANSIENT_EXHAUSTED — numaflow could in principle let the broker
+redeliver, but we treat exhausted-transient as dead-letter in all modes.
+Broker-level redelivery is reserved for *process-death* cases (message
+not ack'd), not for failures we classified.
+
+ONE classifier (error_policy.classify), ONE policy
+(error_policy.process_with_policy), ONE save dispatcher
+(error_policy.dispatch_save), ONE finalize chokepoint
+(memory_source_manager.finalize_source).
+
+NOTE — boolean schema today. finalize_source records the SaveOutcome
+in the log line but writes `processing_complete=True` for every outcome
+(SUCCESS / PERMANENT_FAILURE / TRANSIENT_EXHAUSTED). A future
+status-column migration will diversify column writes per outcome; this
+file does not enforce "complete = success only" at the DB level.
 """
 
 import asyncio
@@ -10,8 +36,17 @@ from typing import TYPE_CHECKING, Any, Optional
 from google.protobuf.json_format import MessageToDict
 
 from mirix.log import get_logger
-from mirix.observability import get_langfuse_client, mark_observation_as_child, restore_trace_from_queue_message
-from mirix.observability.context import clear_trace_context, get_trace_context
+from mirix.observability import (
+    get_langfuse_client,
+    mark_observation_as_child,
+    restore_trace_from_queue_message,
+)
+from mirix.observability.context import (
+    clear_tid,
+    clear_trace_context,
+    get_tid,
+    get_trace_context,
+)
 from mirix.queue.message_pb2 import QueueMessage
 from mirix.services.user_manager import UserManager
 
@@ -23,6 +58,30 @@ if TYPE_CHECKING:
 
 
 logger = get_logger(__name__)
+
+
+def reconcile_user_org_to_actor(user, actor):
+    """Return ``user`` with its org corrected to the actor's (client's) org.
+
+    The ``users`` row is a global, id-only-PK shared stub: its
+    ``organization_id`` records whichever org first created the user, and
+    per-org isolation lives on the child tables (blocks, memories). On the save
+    path the resolved user therefore carries its *first-seen* org, not the org
+    this save is for. Block scoping (``block_manager.get_blocks`` keys off
+    ``user.organization_id``) and the temporal guard then operate against the
+    stale org. The save's authoritative org is the client/actor's org, so
+    correct it here, at the single point where the stub becomes the live user
+    for this save.
+
+    Returns a copy (never mutates the input). No-op when ``user`` is None, the
+    actor has no org, or the orgs already match.
+    """
+    if user is None:
+        return None
+    actor_org = getattr(actor, "organization_id", None)
+    if not actor_org or user.organization_id == actor_org:
+        return user
+    return user.model_copy(update={"organization_id": actor_org})
 
 
 class QueueWorker:
@@ -179,7 +238,7 @@ class QueueWorker:
             trace_context = get_trace_context()
             trace_id = trace_context.get("trace_id") if trace_context else None
             parent_span_id = trace_context.get("observation_id") if trace_context else None
-            logger.debug(f"Queue worker trace context: trace_id={trace_id}, " f"parent_span_id={parent_span_id}")
+            logger.debug(f"Queue worker trace context: trace_id={trace_id}, parent_span_id={parent_span_id}")
 
             client_id = message.client_id if message.client_id else None
             if not client_id:
@@ -225,14 +284,14 @@ class QueueWorker:
                             )
                         except Exception as create_error:
                             logger.error(
-                                "Failed to auto-create user with id=%s: %s. " "Falling back to admin user.",
+                                "Failed to auto-create user with id=%s: %s. Falling back to admin user.",
                                 user_id,
                                 create_error,
                             )
                             user = await user_manager.get_admin_user()
-                    return actor, user
+                    return actor, reconcile_user_org_to_actor(user, actor)
                 user = await user_manager.get_admin_user()
-                return actor, user
+                return actor, reconcile_user_org_to_actor(user, actor)
 
             actor, user = await _resolve_actor_and_user()
 
@@ -306,7 +365,10 @@ class QueueWorker:
                 import json as _json
 
                 direct_writes = [
-                    {"memory_type": w.memory_type, "payload": _json.loads(w.payload_json)}
+                    {
+                        "memory_type": w.memory_type,
+                        "payload": _json.loads(w.payload_json),
+                    }
                     for w in message.direct_writes
                 ]
 
@@ -346,6 +408,15 @@ class QueueWorker:
                     direct_writes=direct_writes,
                 )
 
+            # NOTE: this core does NOT classify errors or mark the source
+            # complete. It runs the agent step and RAISES on any failure. The
+            # caller decides what to do with a raised failure:
+            #   * external consumer path (queue/__init__.process_external_message)
+            #     wraps this in process_with_policy: marks complete on permanent,
+            #     re-raises (without marking) on transient so the consumer
+            #     redelivers.
+            #   * internal consume loop (_consume_loop) marks the source complete
+            #     and swallows — it has no redelivery.
             if langfuse and trace_id:
                 from typing import cast
 
@@ -363,9 +434,27 @@ class QueueWorker:
                         "agent_id": message.agent_id,
                         "message_count": len(input_messages),
                         "source": "queue_worker",
+                        # TID on the root worker span so every span in this
+                        # save's tree can be correlated back to the request.
+                        "tid": get_tid(),
                     },
                 ) as span:
                     mark_observation_as_child(span)
+
+                    # Surface the TID at the TRACE level (tag = filterable in the
+                    # Langfuse dashboard, metadata = visible) so a failed save's
+                    # trace shows its TID for a log pivot. This is the worker
+                    # trace, decoupled from the HTTP-entry trace, so it needs its
+                    # own trace-level TID independent of the span metadata above.
+                    _worker_tid = get_tid()
+                    if _worker_tid:
+                        try:
+                            langfuse.update_current_trace(
+                                tags=[f"tid:{_worker_tid}"],
+                                metadata={"tid": _worker_tid},
+                            )
+                        except Exception as e:
+                            logger.debug("Failed to set TID on worker trace: %s", e)
 
                     span_observation_id = getattr(span, "id", None)
                     if span_observation_id:
@@ -386,21 +475,41 @@ class QueueWorker:
             )
 
         except Exception as e:
+            # Log here for context, then RE-RAISE. This core is the shared
+            # execution path for both the external consumer (which wraps it in
+            # process_with_policy and needs to classify the exception) and the
+            # internal _consume_loop (which marks the source complete and
+            # swallows). Previously this block swallowed without re-raising,
+            # which meant the external path's process_with_policy NEVER saw
+            # failures — its classify/mark-permanent/redeliver logic was
+            # effectively dead. Re-raising lets each caller apply its own policy.
             logger.error(
                 "Error processing message for agent_id=%s: %s",
                 message.agent_id,
                 e,
                 exc_info=True,
             )
+            raise
         finally:
             clear_trace_context()
+            # TID is tracked independently of trace context; clear it too so it
+            # never leaks from one message into the next on a reused worker task.
+            clear_tid()
 
     async def _consume_loop(self) -> None:
-        """Async consume loop running as an asyncio.Task in the main event loop."""
+        """Async consume loop running as an asyncio.Task in the main event loop.
+
+        Every received message goes through the shared `dispatch_save` helper
+        in `error_policy.py`. That helper runs process_with_policy (classify
+        + bounded retry) and then routes the verdict to the single finalize
+        chokepoint. No mode-specific outcome dispatch lives here — the same
+        helper handles numaflow's `process_external_message` too.
+        """
         partition_info = f", partition={self._partition_id}" if self._partition_id is not None else ""
         logger.info("Queue worker task started%s", partition_info)
 
         while self._running:
+            message = None
             try:
                 if self._partition_id is not None and hasattr(self.queue, "get_from_partition"):
                     message = await self.queue.get_from_partition(self._partition_id, timeout=1.0)
@@ -415,7 +524,18 @@ class QueueWorker:
                     len(message.input_messages),
                 )
 
-                await self._process_message_async(message)
+                from mirix.queue.error_policy import dispatch_save
+
+                source_id = (
+                    message.memory_source_id
+                    if message.HasField("memory_source_id")
+                    else None
+                )
+
+                async def _run() -> None:
+                    await self._process_message_async(message)
+
+                await dispatch_save(_run, memory_source_id=source_id)
 
             except asyncio.TimeoutError:
                 continue
@@ -425,6 +545,13 @@ class QueueWorker:
             except Exception as e:
                 if type(e).__name__ in ["Empty", "StopIteration"]:
                     continue
+                # Defense in depth: dispatch_save catches its own classified
+                # failures and finalizes through the chokepoint. A genuinely
+                # unexpected error elsewhere in the loop body (queue protocol
+                # shape, message deserialization, etc.) lands here and is
+                # swallowed so the worker task keeps running. We do NOT
+                # finalize the source here — we don't know the outcome of
+                # the save (it may have succeeded before the protocol error).
                 logger.error("Error in message consumption loop: %s", e, exc_info=True)
 
     async def start(self) -> None:
