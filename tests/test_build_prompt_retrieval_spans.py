@@ -93,9 +93,11 @@ async def test_each_memory_type_emits_a_retrieve_span(monkeypatch):
         captured.append((name, dict(metadata or {})))
         yield
 
-    # build_system_prompt_with_memories imports timed_span INSIDE the method
-    # from its source module, so patching the source-module attribute (rather
-    # than a use-site binding) intercepts the call at lookup time.
+    # This patches the source module attribute. It intercepts correctly ONLY
+    # because agent.py imports timed_span function-locally (binding at call
+    # time). If that import is ever hoisted to module top, this patch would stop
+    # intercepting and the test would fail to capture spans -- at which point
+    # patch ``mirix.agent.agent.timed_span`` instead.
     monkeypatch.setattr(
         "mirix.observability.timed_spans.timed_span", fake_timed_span
     )
@@ -104,5 +106,5 @@ async def test_each_memory_type_emits_a_retrieve_span(monkeypatch):
     await agent.build_system_prompt_with_memories(raw_system="SYS", topics="hello")
 
     names = [n for n, _ in captured]
-    for mem_type in ("knowledge_vault", "episodic", "resource", "procedural", "semantic"):
+    for mem_type in ("core", "knowledge_vault", "episodic", "resource", "procedural", "semantic"):
         assert f"Retrieve {mem_type}" in names, f"missing Retrieve {mem_type} span; got {names}"
