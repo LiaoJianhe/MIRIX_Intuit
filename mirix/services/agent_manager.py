@@ -342,6 +342,71 @@ class AgentManager:
             meta_agent_state.children = list(created_agents.values())
         return meta_agent_state
 
+    async def _bulk_update_children_configs(
+        self,
+        parent_id: str,
+        actor: PydanticClient,
+        llm_config: Optional[LLMConfig] = None,
+        embedding_config: Optional[EmbeddingConfig] = None,
+    ) -> None:
+        """Set llm_config / embedding_config on ALL sub-agents of ``parent_id`` in
+        a single statement, replacing the per-child update N+1 in
+        ``update_meta_agent``. A meta-agent re-init applies the same llm/embedding
+        config to every child, so this is one write instead of one per child.
+
+        ``agents`` is an engine table (no domain events), so the provider path
+        uses a mutation named query and the SQLAlchemy fallback uses a bulk
+        ``UPDATE``. No-op when neither config is provided. Child caches are
+        invalidated by the caller (it already holds the child ids).
+        """
+        if llm_config is None and embedding_config is None:
+            return
+
+        from mirix.database.relational_provider import get_relational_provider
+
+        provider = get_relational_provider()
+        if provider:
+            # Both columns are NOT NULL on agents; when only one config is being
+            # changed, carry the other from the meta agent (callers always pass
+            # both on the force_update path, but guard anyway).
+            await provider.mutate_using_named_query(
+                "agents",
+                "agent_manager.update_children_configs_by_parent",
+                params={
+                    "parentId": parent_id,
+                    "organizationId": actor.organization_id,
+                    "createdById": actor.id,
+                    "llmConfig": llm_config.model_dump_json() if llm_config else None,
+                    "embeddingConfig": (
+                        embedding_config.model_dump_json() if embedding_config else None
+                    ),
+                },
+            )
+            return
+
+        # SQLAlchemy fallback (pre-provider-mode): one bulk UPDATE keyed by parent
+        # rather than a read+update per child.
+        from sqlalchemy import update as sa_update
+
+        from mirix.orm.agent import Agent as AgentModel
+
+        values: dict = {}
+        if llm_config is not None:
+            values["llm_config"] = llm_config
+        if embedding_config is not None:
+            values["embedding_config"] = embedding_config
+
+        async with self.session_maker() as session:
+            await session.execute(
+                sa_update(AgentModel)
+                .where(
+                    AgentModel.parent_id == parent_id,
+                    AgentModel.organization_id == actor.organization_id,
+                )
+                .values(**values)
+            )
+            await session.commit()
+
     async def update_meta_agent(
         self,
         meta_agent_id: str,
@@ -400,23 +465,23 @@ class AgentManager:
         if meta_agent_update.embedding_config is not None:
             meta_agent_update_fields["embedding_config"] = meta_agent_update.embedding_config
 
-        # Update meta agent with all fields at once
+        # Update meta agent with all fields at once. update_agent already returns
+        # the hydrated state, so reuse it instead of a follow-up get_agent_by_id
+        # (which is a guaranteed cache miss — the update just invalidated it).
         if meta_agent_update_fields:
-            await self.update_agent(
+            meta_agent_state = await self.update_agent(
                 agent_id=meta_agent_id,
                 agent_update=UpdateAgent(**meta_agent_update_fields),
                 actor=actor,
             )
-            meta_agent_state = await self.get_agent_by_id(agent_id=meta_agent_id, actor=actor)
 
-        # Update meta agent's system prompt if provided
+        # Update meta agent's system prompt if provided (reuse the return).
         if meta_agent_update.system_prompts and "meta_memory_agent" in meta_agent_update.system_prompts:
-            await self.update_system_prompt(
+            meta_agent_state = await self.update_system_prompt(
                 agent_id=meta_agent_id,
                 system_prompt=meta_agent_update.system_prompts["meta_memory_agent"],
                 actor=actor,
             )
-            meta_agent_state = await self.get_agent_by_id(agent_id=meta_agent_id, actor=actor)
 
         # Get existing sub-agents
         existing_children = await self.list_agents(actor=actor, parent_id=meta_agent_id)
@@ -521,22 +586,28 @@ class AgentManager:
                             actor=actor,
                         )
 
-        # Update llm_config and embedding_config for all sub-agents if provided
+        # Update llm_config and embedding_config for ALL sub-agents in a single
+        # statement (one bulk write keyed by parent) instead of a read+update per
+        # child. The bulk write bypasses _update_agent's per-agent cache delete,
+        # so invalidate each child's cache explicitly here.
         if meta_agent_update.llm_config or meta_agent_update.embedding_config:
-            for agent_name, child_agent in existing_agents_by_name.items():
-                update_fields = {}
-                if meta_agent_update.llm_config is not None:
-                    update_fields["llm_config"] = meta_agent_update.llm_config
-                if meta_agent_update.embedding_config is not None:
-                    update_fields["embedding_config"] = meta_agent_update.embedding_config
+            await self._bulk_update_children_configs(
+                parent_id=meta_agent_id,
+                actor=actor,
+                llm_config=meta_agent_update.llm_config,
+                embedding_config=meta_agent_update.embedding_config,
+            )
+            try:
+                from mirix.database.cache_provider import get_cache_provider
 
-                if update_fields:
-                    logger.debug("Updating configs for sub-agent: %s", agent_name)
-                    await self.update_agent(
-                        agent_id=child_agent.id,
-                        agent_update=UpdateAgent(**update_fields),
-                        actor=actor,
-                    )
+                cache_provider = get_cache_provider()
+                if cache_provider:
+                    for child_agent in existing_agents_by_name.values():
+                        await cache_provider.delete(
+                            f"{cache_provider.AGENT_PREFIX}{child_agent.id}"
+                        )
+            except Exception as e:
+                logger.warning("Cache invalidation failed for sub-agents: %s", e)
 
         # Refresh the meta agent state with updated children
         meta_agent_state = await self.get_agent_by_id(agent_id=meta_agent_id, actor=actor)
@@ -722,9 +793,22 @@ class AgentManager:
             return new_agent.to_pydantic()
 
     @enforce_types
-    async def update_agent(self, agent_id: str, agent_update: UpdateAgent, actor: PydanticClient) -> PydanticAgentState:
-        # Update agent (system prompt and all other fields are persisted directly)
-        return await self._update_agent(agent_id=agent_id, agent_update=agent_update, actor=actor)
+    async def update_agent(
+        self,
+        agent_id: str,
+        agent_update: UpdateAgent,
+        actor: PydanticClient,
+        current_state: Optional[PydanticAgentState] = None,
+    ) -> PydanticAgentState:
+        # Update agent (system prompt and all other fields are persisted directly).
+        # ``current_state`` (the caller's already-loaded agent) lets _update_agent
+        # skip the post-write hydrate read on non-tool updates — see _update_agent.
+        return await self._update_agent(
+            agent_id=agent_id,
+            agent_update=agent_update,
+            actor=actor,
+            current_state=current_state,
+        )
 
     @enforce_types
     async def update_llm_config(
@@ -794,7 +878,11 @@ class AgentManager:
 
     @enforce_types
     async def _update_agent(
-        self, agent_id: str, agent_update: UpdateAgent, actor: PydanticClient
+        self,
+        agent_id: str,
+        agent_update: UpdateAgent,
+        actor: PydanticClient,
+        current_state: Optional[PydanticAgentState] = None,
     ) -> PydanticAgentState:
         """
         Update an existing agent.
@@ -803,6 +891,14 @@ class AgentManager:
             agent_id: The ID of the agent to update.
             agent_update: UpdateAgent object containing the updated fields.
             actor: User performing the action.
+            current_state: The agent's already-loaded state, if the caller has
+                it. When supplied AND the update does not touch ``tool_ids``, the
+                returned state is built by applying the changed scalar fields onto
+                this state instead of re-reading the row with its tools — saving
+                the post-write hydrate read (the dominant per-write cost under the
+                IPS Relational provider). Omit it (the default) to keep the
+                read-after-write behaviour for callers that need a freshly
+                hydrated row.
 
         Returns:
             PydanticAgentState: The updated agent as a Pydantic model.
@@ -811,9 +907,15 @@ class AgentManager:
 
         provider = get_relational_provider()
         if provider:
-            # Fetch existing agent to track old parent for cache invalidation
-            existing = await provider.read("agents", agent_id)
-            old_parent_id = existing.get("parent_id") if existing else None
+            changing_parent = agent_update.parent_id is not None
+            # Only pre-read to capture the OLD parent for parent-cache
+            # invalidation when the parent is actually changing. For the common
+            # case (config / system-prompt updates that never touch parent_id)
+            # this read is pure waste — skip it.
+            old_parent_id = None
+            if changing_parent:
+                existing = await provider.read("agents", agent_id)
+                old_parent_id = existing.get("parent_id") if existing else None
 
             scalar_fields = ["name", "system", "llm_config", "embedding_config", "tool_rules", "mcp_tools", "parent_id"]
             update_data: dict = {}
@@ -822,21 +924,28 @@ class AgentManager:
                 if value is not None:
                     update_data[field] = value.model_dump() if hasattr(value, "model_dump") else value
 
-            if agent_update.tool_ids is not None:
+            tools_changed = agent_update.tool_ids is not None
+            if tools_changed:
                 update_data["tools"] = agent_update.tool_ids
 
             await provider.update("agents", agent_id, update_data)
-            # provider.update returns the scalar columns only — the M2M ``tools``
-            # relationship isn't materialised on that response, so building
-            # PydanticAgentState directly off it fails with ``tools Field
-            # required`` (the schema declares ``tools: List[Tool]`` as required).
-            # Re-read with ``include_relationships=["tools"]`` to get a fully
-            # hydrated agent dict. Matches the pattern used by ``list_agents``
-            # against the relational provider.
-            result = await provider.read("agents", agent_id, include_relationships=["tools"])
-            if result is None:
-                raise ValueError(f"Agent {agent_id} disappeared between update and read-back")
-            agent_state = PydanticAgentState(**result)
+
+            # Build the returned state. provider.update returns only scalar
+            # columns (no hydrated ``tools``), and AgentState.tools is required,
+            # so normally we re-read with include_relationships=["tools"]. When
+            # the caller passed its already-loaded ``current_state`` AND this
+            # update didn't change tools, apply the changed scalar fields onto a
+            # copy of that state instead — avoiding the hydrate read (1 read +
+            # per-tool join) entirely. Otherwise fall back to the re-read.
+            if current_state is not None and not tools_changed:
+                agent_state = current_state.model_copy(
+                    update={k: getattr(agent_update, k) for k in scalar_fields if getattr(agent_update, k, None) is not None}
+                )
+            else:
+                result = await provider.read("agents", agent_id, include_relationships=["tools"])
+                if result is None:
+                    raise ValueError(f"Agent {agent_id} disappeared between update and read-back")
+                agent_state = PydanticAgentState(**result)
 
             # Invalidate cache if available
             try:
@@ -848,11 +957,12 @@ class AgentManager:
             except Exception as e:
                 logger.warning("Cache invalidation failed for agent %s: %s", agent_id, e)
 
-            # Invalidate parent caches if parent_id changed
+            # Invalidate parent caches only when the parent actually changed
+            # (old_parent_id is only populated in that case).
             new_parent_id = agent_state.parent_id
             if old_parent_id:
                 await self._invalidate_parent_cache_for_child(agent_id, old_parent_id)
-            if new_parent_id and new_parent_id != old_parent_id:
+            if changing_parent and new_parent_id and new_parent_id != old_parent_id:
                 await self._invalidate_parent_cache_for_child(agent_id, new_parent_id)
 
             return agent_state
@@ -1253,6 +1363,7 @@ class AgentManager:
         parent_id: Optional[str] = None,
         user: Optional[PydanticUser] = None,
         sort_desc: bool = False,
+        include_tools: bool = True,
         **kwargs,
     ) -> List[PydanticAgentState]:
         """
@@ -1265,8 +1376,32 @@ class AgentManager:
 
         ``sort_desc`` selects descending vs ascending creation-time ordering for the
         Relational DB provider path (``agent_manager.list_agents_desc`` vs ``agent_manager.list_agents_asc``).
+
+        ``include_tools`` controls whether each returned agent's ``tools``
+        relationship is hydrated. Under the IPS Relational provider that
+        hydration costs one ``tool_manager.list_tools_by_ids`` round-trip PER
+        agent (an N+1). Callers that only need an agent's config (e.g. the
+        search / topic-extraction read paths, which use a single agent's
+        ``llm_config`` / ``embedding_config`` and never its tools) should pass
+        ``include_tools=False`` — typically with ``limit=1`` — to avoid that
+        per-agent tool fan-out. Defaults to True so existing callers that rely
+        on populated ``tools`` are unchanged.
         """
         from mirix.database.relational_provider import get_relational_provider
+
+        # Tools are an M2M relationship hydrated per-agent by the relational
+        # provider; only request it when the caller actually needs tools.
+        rel_include = ["tools"] if include_tools else None
+
+        def _to_agent_state(row: dict) -> PydanticAgentState:
+            # When tools are not hydrated (include_tools=False) the provider row
+            # has no ``tools`` key, but AgentState.tools is a required field.
+            # Default it to an empty list so the model still validates — callers
+            # that pass include_tools=False (search / embedding-config reads) do
+            # not consume ``tools``.
+            if "tools" not in row:
+                row = {**row, "tools": []}
+            return PydanticAgentState(**row)
 
         rel_provider = get_relational_provider()
         # A-4: query_text path (new provider branch — replaces SQLAlchemy fallback)
@@ -1280,9 +1415,9 @@ class AgentManager:
                     "queryText": f"%{query_text}%",
                 },
                 page_size=limit or 50,
-                include_relationships=["tools"],
+                include_relationships=rel_include,
             )
-            return [PydanticAgentState(**r) for r in results]
+            return [_to_agent_state(r) for r in results]
 
         # A-3: default provider list path — choose ascending vs descending NQ based on sort_desc
         if rel_provider and parent_id is None and not query_text and not kwargs:
@@ -1297,9 +1432,9 @@ class AgentManager:
                     "parentId": None,
                 },
                 page_size=limit or 50,
-                include_relationships=["tools"],
+                include_relationships=rel_include,
             )
-            return [PydanticAgentState(**r) for r in results]
+            return [_to_agent_state(r) for r in results]
 
         # A-11: parent_id wide list (named query lists up to 1000 by org+client, parent_id
         # filtered in Python). PostgreSQL doesn't hold the data when
@@ -1313,10 +1448,10 @@ class AgentManager:
                     "createdById": actor.id,
                 },
                 page_size=1000,
-                include_relationships=["tools"],
+                include_relationships=rel_include,
             )
             results = [r for r in all_agents if r.get("parent_id") == parent_id]
-            return [PydanticAgentState(**r) for r in results]
+            return [_to_agent_state(r) for r in results]
 
         # Optimization: Use Redis cache for list_agents(parent_id=X)
         if parent_id is not None:
