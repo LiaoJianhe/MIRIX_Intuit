@@ -1948,9 +1948,12 @@ class Agent(BaseAgent):
         transcript = "\n\n".join(transcript_lines)
 
         # Truncate to fit within ~90% of the context window
+        from mirix.observability.cpu_timing import time_cpu
+
         context_window = self.agent_state.llm_config.context_window
         max_input_tokens = int(context_window * 0.9)
-        transcript_tokens = count_tokens(transcript)
+        with time_cpu("count_tokens.transcript"):
+            transcript_tokens = count_tokens(transcript)
         if transcript_tokens > max_input_tokens:
             ratio = max_input_tokens / transcript_tokens * 0.8
             keep = max(1, int(len(result.items) * ratio))
@@ -2319,8 +2322,12 @@ class Agent(BaseAgent):
                     "text": semantic_memory,
                 }
 
-        # Build the complete system prompt
-        memory_system_prompt = self.build_system_prompt(retrieved_memories)
+        # Build the complete system prompt (synchronous string assembly of all
+        # retrieved memories into the prompt template -- a CPU block on the loop).
+        from mirix.observability.cpu_timing import time_cpu
+
+        with time_cpu("build_system_prompt.assembly"):
+            memory_system_prompt = self.build_system_prompt(retrieved_memories)
 
         complete_system_prompt = raw_system + "\n\n" + memory_system_prompt
 
