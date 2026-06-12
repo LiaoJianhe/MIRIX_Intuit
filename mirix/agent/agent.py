@@ -2027,18 +2027,25 @@ class Agent(BaseAgent):
         if not (sp and rp):
             return []
 
+        from mirix.observability.timed_spans import timed_span
+
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=HYBRID_READ_WINDOW_SECONDS)
-        recent_records = await rp.list(
-            table,
-            user_id=self.user.id,
-            organization_id=self.user.organization_id,
-            time_range={
-                "updated_at__gte": cutoff.isoformat(),
-                "created_at__gte": cutoff.isoformat(),
-            },
-            time_range_or_null_updated=True,
-            limit=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
-        )
+        # Child span so the IPS-R recent-window leg shows up distinctly under the
+        # parent "Retrieve <type>" span, separate from the IPS-S "IPS Search" leg.
+        async with timed_span(
+            "Recent window fetch", metadata={"backend": "ipsr", "table": table}
+        ):
+            recent_records = await rp.list(
+                table,
+                user_id=self.user.id,
+                organization_id=self.user.organization_id,
+                time_range={
+                    "updated_at__gte": cutoff.isoformat(),
+                    "created_at__gte": cutoff.isoformat(),
+                },
+                time_range_or_null_updated=True,
+                limit=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
+            )
         return [pydantic_cls(**r) for r in recent_records]
 
     async def build_system_prompt_with_memories(
