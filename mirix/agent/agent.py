@@ -683,9 +683,7 @@ class Agent(BaseAgent):
                 # to running without tracing. Sustained breakage here means
                 # we're losing observability across many saves; log at
                 # WARNING so it's not silent.
-                self.logger.warning(
-                    "Langfuse tool execution trace failed before body ran: %s", e
-                )
+                self.logger.warning("Langfuse tool execution trace failed before body ran: %s", e)
                 function_response = await _execute_tool_inner()
         else:
             function_response = await _execute_tool_inner()
@@ -799,15 +797,11 @@ class Agent(BaseAgent):
                 # _TRANSIENT_TYPES, so the catch below + classify() treat
                 # these as provider quirks worth retrying (not as code bugs).
                 if len(response.choices) == 0 or response.choices[0] is None:
-                    raise LLMBadResponseShapeError(
-                        f"API call returned an empty message: {response}"
-                    )
+                    raise LLMBadResponseShapeError(f"API call returned an empty message: {response}")
 
                 for choice in response.choices:
                     if choice.message.content == "" and len(choice.message.tool_calls) == 0:
-                        raise LLMBadResponseShapeError(
-                            f"API call returned an empty message: {response}"
-                        )
+                        raise LLMBadResponseShapeError(f"API call returned an empty message: {response}")
 
                 if response.choices[0].finish_reason not in [
                     "stop",
@@ -816,9 +810,7 @@ class Agent(BaseAgent):
                 ]:
                     # "length" finish_reason historically retried — same
                     # classification path as the other shape failures.
-                    raise LLMBadResponseShapeError(
-                        f"Bad finish reason from API: {response.choices[0].finish_reason}"
-                    )
+                    raise LLMBadResponseShapeError(f"Bad finish reason from API: {response.choices[0].finish_reason}")
 
                 log_telemetry(self.logger, "_handle_ai_response finish")
                 return response
@@ -1137,9 +1129,7 @@ class Agent(BaseAgent):
                         exception_name=type(e).__name__,
                         exception_message=str(e),
                     )
-                    printv(
-                        f"[Mirix.Agent.{self.agent_state.name}] ERROR: {error_msg}\n{traceback.format_exc()}"
-                    )
+                    printv(f"[Mirix.Agent.{self.agent_state.name}] ERROR: {error_msg}\n{traceback.format_exc()}")
                     function_response = package_function_response(False, error_msg)
                     self.last_function_response = function_response
                     messages.append(
@@ -1372,9 +1362,7 @@ class Agent(BaseAgent):
                 # TODO: This is currently placed AFTER the check above so that the fault injection for the
                 # persist memory source wont accidentally trigger early, but the need to manage the placement
                 # of this call is a hack and the underlying mechanism should be redesigned to be more robust.
-                fault_injection.resolve_directives(
-                    self.memory_source_id, getattr(self, "source_metadata", None)
-                )
+                fault_injection.resolve_directives(self.memory_source_id, getattr(self, "source_metadata", None))
 
                 # Persist the memory source and its messages before we process it.
                 async with timed_span(
@@ -1611,10 +1599,7 @@ class Agent(BaseAgent):
             #
             # step() does NOT finalize on the success path either — that's
             # `dispatch_save`'s job after process_with_policy returns SUCCESS.
-            if (
-                self.agent_state.is_type(AgentType.meta_memory_agent)
-                and function_failed
-            ):
+            if self.agent_state.is_type(AgentType.meta_memory_agent) and function_failed:
                 raise LLMChainingExhaustedError(
                     f"meta-agent LLM produced malformed tool calls past chaining budget "
                     f"(counter={counter}, max_chaining_steps={max_chaining_steps})"
@@ -2035,9 +2020,7 @@ class Agent(BaseAgent):
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=HYBRID_READ_WINDOW_SECONDS)
         # Child span so the IPS-R recent-window leg shows up distinctly under the
         # parent "Retrieve <type>" span, separate from the IPS-S "IPS Search" leg.
-        async with timed_span(
-            "Recent window fetch", metadata={"backend": "ipsr", "table": table}
-        ):
+        async with timed_span("Recent window fetch", metadata={"backend": "ipsr", "table": table}):
             recent_records = await rp.list(
                 table,
                 user_id=self.user.id,
@@ -2068,8 +2051,8 @@ class Agent(BaseAgent):
         Returns:
             Tuple[str, dict]: The complete system prompt and the retrieved memories dict
         """
-        from mirix.schemas.agent import AgentType
         from mirix.observability.timed_spans import timed_span
+        from mirix.schemas.agent import AgentType
 
         timezone_str = self.user.timezone
 
@@ -2098,229 +2081,262 @@ class Agent(BaseAgent):
         else:
             embedded_text = None
 
-        # Retrieve core memory
-        if self.agent_state.is_type(AgentType.core_memory_agent) or "core" not in retrieved_memories:
-            async with timed_span("Retrieve core", metadata={"backend": "ipsr", "memory_type": "core"}):
-                blocks_result = await self.block_manager.get_blocks(
-                    user=self.user,
-                    auto_create_from_default=False,  # Don't auto-create here, only in step()
-                )
-                current_persisted_memory = Memory(
-                    blocks=[
-                        b
-                        for block in blocks_result
-                        if (b := await self.block_manager.get_block_by_id(block.id, user=self.user)) is not None
-                    ]
-                )
-                core_memory = current_persisted_memory.compile()
-                retrieved_memories["core"] = core_memory
+        # Each memory type is retrieved by its own coroutine below; the six are
+        # then run concurrently via asyncio.gather. The blocks
+        # write disjoint keys in ``retrieved_memories`` and read only the
+        # inputs computed once above (key_words, embedded_text, timezone_str,
+        # search_method), so there is no inter-block data dependency. Each
+        # coroutine keeps its own per-type gate, timed_span, and recent+relevant
+        # merge, and computes its own owning-agent flag locally (no shared
+        # mutable owning-flag variable across the concurrent blocks).
 
-        is_owning_kv_agent = self.agent_state.is_type(AgentType.knowledge_vault_memory_agent, AgentType.reflexion_agent)
-        if (
-            self.agent_state.is_type(AgentType.knowledge_vault_memory_agent)
-            or "knowledge_vault" not in retrieved_memories
-        ):
-            async with timed_span(
-                "Retrieve knowledge_vault",
-                metadata={"backend": "ipss+ipsr", "memory_type": "knowledge_vault"},
+        async def _retrieve_core():
+            if self.agent_state.is_type(AgentType.core_memory_agent) or "core" not in retrieved_memories:
+                async with timed_span("Retrieve core", metadata={"backend": "ipsr", "memory_type": "core"}):
+                    blocks_result = await self.block_manager.get_blocks(
+                        user=self.user,
+                        auto_create_from_default=False,  # Don't auto-create here, only in step()
+                    )
+                    current_persisted_memory = Memory(
+                        blocks=[
+                            b
+                            for block in blocks_result
+                            if (b := await self.block_manager.get_block_by_id(block.id, user=self.user)) is not None
+                        ]
+                    )
+                    core_memory = current_persisted_memory.compile()
+                    retrieved_memories["core"] = core_memory
+
+        async def _retrieve_knowledge_vault():
+            is_owning_kv_agent = self.agent_state.is_type(
+                AgentType.knowledge_vault_memory_agent, AgentType.reflexion_agent
+            )
+            if (
+                self.agent_state.is_type(AgentType.knowledge_vault_memory_agent)
+                or "knowledge_vault" not in retrieved_memories
             ):
-                current_knowledge_vault = await self.knowledge_vault_manager.list_knowledge(
-                    agent_state=self.agent_state,
-                    user=self.user,
-                    embedded_text=embedded_text,
-                    query=key_words,
-                    search_field="caption",
-                    search_method=search_method,
-                    limit=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
-                    timezone_str=timezone_str,
-                    sensitivity=None if is_owning_kv_agent else ["low", "medium"],
-                )
-                recent_knowledge_vault = await self._fetch_recent_indexing_lag_window(
-                    table="knowledge_vault",
-                    pydantic_cls=PydanticKnowledgeVaultItem,
-                )
-                merged_knowledge_vault = self._merge_recent_into_relevant(current_knowledge_vault, recent_knowledge_vault)
+                async with timed_span(
+                    "Retrieve knowledge_vault",
+                    metadata={"backend": "ipss+ipsr", "memory_type": "knowledge_vault"},
+                ):
+                    current_knowledge_vault = await self.knowledge_vault_manager.list_knowledge(
+                        agent_state=self.agent_state,
+                        user=self.user,
+                        embedded_text=embedded_text,
+                        query=key_words,
+                        search_field="caption",
+                        search_method=search_method,
+                        limit=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
+                        timezone_str=timezone_str,
+                        sensitivity=None if is_owning_kv_agent else ["low", "medium"],
+                    )
+                    recent_knowledge_vault = await self._fetch_recent_indexing_lag_window(
+                        table="knowledge_vault",
+                        pydantic_cls=PydanticKnowledgeVaultItem,
+                    )
+                    merged_knowledge_vault = self._merge_recent_into_relevant(
+                        current_knowledge_vault, recent_knowledge_vault
+                    )
 
-                knowledge_vault_memory = ""
-                if len(merged_knowledge_vault) > 0:
-                    for idx, knowledge_vault_item in enumerate(merged_knowledge_vault):
-                        knowledge_vault_memory += f"[{idx}] Knowledge Vault Item ID: {knowledge_vault_item.id}; Caption: {knowledge_vault_item.caption}\n"
-                retrieved_memories["knowledge_vault"] = {
-                    "total_number_of_items": await self.knowledge_vault_manager.get_total_number_of_items(user=self.user),
-                    "current_count": len(merged_knowledge_vault),
-                    "text": knowledge_vault_memory.strip(),
-                }
+                    knowledge_vault_memory = ""
+                    if len(merged_knowledge_vault) > 0:
+                        for idx, knowledge_vault_item in enumerate(merged_knowledge_vault):
+                            knowledge_vault_memory += f"[{idx}] Knowledge Vault Item ID: {knowledge_vault_item.id}; Caption: {knowledge_vault_item.caption}\n"
+                    retrieved_memories["knowledge_vault"] = {
+                        "total_number_of_items": await self.knowledge_vault_manager.get_total_number_of_items(
+                            user=self.user
+                        ),
+                        "current_count": len(merged_knowledge_vault),
+                        "text": knowledge_vault_memory.strip(),
+                    }
 
-        # Retrieve episodic memory
-        is_owning_agent = self.agent_state.is_type(AgentType.episodic_memory_agent, AgentType.reflexion_agent)
-        if is_owning_agent or "episodic" not in retrieved_memories:
-            async with timed_span(
-                "Retrieve episodic",
-                metadata={"backend": "ipss+ipsr", "memory_type": "episodic"},
-            ):
-                current_episodic_memory = await self.episodic_memory_manager.list_episodic_memory(
-                    agent_state=self.agent_state,
-                    user=self.user,
-                    limit=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
-                    timezone_str=timezone_str,
-                )
-                episodic_memory = ""
-                if len(current_episodic_memory) > 0:
-                    for idx, event in enumerate(current_episodic_memory):
-                        if is_owning_agent:
-                            episodic_memory += f"[Event ID: {event.id}] Timestamp: {event.occurred_at.strftime('%Y-%m-%d %H:%M:%S')} - {event.summary} (Details: {len(event.details)} Characters)\n"
-                        else:
-                            episodic_memory += f"[{idx}] Timestamp: {event.occurred_at.strftime('%Y-%m-%d %H:%M:%S')} - {event.summary} (Details: {len(event.details)} Characters)\n"
+        async def _retrieve_episodic():
+            is_owning_agent = self.agent_state.is_type(AgentType.episodic_memory_agent, AgentType.reflexion_agent)
+            if is_owning_agent or "episodic" not in retrieved_memories:
+                async with timed_span(
+                    "Retrieve episodic",
+                    metadata={"backend": "ipss+ipsr", "memory_type": "episodic"},
+                ):
+                    current_episodic_memory = await self.episodic_memory_manager.list_episodic_memory(
+                        agent_state=self.agent_state,
+                        user=self.user,
+                        limit=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
+                        timezone_str=timezone_str,
+                    )
+                    episodic_memory = ""
+                    if len(current_episodic_memory) > 0:
+                        for idx, event in enumerate(current_episodic_memory):
+                            if is_owning_agent:
+                                episodic_memory += f"[Event ID: {event.id}] Timestamp: {event.occurred_at.strftime('%Y-%m-%d %H:%M:%S')} - {event.summary} (Details: {len(event.details)} Characters)\n"
+                            else:
+                                episodic_memory += f"[{idx}] Timestamp: {event.occurred_at.strftime('%Y-%m-%d %H:%M:%S')} - {event.summary} (Details: {len(event.details)} Characters)\n"
 
-                recent_episodic_memory = episodic_memory.strip()
+                    recent_episodic_memory = episodic_memory.strip()
 
-                most_relevant_episodic_memory = await self.episodic_memory_manager.list_episodic_memory(
-                    agent_state=self.agent_state,
-                    user=self.user,
-                    embedded_text=embedded_text,
-                    query=key_words,
-                    search_field="details",
-                    search_method=search_method,
-                    limit=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
-                    timezone_str=timezone_str,
-                )
-                most_relevant_episodic_memory_str = ""
-                if len(most_relevant_episodic_memory) > 0:
-                    for idx, event in enumerate(most_relevant_episodic_memory):
-                        if is_owning_agent:
-                            most_relevant_episodic_memory_str += f"[Event ID: {event.id}] Timestamp: {event.occurred_at.strftime('%Y-%m-%d %H:%M:%S')} - {event.summary}  (Details: {len(event.details)} Characters)\n"
-                        else:
-                            most_relevant_episodic_memory_str += f"[{idx}] Timestamp: {event.occurred_at.strftime('%Y-%m-%d %H:%M:%S')} - {event.summary}  (Details: {len(event.details)} Characters)\n"
-                relevant_episodic_memory = most_relevant_episodic_memory_str.strip()
-                retrieved_memories["episodic"] = {
-                    "total_number_of_items": await self.episodic_memory_manager.get_total_number_of_items(user=self.user),
-                    "recent_count": len(current_episodic_memory),
-                    "relevant_count": len(most_relevant_episodic_memory),
-                    "recent_episodic_memory": recent_episodic_memory,
-                    "relevant_episodic_memory": relevant_episodic_memory,
-                }
+                    most_relevant_episodic_memory = await self.episodic_memory_manager.list_episodic_memory(
+                        agent_state=self.agent_state,
+                        user=self.user,
+                        embedded_text=embedded_text,
+                        query=key_words,
+                        search_field="details",
+                        search_method=search_method,
+                        limit=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
+                        timezone_str=timezone_str,
+                    )
+                    most_relevant_episodic_memory_str = ""
+                    if len(most_relevant_episodic_memory) > 0:
+                        for idx, event in enumerate(most_relevant_episodic_memory):
+                            if is_owning_agent:
+                                most_relevant_episodic_memory_str += f"[Event ID: {event.id}] Timestamp: {event.occurred_at.strftime('%Y-%m-%d %H:%M:%S')} - {event.summary}  (Details: {len(event.details)} Characters)\n"
+                            else:
+                                most_relevant_episodic_memory_str += f"[{idx}] Timestamp: {event.occurred_at.strftime('%Y-%m-%d %H:%M:%S')} - {event.summary}  (Details: {len(event.details)} Characters)\n"
+                    relevant_episodic_memory = most_relevant_episodic_memory_str.strip()
+                    retrieved_memories["episodic"] = {
+                        "total_number_of_items": await self.episodic_memory_manager.get_total_number_of_items(
+                            user=self.user
+                        ),
+                        "recent_count": len(current_episodic_memory),
+                        "relevant_count": len(most_relevant_episodic_memory),
+                        "recent_episodic_memory": recent_episodic_memory,
+                        "relevant_episodic_memory": relevant_episodic_memory,
+                    }
 
-        # Retrieve resource memory
-        # Owning agents need IDs for merge/update operations, so always retrieve fresh
-        is_owning_agent = self.agent_state.is_type(AgentType.resource_memory_agent, AgentType.reflexion_agent)
-        if is_owning_agent or "resource" not in retrieved_memories:
-            async with timed_span(
-                "Retrieve resource",
-                metadata={"backend": "ipss+ipsr", "memory_type": "resource"},
-            ):
-                current_resource_memory = await self.resource_memory_manager.list_resources(
-                    agent_state=self.agent_state,
-                    user=self.user,
-                    query=key_words,
-                    embedded_text=embedded_text,
-                    search_field="summary",
-                    search_method=search_method,
-                    limit=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
-                    timezone_str=timezone_str,
-                )
-                recent_resource_memory_items = await self._fetch_recent_indexing_lag_window(
-                    table="resource_memory",
-                    pydantic_cls=PydanticResourceMemoryItem,
-                )
-                merged_resource_memory = self._merge_recent_into_relevant(
-                    current_resource_memory, recent_resource_memory_items
-                )
-                resource_memory = ""
-                if len(merged_resource_memory) > 0:
-                    for idx, resource in enumerate(merged_resource_memory):
-                        if is_owning_agent:
-                            resource_memory += f"[Resource ID: {resource.id}] Resource Title: {resource.title}; Resource Summary: {resource.summary} Resource Type: {resource.resource_type}\n"
-                        else:
-                            resource_memory += f"[{idx}] Resource Title: {resource.title}; Resource Summary: {resource.summary} Resource Type: {resource.resource_type}\n"
-                resource_memory = resource_memory.strip()
-                retrieved_memories["resource"] = {
-                    "total_number_of_items": await self.resource_memory_manager.get_total_number_of_items(user=self.user),
-                    "current_count": len(merged_resource_memory),
-                    "text": resource_memory,
-                }
+        async def _retrieve_resource():
+            # Owning agents need IDs for merge/update operations, so always retrieve fresh
+            is_owning_agent = self.agent_state.is_type(AgentType.resource_memory_agent, AgentType.reflexion_agent)
+            if is_owning_agent or "resource" not in retrieved_memories:
+                async with timed_span(
+                    "Retrieve resource",
+                    metadata={"backend": "ipss+ipsr", "memory_type": "resource"},
+                ):
+                    current_resource_memory = await self.resource_memory_manager.list_resources(
+                        agent_state=self.agent_state,
+                        user=self.user,
+                        query=key_words,
+                        embedded_text=embedded_text,
+                        search_field="summary",
+                        search_method=search_method,
+                        limit=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
+                        timezone_str=timezone_str,
+                    )
+                    recent_resource_memory_items = await self._fetch_recent_indexing_lag_window(
+                        table="resource_memory",
+                        pydantic_cls=PydanticResourceMemoryItem,
+                    )
+                    merged_resource_memory = self._merge_recent_into_relevant(
+                        current_resource_memory, recent_resource_memory_items
+                    )
+                    resource_memory = ""
+                    if len(merged_resource_memory) > 0:
+                        for idx, resource in enumerate(merged_resource_memory):
+                            if is_owning_agent:
+                                resource_memory += f"[Resource ID: {resource.id}] Resource Title: {resource.title}; Resource Summary: {resource.summary} Resource Type: {resource.resource_type}\n"
+                            else:
+                                resource_memory += f"[{idx}] Resource Title: {resource.title}; Resource Summary: {resource.summary} Resource Type: {resource.resource_type}\n"
+                    resource_memory = resource_memory.strip()
+                    retrieved_memories["resource"] = {
+                        "total_number_of_items": await self.resource_memory_manager.get_total_number_of_items(
+                            user=self.user
+                        ),
+                        "current_count": len(merged_resource_memory),
+                        "text": resource_memory,
+                    }
 
-        # Retrieve procedural memory
-        # Owning agents need IDs for merge/update operations, so always retrieve fresh
-        is_owning_agent = self.agent_state.is_type(AgentType.procedural_memory_agent, AgentType.reflexion_agent)
-        if is_owning_agent or "procedural" not in retrieved_memories:
-            async with timed_span(
-                "Retrieve procedural",
-                metadata={"backend": "ipss+ipsr", "memory_type": "procedural"},
-            ):
-                current_procedural_memory = await self.procedural_memory_manager.list_procedures(
-                    agent_state=self.agent_state,
-                    user=self.user,
-                    query=key_words,
-                    embedded_text=embedded_text,
-                    search_field="summary",
-                    search_method=search_method,
-                    limit=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
-                    timezone_str=timezone_str,
-                )
-                recent_procedural_memory_items = await self._fetch_recent_indexing_lag_window(
-                    table="procedural_memory",
-                    pydantic_cls=PydanticProceduralMemoryItem,
-                )
-                merged_procedural_memory = self._merge_recent_into_relevant(
-                    current_procedural_memory, recent_procedural_memory_items
-                )
-                procedural_memory = ""
-                if len(merged_procedural_memory) > 0:
-                    for idx, procedure in enumerate(merged_procedural_memory):
-                        if is_owning_agent:
-                            procedural_memory += f"[Procedure ID: {procedure.id}] Entry Type: {procedure.entry_type}; Summary: {procedure.summary}\n"
-                        else:
-                            procedural_memory += (
-                                f"[{idx}] Entry Type: {procedure.entry_type}; Summary: {procedure.summary}\n"
-                            )
-                procedural_memory = procedural_memory.strip()
-                retrieved_memories["procedural"] = {
-                    "total_number_of_items": await self.procedural_memory_manager.get_total_number_of_items(user=self.user),
-                    "current_count": len(merged_procedural_memory),
-                    "text": procedural_memory,
-                }
+        async def _retrieve_procedural():
+            # Owning agents need IDs for merge/update operations, so always retrieve fresh
+            is_owning_agent = self.agent_state.is_type(AgentType.procedural_memory_agent, AgentType.reflexion_agent)
+            if is_owning_agent or "procedural" not in retrieved_memories:
+                async with timed_span(
+                    "Retrieve procedural",
+                    metadata={"backend": "ipss+ipsr", "memory_type": "procedural"},
+                ):
+                    current_procedural_memory = await self.procedural_memory_manager.list_procedures(
+                        agent_state=self.agent_state,
+                        user=self.user,
+                        query=key_words,
+                        embedded_text=embedded_text,
+                        search_field="summary",
+                        search_method=search_method,
+                        limit=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
+                        timezone_str=timezone_str,
+                    )
+                    recent_procedural_memory_items = await self._fetch_recent_indexing_lag_window(
+                        table="procedural_memory",
+                        pydantic_cls=PydanticProceduralMemoryItem,
+                    )
+                    merged_procedural_memory = self._merge_recent_into_relevant(
+                        current_procedural_memory, recent_procedural_memory_items
+                    )
+                    procedural_memory = ""
+                    if len(merged_procedural_memory) > 0:
+                        for idx, procedure in enumerate(merged_procedural_memory):
+                            if is_owning_agent:
+                                procedural_memory += f"[Procedure ID: {procedure.id}] Entry Type: {procedure.entry_type}; Summary: {procedure.summary}\n"
+                            else:
+                                procedural_memory += (
+                                    f"[{idx}] Entry Type: {procedure.entry_type}; Summary: {procedure.summary}\n"
+                                )
+                    procedural_memory = procedural_memory.strip()
+                    retrieved_memories["procedural"] = {
+                        "total_number_of_items": await self.procedural_memory_manager.get_total_number_of_items(
+                            user=self.user
+                        ),
+                        "current_count": len(merged_procedural_memory),
+                        "text": procedural_memory,
+                    }
 
-        # Retrieve semantic memory
-        # Owning agents need IDs for merge/update operations, so always retrieve fresh
-        is_owning_agent = self.agent_state.is_type(AgentType.semantic_memory_agent, AgentType.reflexion_agent)
-        if is_owning_agent or "semantic" not in retrieved_memories:
-            async with timed_span(
-                "Retrieve semantic",
-                metadata={"backend": "ipss+ipsr", "memory_type": "semantic"},
-            ):
-                current_semantic_memory = await self.semantic_memory_manager.list_semantic_items(
-                    agent_state=self.agent_state,
-                    user=self.user,
-                    query=key_words,
-                    embedded_text=embedded_text,
-                    search_field="details",
-                    search_method=search_method,
-                    limit=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
-                    timezone_str=timezone_str,
-                )
-                recent_semantic_memory_items = await self._fetch_recent_indexing_lag_window(
-                    table="semantic_memory",
-                    pydantic_cls=PydanticSemanticMemoryItem,
-                )
-                merged_semantic_memory = self._merge_recent_into_relevant(
-                    current_semantic_memory, recent_semantic_memory_items
-                )
-                semantic_memory = ""
-                if len(merged_semantic_memory) > 0:
-                    for idx, semantic_memory_item in enumerate(merged_semantic_memory):
-                        if is_owning_agent:
-                            semantic_memory += f"[Semantic Memory ID: {semantic_memory_item.id}] Name: {semantic_memory_item.name}; Summary: {semantic_memory_item.summary}\n"
-                        else:
-                            semantic_memory += (
-                                f"[{idx}] Name: {semantic_memory_item.name}; Summary: {semantic_memory_item.summary}\n"
-                            )
+        async def _retrieve_semantic():
+            # Owning agents need IDs for merge/update operations, so always retrieve fresh
+            is_owning_agent = self.agent_state.is_type(AgentType.semantic_memory_agent, AgentType.reflexion_agent)
+            if is_owning_agent or "semantic" not in retrieved_memories:
+                async with timed_span(
+                    "Retrieve semantic",
+                    metadata={"backend": "ipss+ipsr", "memory_type": "semantic"},
+                ):
+                    current_semantic_memory = await self.semantic_memory_manager.list_semantic_items(
+                        agent_state=self.agent_state,
+                        user=self.user,
+                        query=key_words,
+                        embedded_text=embedded_text,
+                        search_field="details",
+                        search_method=search_method,
+                        limit=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
+                        timezone_str=timezone_str,
+                    )
+                    recent_semantic_memory_items = await self._fetch_recent_indexing_lag_window(
+                        table="semantic_memory",
+                        pydantic_cls=PydanticSemanticMemoryItem,
+                    )
+                    merged_semantic_memory = self._merge_recent_into_relevant(
+                        current_semantic_memory, recent_semantic_memory_items
+                    )
+                    semantic_memory = ""
+                    if len(merged_semantic_memory) > 0:
+                        for idx, semantic_memory_item in enumerate(merged_semantic_memory):
+                            if is_owning_agent:
+                                semantic_memory += f"[Semantic Memory ID: {semantic_memory_item.id}] Name: {semantic_memory_item.name}; Summary: {semantic_memory_item.summary}\n"
+                            else:
+                                semantic_memory += f"[{idx}] Name: {semantic_memory_item.name}; Summary: {semantic_memory_item.summary}\n"
 
-                semantic_memory = semantic_memory.strip()
-                retrieved_memories["semantic"] = {
-                    "total_number_of_items": await self.semantic_memory_manager.get_total_number_of_items(user=self.user),
-                    "current_count": len(merged_semantic_memory),
-                    "text": semantic_memory,
-                }
+                    semantic_memory = semantic_memory.strip()
+                    retrieved_memories["semantic"] = {
+                        "total_number_of_items": await self.semantic_memory_manager.get_total_number_of_items(
+                            user=self.user
+                        ),
+                        "current_count": len(merged_semantic_memory),
+                        "text": semantic_memory,
+                    }
+
+        # Run the six retrievals concurrently. gather (return_exceptions=False)
+        # propagates the first failure rather than silently swallowing it.
+        await asyncio.gather(
+            _retrieve_core(),
+            _retrieve_knowledge_vault(),
+            _retrieve_episodic(),
+            _retrieve_resource(),
+            _retrieve_procedural(),
+            _retrieve_semantic(),
+        )
 
         # Build the complete system prompt (synchronous string assembly of all
         # retrieved memories into the prompt template -- a CPU block on the loop).
