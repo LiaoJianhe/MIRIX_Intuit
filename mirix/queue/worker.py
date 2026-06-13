@@ -53,8 +53,6 @@ from mirix.observability import (
     restore_trace_from_queue_message,
 )
 from mirix.observability.context import (
-    clear_tid,
-    clear_trace_context,
     get_tid,
     get_trace_context,
 )
@@ -503,11 +501,12 @@ class QueueWorker:
                 exc_info=True,
             )
             raise
-        finally:
-            clear_trace_context()
-            # TID is tracked independently of trace context; clear it too so it
-            # never leaks from one message into the next on a reused worker task.
-            clear_tid()
+        # NOTE: the TID/trace context restored at the top of this method is
+        # deliberately NOT cleared here. dispatch_save (the per-save boundary
+        # for every run mode) clears it after finalize_source runs, so the
+        # "Finalized memory_source=... outcome=..." log line still carries the
+        # TID. Clearing here — before finalize — is what used to leave that
+        # line stamped tid=-.
 
 
 class BatchQueueWorker(QueueWorker):

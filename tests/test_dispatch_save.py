@@ -19,8 +19,8 @@ import pytest
 
 from mirix.errors import (
     LLMChainingExhaustedError,
-    LLMUnprocessableEntityError,
     LLMRateLimitError,
+    LLMUnprocessableEntityError,
 )
 from mirix.queue.error_policy import SaveOutcome, dispatch_save
 
@@ -152,9 +152,12 @@ async def test_dispatch_save_sets_active_source_during_run_and_clears_after():
         # Inside the save, the active source is visible to provider hooks.
         seen["during"] = fi.get_active_source()
 
-    with patch.object(fi.settings, "fault_injection_enabled", True), patch(
-        "mirix.services.memory_source_manager.MemorySourceManager",
-        return_value=MagicMock(finalize_source=AsyncMock()),
+    with (
+        patch.object(fi.settings, "fault_injection_enabled", True),
+        patch(
+            "mirix.services.memory_source_manager.MemorySourceManager",
+            return_value=MagicMock(finalize_source=AsyncMock()),
+        ),
     ):
         await dispatch_save(_run, memory_source_id="src-active")
         # After the save returns, the ContextVar is cleared.
@@ -180,9 +183,12 @@ async def test_sequential_saves_do_not_leak_active_source():
     fi.reset()
     observed = {}
 
-    with patch.object(fi.settings, "fault_injection_enabled", True), patch(
-        "mirix.services.memory_source_manager.MemorySourceManager",
-        return_value=MagicMock(finalize_source=AsyncMock()),
+    with (
+        patch.object(fi.settings, "fault_injection_enabled", True),
+        patch(
+            "mirix.services.memory_source_manager.MemorySourceManager",
+            return_value=MagicMock(finalize_source=AsyncMock()),
+        ),
     ):
         # Only src-1 has a directive.
         fi.resolve_directives(
@@ -194,9 +200,7 @@ async def test_sequential_saves_do_not_leak_active_source():
             observed["src1_active"] = fi.get_active_source()
             try:
                 # A provider write during src-1's save reads the active source.
-                fi.maybe_raise(
-                    "relational_write", source_key=fi.get_active_source(), tool="memory_sources"
-                )
+                fi.maybe_raise("relational_write", source_key=fi.get_active_source(), tool="memory_sources")
             except fi.SyntheticProviderError:
                 pass  # the fault fired for src-1 (expected); swallow so the save "succeeds"
 
@@ -206,9 +210,7 @@ async def test_sequential_saves_do_not_leak_active_source():
             # src-2 has NO directive; its provider write reads the active source,
             # which must be "src-2" (set by dispatch_save), NOT the stale "src-1".
             observed["src2_active"] = fi.get_active_source()
-            fi.maybe_raise(
-                "relational_write", source_key=fi.get_active_source(), tool="memory_sources"
-            )
+            fi.maybe_raise("relational_write", source_key=fi.get_active_source(), tool="memory_sources")
 
         await dispatch_save(_run_src2, memory_source_id="src-2")
 
@@ -221,3 +223,63 @@ async def test_sequential_saves_do_not_leak_active_source():
     # And the ContextVar is clean after the last save.
     assert fi.get_active_source() is None
     fi.reset()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_save_keeps_tid_through_finalize_then_clears():
+    """The step restores the message's TID into the task context (see
+    worker._process_message_async). finalize_source's "Finalized
+    memory_source=... outcome=..." log line is the save's terminal correlation
+    signal, so the TID must STILL be set when finalize runs — and must be
+    cleared once dispatch_save returns (the per-message boundary on a reused
+    worker task). Clearing inside the step (the old behavior) left the
+    finalize line stamped tid=-."""
+    from mirix.observability.context import get_tid, set_tid
+
+    seen = {}
+
+    async def fake_finalize(source_id, outcome_kind):
+        seen["tid_at_finalize"] = get_tid()
+
+    mgr = MagicMock(finalize_source=AsyncMock(side_effect=fake_finalize))
+
+    async def _run():
+        # Simulates restore_trace_from_queue_message inside the worker step.
+        set_tid("tid-dispatch-test")
+
+    with patch(
+        "mirix.services.memory_source_manager.MemorySourceManager",
+        return_value=mgr,
+    ):
+        await dispatch_save(_run, memory_source_id="src-tid")
+
+    assert seen["tid_at_finalize"] == "tid-dispatch-test"
+    assert get_tid() is None
+
+
+@pytest.mark.asyncio
+async def test_dispatch_save_clears_tid_even_when_step_raises_permanent():
+    """The TID boundary holds on every exit path: a permanently-failing step
+    still finalizes with the TID set and leaves the context clean after."""
+    from mirix.observability.context import get_tid, set_tid
+
+    seen = {}
+
+    async def fake_finalize(source_id, outcome_kind):
+        seen["tid_at_finalize"] = get_tid()
+
+    mgr = MagicMock(finalize_source=AsyncMock(side_effect=fake_finalize))
+
+    async def _run():
+        set_tid("tid-perm-test")
+        raise LLMUnprocessableEntityError("422 rejected")
+
+    with patch(
+        "mirix.services.memory_source_manager.MemorySourceManager",
+        return_value=mgr,
+    ):
+        outcome = await dispatch_save(_run, memory_source_id="src-perm")
+
+    assert outcome.kind is SaveOutcome.PERMANENT_FAILURE
+    assert seen["tid_at_finalize"] == "tid-perm-test"
+    assert get_tid() is None
