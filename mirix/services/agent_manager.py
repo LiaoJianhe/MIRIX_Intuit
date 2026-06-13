@@ -342,71 +342,6 @@ class AgentManager:
             meta_agent_state.children = list(created_agents.values())
         return meta_agent_state
 
-    async def _bulk_update_children_configs(
-        self,
-        parent_id: str,
-        actor: PydanticClient,
-        llm_config: Optional[LLMConfig] = None,
-        embedding_config: Optional[EmbeddingConfig] = None,
-    ) -> None:
-        """Set llm_config / embedding_config on ALL sub-agents of ``parent_id`` in
-        a single statement, replacing the per-child update N+1 in
-        ``update_meta_agent``. A meta-agent re-init applies the same llm/embedding
-        config to every child, so this is one write instead of one per child.
-
-        ``agents`` is an engine table (no domain events), so the provider path
-        uses a mutation named query and the SQLAlchemy fallback uses a bulk
-        ``UPDATE``. No-op when neither config is provided. Child caches are
-        invalidated by the caller (it already holds the child ids).
-        """
-        if llm_config is None and embedding_config is None:
-            return
-
-        from mirix.database.relational_provider import get_relational_provider
-
-        provider = get_relational_provider()
-        if provider:
-            # Both columns are NOT NULL on agents; when only one config is being
-            # changed, carry the other from the meta agent (callers always pass
-            # both on the force_update path, but guard anyway).
-            await provider.mutate_using_named_query(
-                "agents",
-                "agent_manager.update_children_configs_by_parent",
-                params={
-                    "parentId": parent_id,
-                    "organizationId": actor.organization_id,
-                    "createdById": actor.id,
-                    "llmConfig": llm_config.model_dump_json() if llm_config else None,
-                    "embeddingConfig": (
-                        embedding_config.model_dump_json() if embedding_config else None
-                    ),
-                },
-            )
-            return
-
-        # SQLAlchemy fallback (pre-provider-mode): one bulk UPDATE keyed by parent
-        # rather than a read+update per child.
-        from sqlalchemy import update as sa_update
-
-        from mirix.orm.agent import Agent as AgentModel
-
-        values: dict = {}
-        if llm_config is not None:
-            values["llm_config"] = llm_config
-        if embedding_config is not None:
-            values["embedding_config"] = embedding_config
-
-        async with self.session_maker() as session:
-            await session.execute(
-                sa_update(AgentModel)
-                .where(
-                    AgentModel.parent_id == parent_id,
-                    AgentModel.organization_id == actor.organization_id,
-                )
-                .values(**values)
-            )
-            await session.commit()
-
     async def update_meta_agent(
         self,
         meta_agent_id: str,
@@ -586,28 +521,25 @@ class AgentManager:
                             actor=actor,
                         )
 
-        # Update llm_config and embedding_config for ALL sub-agents in a single
-        # statement (one bulk write keyed by parent) instead of a read+update per
-        # child. The bulk write bypasses _update_agent's per-agent cache delete,
-        # so invalidate each child's cache explicitly here.
+        # Update llm_config and embedding_config for all sub-agents if provided.
+        # Pass the already-loaded child as current_state so update_agent applies
+        # the changed scalars locally and skips the post-write hydrate read.
         if meta_agent_update.llm_config or meta_agent_update.embedding_config:
-            await self._bulk_update_children_configs(
-                parent_id=meta_agent_id,
-                actor=actor,
-                llm_config=meta_agent_update.llm_config,
-                embedding_config=meta_agent_update.embedding_config,
-            )
-            try:
-                from mirix.database.cache_provider import get_cache_provider
+            for agent_name, child_agent in existing_agents_by_name.items():
+                update_fields = {}
+                if meta_agent_update.llm_config is not None:
+                    update_fields["llm_config"] = meta_agent_update.llm_config
+                if meta_agent_update.embedding_config is not None:
+                    update_fields["embedding_config"] = meta_agent_update.embedding_config
 
-                cache_provider = get_cache_provider()
-                if cache_provider:
-                    for child_agent in existing_agents_by_name.values():
-                        await cache_provider.delete(
-                            f"{cache_provider.AGENT_PREFIX}{child_agent.id}"
-                        )
-            except Exception as e:
-                logger.warning("Cache invalidation failed for sub-agents: %s", e)
+                if update_fields:
+                    logger.debug("Updating configs for sub-agent: %s", agent_name)
+                    await self.update_agent(
+                        agent_id=child_agent.id,
+                        agent_update=UpdateAgent(**update_fields),
+                        actor=actor,
+                        current_state=child_agent,
+                    )
 
         # Refresh the meta agent state with updated children
         meta_agent_state = await self.get_agent_by_id(agent_id=meta_agent_id, actor=actor)
