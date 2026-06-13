@@ -8,7 +8,7 @@ thing: receive a message, run the save under process_with_policy, route
 the verdict through the single finalize chokepoint.
 
 * numaflow (external) — process_external_message in queue/__init__.py.
-* internal kafka manual / in-memory sim — this file, _consume_loop.
+* internal kafka manual / in-memory sim — this file's BatchQueueWorker.
 
 The only mode-specific behavior is HOW messages are obtained (broker
 delivery vs in-process queue.get()) and what happens on
@@ -27,11 +27,22 @@ in the log line but writes `processing_complete=True` for every outcome
 (SUCCESS / PERMANENT_FAILURE / TRANSIENT_EXHAUSTED). A future
 status-column migration will diversify column writes per outcome; this
 file does not enforce "complete = success only" at the DB level.
+
+Consumer topology: the in-memory / internal-kafka-manual consumer is the
+BatchQueueWorker. Per loop iteration it accumulates up to
+`READ_BATCH_SIZE` messages from its queue/partition (or flushes a partial
+batch after `FLUSH_INTERVAL_MS`), then runs them through the shared
+`mirix.queue.batch.process_batch` core (group-by-user, gather across groups
+under `Semaphore(MAX_IN_FLIGHT_USERS)`, serial within a user). The
+per-message work is the SAME `dispatch_save(_process_message_async)` chokepoint
+the old serial loop used, so `READ_BATCH_SIZE=1` is behaviorally identical to
+the deleted serial consumer (one message → one user-group → one dispatch_save
+→ one finalize). There is no separate "serial mode".
 """
 
 import asyncio
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, List, Optional
 
 from google.protobuf.json_format import MessageToDict
 
@@ -42,11 +53,12 @@ from mirix.observability import (
     restore_trace_from_queue_message,
 )
 from mirix.observability.context import (
-    clear_tid,
-    clear_trace_context,
     get_tid,
     get_trace_context,
 )
+from mirix.queue import config
+from mirix.queue.batch import process_batch
+from mirix.queue.error_policy import dispatch_save
 from mirix.queue.message_pb2 import QueueMessage
 from mirix.services.user_manager import UserManager
 
@@ -409,14 +421,13 @@ class QueueWorker:
                 )
 
             # NOTE: this core does NOT classify errors or mark the source
-            # complete. It runs the agent step and RAISES on any failure. The
-            # caller decides what to do with a raised failure:
-            #   * external consumer path (queue/__init__.process_external_message)
-            #     wraps this in process_with_policy: marks complete on permanent,
-            #     re-raises (without marking) on transient so the consumer
-            #     redelivers.
-            #   * internal consume loop (_consume_loop) marks the source complete
-            #     and swallows — it has no redelivery.
+            # complete. It runs the agent step and RAISES on any failure. Every
+            # caller wraps it in dispatch_save (process_with_policy + the single
+            # finalize chokepoint), so the raised failure is classified and the
+            # source finalized exactly once:
+            #   * external consumer path (queue/__init__.process_external_message).
+            #   * internal batch consumer (BatchQueueWorker._run_one_iteration),
+            #     per message inside the shared process_batch core.
             if langfuse and trace_id:
                 from typing import cast
 
@@ -476,13 +487,13 @@ class QueueWorker:
 
         except Exception as e:
             # Log here for context, then RE-RAISE. This core is the shared
-            # execution path for both the external consumer (which wraps it in
-            # process_with_policy and needs to classify the exception) and the
-            # internal _consume_loop (which marks the source complete and
-            # swallows). Previously this block swallowed without re-raising,
-            # which meant the external path's process_with_policy NEVER saw
-            # failures — its classify/mark-permanent/redeliver logic was
-            # effectively dead. Re-raising lets each caller apply its own policy.
+            # execution path for both the external consumer and the internal
+            # BatchQueueWorker; both wrap it in dispatch_save's
+            # process_with_policy, which needs to SEE the exception to classify
+            # it. Previously this block swallowed without re-raising, which
+            # meant process_with_policy NEVER saw failures — its
+            # classify/mark-permanent/redeliver logic was effectively dead.
+            # Re-raising lets the shared policy apply.
             logger.error(
                 "Error processing message for agent_id=%s: %s",
                 message.agent_id,
@@ -490,84 +501,195 @@ class QueueWorker:
                 exc_info=True,
             )
             raise
-        finally:
-            clear_trace_context()
-            # TID is tracked independently of trace context; clear it too so it
-            # never leaks from one message into the next on a reused worker task.
-            clear_tid()
+        # NOTE: the TID/trace context restored at the top of this method is
+        # deliberately NOT cleared here. dispatch_save (the per-save boundary
+        # for every run mode) clears it after finalize_source runs, so the
+        # "Finalized memory_source=... outcome=..." log line still carries the
+        # TID. Clearing here — before finalize — is what used to leave that
+        # line stamped tid=-.
 
-    async def _consume_loop(self) -> None:
+
+class BatchQueueWorker(QueueWorker):
+    """In-memory / internal-kafka-manual consumer that pulls messages in
+    batches and runs them through the shared :func:`process_batch` core.
+
+    Replaces the deleted serial ``QueueWorker._consume_loop``. It reuses every
+    per-message helper from :class:`QueueWorker` (``_process_message_async``,
+    the ``_convert_proto_*`` converters, ``set_server``,
+    ``process_external_message``) — only HOW messages are obtained and grouped
+    changes here.
+
+    Per loop iteration (:meth:`_run_one_iteration`):
+
+      1. :meth:`_collect_batch` accumulates up to ``config.READ_BATCH_SIZE``
+         messages from this worker's queue/partition, OR returns the partial
+         batch once ``config.FLUSH_INTERVAL_MS`` has elapsed since the first
+         message arrived. An empty queue yields an empty batch (idle no-op).
+      2. The batch runs through :func:`process_batch`, grouped by
+         :meth:`_user_key` (the message's ``user_id`` if present, else None),
+         with ``max_in_flight_users=config.MAX_IN_FLIGHT_USERS``.
+      3. The per-message ``process`` wraps ``_process_message_async`` in
+         ``dispatch_save`` with the message's ``memory_source_id`` — the SAME
+         chokepoint the serial loop used.
+
+    ``config.*`` is read at call time (not bound at import) so env/monkeypatch
+    changes take effect without re-importing.
+
+    ``READ_BATCH_SIZE=1`` ⇒ one message per pull ⇒ one user-group ⇒ one
+    ``dispatch_save`` ⇒ one finalize: behaviorally identical to the old serial
+    consumer.
+
+    Config values are snapshotted ONCE at the start of each iteration so a mid
+    iteration env change cannot desync the collect cap from the dispatch cap.
+    """
+
+    # How long a single queue.get poll blocks while accumulating a batch. The
+    # flush deadline (FLUSH_INTERVAL_MS) governs when a partial batch is
+    # released; this just bounds how often we wake to re-check the deadline /
+    # the running flag.
+    _POLL_TIMEOUT_SECONDS = 0.05
+
+    @staticmethod
+    def _user_key(message: QueueMessage) -> Optional[str]:
+        """Grouping key for :func:`process_batch`: the message's ``user_id`` if
+        set, else None (None-keyed messages share one serial 'unknown' group)."""
+        return message.user_id if message.HasField("user_id") else None
+
+    async def _get_one(self, timeout: float) -> QueueMessage:
+        """Pull a single message from this worker's queue or partition."""
+        if self._partition_id is not None and hasattr(self.queue, "get_from_partition"):
+            return await self.queue.get_from_partition(self._partition_id, timeout=timeout)
+        return await self.queue.get(timeout=timeout)
+
+    async def _collect_batch(self) -> List[QueueMessage]:
+        """Accumulate up to ``READ_BATCH_SIZE`` messages, or flush the partial
+        batch after ``FLUSH_INTERVAL_MS`` since the first message arrived.
+
+        Returns an empty list if no message arrives within the flush window
+        (idle). The flush timer starts only once the FIRST message of a batch
+        has been pulled — an idle worker is bounded by a single flush-window
+        wait, then loops.
+        """
+        read_batch_size = max(1, config.READ_BATCH_SIZE)
+        flush_interval_s = max(0.0, config.FLUSH_INTERVAL_MS / 1000.0)
+
+        batch: List[QueueMessage] = []
+        deadline: Optional[float] = None
+
+        # Accumulation is NOT gated on self._running: a stop() cancels the
+        # consume task, so a CancelledError propagates out of _get_one and
+        # unwinds this collect cleanly. Gating here would make a directly
+        # invoked _collect_batch (and the first iteration before the loop sets
+        # the flag) return empty.
+        loop = asyncio.get_running_loop()
+        while len(batch) < read_batch_size:
+            if deadline is None:
+                # No message yet — wait up to one flush window for the first.
+                poll = max(self._POLL_TIMEOUT_SECONDS, flush_interval_s)
+            else:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break  # flush window elapsed → release the partial batch
+                poll = min(self._POLL_TIMEOUT_SECONDS, remaining)
+
+            try:
+                message = await self._get_one(poll)
+            except asyncio.TimeoutError:
+                if deadline is None and not batch:
+                    # Still idle after a full flush window with nothing pulled.
+                    break
+                continue
+
+            batch.append(message)
+            if deadline is None:
+                deadline = loop.time() + flush_interval_s
+
+        return batch
+
+    async def _run_one_iteration(self) -> None:
+        """Collect one batch and run it through the shared batch core.
+
+        Snapshots ``MAX_IN_FLIGHT_USERS`` once so the dispatch cap matches the
+        batch that was just collected. No-op (no ``process_batch`` call) when
+        the batch is empty.
+        """
+        batch = await self._collect_batch()
+        if not batch:
+            return
+
+        max_in_flight_users = max(1, config.MAX_IN_FLIGHT_USERS)
+
+        distinct_users = len({self._user_key(m) for m in batch})
+        partition_info = f", partition={self._partition_id}" if self._partition_id is not None else ""
+        logger.debug(
+            "[BATCH] processing%s: batch_size=%d, distinct_users=%d, max_in_flight_users=%d",
+            partition_info,
+            len(batch),
+            distinct_users,
+            max_in_flight_users,
+        )
+
+        async def _process(message: QueueMessage) -> None:
+            # SAME per-message chokepoint the serial loop used: run the agent
+            # step under dispatch_save (classify + bounded retry + single
+            # finalize). memory_source_id is extracted per message exactly as
+            # before.
+            source_id = message.memory_source_id if message.HasField("memory_source_id") else None
+
+            async def _run() -> None:
+                await self._process_message_async(message)
+
+            await dispatch_save(_run, memory_source_id=source_id)
+
+        await process_batch(
+            batch,
+            user_key=self._user_key,
+            process=_process,
+            max_in_flight_users=max_in_flight_users,
+        )
+
+    async def _batch_consume_loop(self) -> None:
         """Async consume loop running as an asyncio.Task in the main event loop.
 
-        Every received message goes through the shared `dispatch_save` helper
-        in `error_policy.py`. That helper runs process_with_policy (classify
-        + bounded retry) and then routes the verdict to the single finalize
-        chokepoint. No mode-specific outcome dispatch lives here — the same
-        helper handles numaflow's `process_external_message` too.
+        Each iteration collects a batch (:meth:`_collect_batch`) and runs it
+        through :func:`process_batch`. A genuinely unexpected error in the loop
+        body is swallowed (logged) so the worker task keeps running — same
+        defense-in-depth as the old serial loop. ``dispatch_save`` already
+        finalizes its own classified failures; we do NOT finalize here because
+        a protocol error gives us no per-save outcome.
         """
         partition_info = f", partition={self._partition_id}" if self._partition_id is not None else ""
-        logger.info("Queue worker task started%s", partition_info)
+        logger.info("Batch queue worker task started%s", partition_info)
 
         while self._running:
-            message = None
             try:
-                if self._partition_id is not None and hasattr(self.queue, "get_from_partition"):
-                    message = await self.queue.get_from_partition(self._partition_id, timeout=1.0)
-                else:
-                    message = await self.queue.get(timeout=1.0)
-
-                logger.debug(
-                    "Received message%s: agent_id=%s, user_id=%s, input_messages_count=%s",
-                    partition_info,
-                    message.agent_id,
-                    message.user_id if message.HasField("user_id") else "None",
-                    len(message.input_messages),
-                )
-
-                from mirix.queue.error_policy import dispatch_save
-
-                source_id = (
-                    message.memory_source_id
-                    if message.HasField("memory_source_id")
-                    else None
-                )
-
-                async def _run() -> None:
-                    await self._process_message_async(message)
-
-                await dispatch_save(_run, memory_source_id=source_id)
-
-            except asyncio.TimeoutError:
-                continue
+                await self._run_one_iteration()
             except asyncio.CancelledError:
-                logger.info("Queue worker task cancelled%s", partition_info)
+                logger.info("Batch queue worker task cancelled%s", partition_info)
                 break
             except Exception as e:
-                if type(e).__name__ in ["Empty", "StopIteration"]:
-                    continue
-                # Defense in depth: dispatch_save catches its own classified
-                # failures and finalizes through the chokepoint. A genuinely
-                # unexpected error elsewhere in the loop body (queue protocol
-                # shape, message deserialization, etc.) lands here and is
-                # swallowed so the worker task keeps running. We do NOT
-                # finalize the source here — we don't know the outcome of
-                # the save (it may have succeeded before the protocol error).
-                logger.error("Error in message consumption loop: %s", e, exc_info=True)
+                logger.error("Error in batch consumption loop: %s", e, exc_info=True)
 
     async def start(self) -> None:
-        """Start the background worker as an asyncio.Task."""
+        """Start the background batch worker as an asyncio.Task."""
         if self._running:
-            logger.warning("Queue worker already running")
+            logger.warning("Batch queue worker already running")
             return
 
         partition_info = f" (partition {self._partition_id})" if self._partition_id is not None else ""
-        logger.info("Starting queue worker task%s...", partition_info)
+        logger.info(
+            "Starting batch queue worker task%s (read_batch_size=%d, max_in_flight_users=%d, flush_interval_ms=%d)...",
+            partition_info,
+            config.READ_BATCH_SIZE,
+            config.MAX_IN_FLIGHT_USERS,
+            config.FLUSH_INTERVAL_MS,
+        )
         self._running = True
 
-        task_name = f"QueueWorker-{self._partition_id}" if self._partition_id is not None else "QueueWorker"
-        self._task = asyncio.create_task(self._consume_loop(), name=task_name)
+        task_name = f"BatchQueueWorker-{self._partition_id}" if self._partition_id is not None else "BatchQueueWorker"
+        self._task = asyncio.create_task(self._batch_consume_loop(), name=task_name)
 
-        logger.info("Queue worker task%s started successfully", partition_info)
+        logger.info("Batch queue worker task%s started successfully", partition_info)
 
     async def stop(self, close_queue: bool = True) -> None:
         """
