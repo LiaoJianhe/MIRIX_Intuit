@@ -92,6 +92,7 @@ SITES: frozenset[str] = frozenset(
     {
         "tool_body",  # inside _execute_tool_inner, before the tool body runs
         "llm",  # meta-agent chaining / LLMChainingExhaustedError site
+        "llm_request",  # the inner_step LLM call (catchable by overflow recovery)
         "subagent",  # per-sub-agent run inside the fan-out
         "relational_write",  # the registered relational provider's create/update
         "search_read",  # the registered search provider's read path
@@ -149,9 +150,7 @@ class SyntheticProviderError(Exception):
         self.status_code = status_code
 
 
-def _make_exception(
-    shape: str, ctx: str, *, provider_site: bool = False
-) -> BaseException:
+def _make_exception(shape: str, ctx: str, *, provider_site: bool = False) -> BaseException:
     """Map a fault shape to the exception that drives the documented outcome.
 
     The shapes deliberately mirror the typed save-path vocabulary so the
@@ -165,6 +164,10 @@ def _make_exception(
     * ``correctable``            -> CorrectableToolError -> bounded LLM re-prompt.
     * ``llm_chaining_exhausted`` -> LLMChainingExhaustedError -> PERMANENT.
     * ``subagent_permanent``     -> ProviderPermanentError from one sub-agent.
+    * ``context_overflow``       -> an error carrying the OpenAI "maximum context
+                                    length" substring so ``is_context_overflow_error``
+                                    matches it and ``inner_step`` runs its
+                                    summarize-and-retry recovery (site=llm_request).
 
     At provider sites the transient/permanent/conflict shapes are raised as a
     status-bearing :class:`SyntheticProviderError` so the registered provider's
@@ -174,6 +177,12 @@ def _make_exception(
     msg = f"synthetic {shape} fault at {ctx}"
     if shape == "attribute_error":
         return AttributeError(msg)
+    if shape == "context_overflow":
+        # Carry the OpenAI overflow substring so is_context_overflow_error()
+        # matches and inner_step takes its summarize-and-retry recovery branch.
+        from mirix.constants import OPENAI_CONTEXT_WINDOW_ERROR_SUBSTRING
+
+        return ValueError(f"{OPENAI_CONTEXT_WINDOW_ERROR_SUBSTRING}: {msg}")
     if shape == "correctable":
         return CorrectableToolError(msg)
     if shape == "llm_chaining_exhausted":
@@ -182,9 +191,7 @@ def _make_exception(
         return ProviderPermanentError(msg)
     if shape in _PROVIDER_SHAPE_STATUS:
         if provider_site:
-            return SyntheticProviderError(
-                msg, status_code=_PROVIDER_SHAPE_STATUS[shape]
-            )
+            return SyntheticProviderError(msg, status_code=_PROVIDER_SHAPE_STATUS[shape])
         # Off the provider boundary: raise the typed error directly.
         if shape == "transient":
             return ProviderTransientError(msg)
@@ -205,6 +212,7 @@ _VALID_SHAPES: frozenset[str] = frozenset(
         "correctable",
         "llm_chaining_exhausted",
         "subagent_permanent",
+        "context_overflow",
     }
 )
 
@@ -323,13 +331,9 @@ def resolve_directives(source_key: str, source_metadata: Optional[dict]) -> None
         site = raw.get("site")
         shape = raw.get("shape")
         if site not in SITES:
-            raise ValueError(
-                f"fault-injection: unknown site {site!r} (valid: {sorted(SITES)})"
-            )
+            raise ValueError(f"fault-injection: unknown site {site!r} (valid: {sorted(SITES)})")
         if shape not in _VALID_SHAPES:
-            raise ValueError(
-                f"fault-injection: unknown shape {shape!r} (valid: {sorted(_VALID_SHAPES)})"
-            )
+            raise ValueError(f"fault-injection: unknown shape {shape!r} (valid: {sorted(_VALID_SHAPES)})")
         parsed.append(
             FaultDirective(
                 site=site,
@@ -340,24 +344,52 @@ def resolve_directives(source_key: str, source_metadata: Optional[dict]) -> None
         )
 
     _directives.setdefault(source_key, []).extend(parsed)
-    logger.info(
-        "%s resolved %d directive(s) for source=%s", LOG_PREFIX, len(parsed), source_key
-    )
+    logger.info("%s resolved %d directive(s) for source=%s", LOG_PREFIX, len(parsed), source_key)
 
 
-def _take_matching_directive(
-    site: str, source_key: Optional[str], tool: Optional[str]
-) -> Optional[FaultDirective]:
+def _take_matching_directive(site: str, source_key: Optional[str], tool: Optional[str]) -> Optional[FaultDirective]:
     """Find a matching directive for (source_key, site, tool), and if it should
     fire on this call, increment its budget + the fire counter and return it.
     Returns None when injection is disabled or nothing matches/fires."""
-    if _injection_disabled() or not source_key:
+    # Diagnostic for the recurring "directive resolved but never fired" question:
+    # name the reason maybe_raise/next_fault no-ops, so a no-fire is debuggable
+    # without guessing (disabled? no source on this call? no directive registered
+    # for this source? site/tool mismatch? budget spent?). DEBUG-level: silent in
+    # normal ops, visible under the FST's DEBUG logging.
+    if _injection_disabled():
+        return None
+    if not source_key:
+        logger.debug("%s no-fire site=%s reason=no_active_source", LOG_PREFIX, site)
         return None
     directives = _directives.get(source_key)
     if not directives:
+        logger.debug(
+            "%s no-fire site=%s source=%s reason=no_directives_for_source",
+            LOG_PREFIX,
+            site,
+            source_key,
+        )
         return None
     directive = next((d for d in directives if d.matches(site, tool)), None)
-    if directive is None or not directive.should_fire():
+    if directive is None:
+        logger.debug(
+            "%s no-fire site=%s source=%s tool=%s reason=no_matching_directive " "(registered sites=%s)",
+            LOG_PREFIX,
+            site,
+            source_key,
+            tool,
+            [d.site for d in directives],
+        )
+        return None
+    if not directive.should_fire():
+        logger.debug(
+            "%s no-fire site=%s source=%s reason=budget_spent (fired=%d fail_attempts=%s)",
+            LOG_PREFIX,
+            site,
+            source_key,
+            directive.fired,
+            directive.fail_attempts,
+        )
         return None
     directive.fired += 1
     key = (source_key, site)
@@ -377,9 +409,7 @@ def _log_fire(shape: str, site: str, source_key: str, tool: Optional[str]) -> No
     )
 
 
-def maybe_raise(
-    site: str, *, source_key: Optional[str] = None, tool: Optional[str] = None
-) -> None:
+def maybe_raise(site: str, *, source_key: Optional[str] = None, tool: Optional[str] = None) -> None:
     """Raise the configured fault for ``site`` if one matches; otherwise no-op.
 
     Call sites invoke this unconditionally — both the enabled flag and the
@@ -393,9 +423,7 @@ def maybe_raise(
     raise _make_exception(directive.shape, ctx, provider_site=site in _PROVIDER_SITES)
 
 
-def next_fault(
-    site: str, *, source_key: Optional[str] = None, tool: Optional[str] = None
-) -> Optional[str]:
+def next_fault(site: str, *, source_key: Optional[str] = None, tool: Optional[str] = None) -> Optional[str]:
     """Like :func:`maybe_raise`, but RETURN the matched shape (and record the
     fire) instead of raising. For hook sites that must raise a native exception
     shape of their own — e.g. a search-read boundary that retries ``httpx``

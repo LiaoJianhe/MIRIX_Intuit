@@ -54,11 +54,7 @@ def test_maybe_raise_is_noop_when_flag_off():
         # A directive is present, but the flag gates everything.
         fi.resolve_directives(
             "src-1",
-            {
-                "__fault_injection__": {
-                    "faults": [{"site": "tool_body", "shape": "attribute_error"}]
-                }
-            },
+            {"__fault_injection__": {"faults": [{"site": "tool_body", "shape": "attribute_error"}]}},
         )
         # Must not raise, must not record a fire.
         fi.maybe_raise("tool_body", source_key="src-1")
@@ -70,17 +66,11 @@ def test_resolve_directives_is_noop_when_flag_off():
     with patch.object(fi.settings, "fault_injection_enabled", False):
         fi.resolve_directives(
             "src-x",
-            {
-                "__fault_injection__": {
-                    "faults": [{"site": "relational_write", "shape": "permanent"}]
-                }
-            },
+            {"__fault_injection__": {"faults": [{"site": "relational_write", "shape": "permanent"}]}},
         )
     # Re-enabling and asking should find nothing registered.
     with patch.object(fi.settings, "fault_injection_enabled", True):
-        fi.maybe_raise(
-            "relational_write", source_key="src-x"
-        )  # no directive -> no raise
+        fi.maybe_raise("relational_write", source_key="src-x")  # no directive -> no raise
 
 
 # --------------------------------------------------------------------------- #
@@ -98,6 +88,7 @@ def test_resolve_directives_is_noop_when_flag_off():
         ("correctable", CorrectableToolError),
         ("llm_chaining_exhausted", LLMChainingExhaustedError),
         ("subagent_permanent", ProviderPermanentError),
+        ("context_overflow", ValueError),
     ],
 )
 def test_shape_maps_to_exception(shape, exc_type):
@@ -110,16 +101,30 @@ def test_shape_maps_to_exception(shape, exc_type):
     assert fi.fire_count("src-shape", "tool_body") == 1
 
 
+def test_context_overflow_shape_is_recognized_as_overflow():
+    """The context_overflow shape must raise an error that
+    is_context_overflow_error() matches — otherwise inner_step's recovery branch
+    never triggers and the FST would exercise nothing."""
+    from mirix.llm_api.helpers import is_context_overflow_error
+
+    fi.resolve_directives(
+        "src-overflow",
+        {"__fault_injection__": {"faults": [{"site": "llm_request", "shape": "context_overflow"}]}},
+    )
+    with pytest.raises(Exception) as excinfo:
+        fi.maybe_raise("llm_request", source_key="src-overflow")
+    assert is_context_overflow_error(excinfo.value), (
+        "context_overflow fault must be recognized by is_context_overflow_error "
+        "so the summarize-and-retry recovery path triggers"
+    )
+
+
 def test_unknown_shape_raises_valueerror_at_resolve():
     """A typo'd shape fails loudly at resolution, not silently at the hook."""
     with pytest.raises(ValueError):
         fi.resolve_directives(
             "src-bad",
-            {
-                "__fault_injection__": {
-                    "faults": [{"site": "tool_body", "shape": "nope"}]
-                }
-            },
+            {"__fault_injection__": {"faults": [{"site": "tool_body", "shape": "nope"}]}},
         )
 
 
@@ -131,11 +136,7 @@ def test_unknown_shape_raises_valueerror_at_resolve():
 def test_only_matching_site_fires():
     fi.resolve_directives(
         "src-2",
-        {
-            "__fault_injection__": {
-                "faults": [{"site": "relational_write", "shape": "transient"}]
-            }
-        },
+        {"__fault_injection__": {"faults": [{"site": "relational_write", "shape": "transient"}]}},
     )
     # Different site: no-op.
     fi.maybe_raise("tool_body", source_key="src-2")
@@ -152,11 +153,7 @@ def test_directive_keyed_per_source():
     """A directive on src-A never fires for src-B (parallel-safety)."""
     fi.resolve_directives(
         "src-A",
-        {
-            "__fault_injection__": {
-                "faults": [{"site": "relational_write", "shape": "permanent"}]
-            }
-        },
+        {"__fault_injection__": {"faults": [{"site": "relational_write", "shape": "permanent"}]}},
     )
     # src-B has no directive.
     fi.maybe_raise("relational_write", source_key="src-B")
@@ -212,12 +209,8 @@ def test_fail_attempts_recovers_after_n():
         },
     )
     with pytest.raises(SyntheticProviderError):
-        fi.maybe_raise(
-            "relational_write", source_key="src-recover"
-        )  # attempt 1 -> fail
-    fi.maybe_raise(
-        "relational_write", source_key="src-recover"
-    )  # attempt 2 -> recovered
+        fi.maybe_raise("relational_write", source_key="src-recover")  # attempt 1 -> fail
+    fi.maybe_raise("relational_write", source_key="src-recover")  # attempt 2 -> recovered
     assert fi.fire_count("src-recover", "relational_write") == 1
 
 
@@ -225,11 +218,7 @@ def test_no_fail_attempts_means_sustained():
     """Omitting fail_attempts fires on every call (sustained failure)."""
     fi.resolve_directives(
         "src-sustained",
-        {
-            "__fault_injection__": {
-                "faults": [{"site": "search_read", "shape": "transient"}]
-            }
-        },
+        {"__fault_injection__": {"faults": [{"site": "search_read", "shape": "transient"}]}},
     )
     for _ in range(3):
         with pytest.raises(SyntheticProviderError):
@@ -250,11 +239,7 @@ def test_fire_emits_prefixed_log_line(caplog):
 
     fi.resolve_directives(
         "src-log",
-        {
-            "__fault_injection__": {
-                "faults": [{"site": "relational_write", "shape": "permanent"}]
-            }
-        },
+        {"__fault_injection__": {"faults": [{"site": "relational_write", "shape": "permanent"}]}},
     )
     # The "Mirix" logger sets propagate=False, so caplog (which captures via the
     # root logger) needs propagation re-enabled for the duration of the assert.
@@ -268,11 +253,7 @@ def test_fire_emits_prefixed_log_line(caplog):
     finally:
         mirix_logger.propagate = prior_propagate
 
-    fire_records = [
-        r
-        for r in caplog.records
-        if fi.LOG_PREFIX in r.getMessage() and "fired" in r.getMessage()
-    ]
+    fire_records = [r for r in caplog.records if fi.LOG_PREFIX in r.getMessage() and "fired" in r.getMessage()]
     assert len(fire_records) == 1
     # Pin the logger tree: the fire line must ride the "Mirix" handler stack.
     assert fire_records[0].name == "Mirix"
@@ -287,11 +268,7 @@ def test_next_fault_returns_shape_without_raising():
     matched shape so the caller can raise its own native (httpx) exception."""
     fi.resolve_directives(
         "src-next",
-        {
-            "__fault_injection__": {
-                "faults": [{"site": "search_read", "shape": "transient"}]
-            }
-        },
+        {"__fault_injection__": {"faults": [{"site": "search_read", "shape": "transient"}]}},
     )
     shape = fi.next_fault("search_read", source_key="src-next")
     assert shape == "transient"
@@ -304,11 +281,7 @@ def test_next_fault_is_noop_when_off():
     with patch.object(fi.settings, "fault_injection_enabled", True):
         fi.resolve_directives(
             "src-no",
-            {
-                "__fault_injection__": {
-                    "faults": [{"site": "search_read", "shape": "transient"}]
-                }
-            },
+            {"__fault_injection__": {"faults": [{"site": "search_read", "shape": "transient"}]}},
         )
     with patch.object(fi.settings, "fault_injection_enabled", False):
         assert fi.next_fault("search_read", source_key="src-no") is None
@@ -327,11 +300,7 @@ def test_prod_env_hard_disables_even_when_flag_on(prod_env, monkeypatch):
     monkeypatch.setenv("APP_ENV", prod_env)
     fi.resolve_directives(
         "src-prod",
-        {
-            "__fault_injection__": {
-                "faults": [{"site": "tool_body", "shape": "attribute_error"}]
-            }
-        },
+        {"__fault_injection__": {"faults": [{"site": "tool_body", "shape": "attribute_error"}]}},
     )
     # resolve was a no-op under prod, so nothing fires.
     fi.maybe_raise("tool_body", source_key="src-prod")
@@ -342,11 +311,7 @@ def test_non_prod_env_allows_injection(monkeypatch):
     monkeypatch.setenv("APP_ENV", "test")
     fi.resolve_directives(
         "src-test-env",
-        {
-            "__fault_injection__": {
-                "faults": [{"site": "tool_body", "shape": "attribute_error"}]
-            }
-        },
+        {"__fault_injection__": {"faults": [{"site": "tool_body", "shape": "attribute_error"}]}},
     )
     with pytest.raises(AttributeError):
         fi.maybe_raise("tool_body", source_key="src-test-env")

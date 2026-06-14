@@ -1320,6 +1320,20 @@ class Agent(BaseAgent):
                         limit=retention,
                     )
 
+            # Retention is otherwise silent; surface the decision + how much
+            # history loaded. retained_count drives context-overflow recovery
+            # eligibility (recovery only runs when it is > 0), so this is the
+            # first thing to check when a save unexpectedly does/doesn't retain
+            # prior turns. retention=0 here means the CLIENT's
+            # message_set_retention_count is unset/zero.
+            logger.info(
+                "[RETENTION] agent=%s retention=%d should_read=%s loaded=%d",
+                self.agent_state.id,
+                retention,
+                should_read_retention,
+                len(retained_input_sets),
+            )
+
             # Chaining accumulator for the active agent loop only.
             accumulated: List[Message] = list(retained_input_sets)
             # Persist only the original input payload, never synthetic helper messages
@@ -1550,6 +1564,15 @@ class Agent(BaseAgent):
                     user_id=self.user_id,
                     actor=self.actor,
                     keep_newest_n=retention,
+                )
+                # Companion to the [RETENTION] read line: confirms this save
+                # actually persisted its turns for a LATER save to retain (the
+                # write half of the retention round-trip).
+                logger.info(
+                    "[RETENTION] agent=%s wrote=%d kept_newest=%d",
+                    self.agent_state.id,
+                    len(input_messages_for_persistence),
+                    retention,
                 )
 
             # Await the parallel summary task (dispatched before sub-agents ran).
@@ -2852,6 +2875,18 @@ These keywords have been used to retrieve relevant memories from the database.
                 printv(
                     f"[Mirix.Agent.{self.agent_state.name}] WARNING: {CLI_WARNING_PREFIX}Attempting to run ChatCompletion without user as the last message in the queue"
                 )
+
+            # Test-only fault injection (inert in prod): a `llm_request` directive
+            # raises a synthetic "maximum context length" error here — inside the
+            # try whose except runs summarize-and-retry recovery — so the
+            # context-overflow recovery path can be exercised deterministically
+            # without a real >context-window payload. AgentType is imported
+            # locally (matching this module's pattern; inner_step has no scope-
+            # level import) — omitting it raised NameError on every save.
+            from mirix.schemas.agent import AgentType
+
+            if self.agent_state.is_type(AgentType.meta_memory_agent):
+                fault_injection.maybe_raise("llm_request", source_key=getattr(self, "memory_source_id", None))
 
             # Step 2: send the conversation and available functions to the LLM
             response = await self._get_ai_reply(

@@ -19,7 +19,7 @@ import uuid
 import warnings
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from functools import wraps
+from functools import lru_cache, wraps
 from logging import Logger
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional, Union, _GenericAlias, get_args, get_origin, get_type_hints
@@ -856,9 +856,33 @@ class OpenAIBackcompatUnpickler(pickle.Unpickler):
         return super().find_class(module, name)
 
 
+@lru_cache(maxsize=None)
+def get_encoding(model: str = "gpt-4") -> "tiktoken.Encoding":
+    """Return the tiktoken encoding for ``model``, loaded once per model.
+
+    ``tiktoken.encoding_for_model`` resolves (and on first use COLD-LOADS) the
+    BPE vocab — a ~1.5s, CPU-bound, potentially network-fetching call. Doing it
+    on every ``count_tokens`` invocation put that cold load on whatever event
+    loop ran the first summary, starving the loop (the save-path stall behind
+    the timing-FST loop-lag gate). Cache per model so the load happens once;
+    ``warm_token_encodings`` warms it off the request path at startup. Falls back
+    to ``cl100k_base`` for unknown models (same behavior the call sites had)."""
+    try:
+        return tiktoken.encoding_for_model(model)
+    except KeyError:
+        return tiktoken.get_encoding("cl100k_base")
+
+
+def warm_token_encodings(models: tuple = ("gpt-4",)) -> None:
+    """Pre-load token encodings so the first ``count_tokens`` doesn't pay the
+    ~1.5s cold load on a live event loop. Call at startup (ideally off-loop, via
+    ``asyncio.to_thread`` or before the loop starts). Idempotent (lru_cached)."""
+    for model in models:
+        get_encoding(model)
+
+
 def count_tokens(s: str, model: str = "gpt-4") -> int:
-    encoding = tiktoken.encoding_for_model(model)
-    return len(encoding.encode(s))
+    return len(get_encoding(model).encode(s))
 
 
 def printd(*args, **kwargs):
@@ -1251,13 +1275,7 @@ def num_tokens_from_functions(functions: List[dict], model: str = "gpt-4"):
 
     Copied from https://community.openai.com/t/how-to-calculate-the-tokens-when-using-function-call/266573/11
     """
-    try:
-        encoding = tiktoken.encoding_for_model(model)
-    except KeyError:
-        from mirix.utils import printd
-
-        printd("Warning: model not found. Using cl100k_base encoding.")
-        encoding = tiktoken.get_encoding("cl100k_base")
+    encoding = get_encoding(model)
 
     num_tokens = 0
     for function in functions:
@@ -1317,11 +1335,7 @@ def num_tokens_from_tool_calls(tool_calls: Union[List[dict], List[ToolCall]], mo
         }
     }]
     """
-    try:
-        encoding = tiktoken.encoding_for_model(model)
-    except KeyError:
-        # logger.debug("Warning: model not found. Using cl100k_base encoding.")
-        encoding = tiktoken.get_encoding("cl100k_base")
+    encoding = get_encoding(model)
 
     num_tokens = 0
     for tool_call in tool_calls:
@@ -1363,12 +1377,7 @@ def num_tokens_from_messages(messages: List[dict], model: str = "gpt-4") -> int:
     For counting tokens in function calling REQUESTS, see:
         https://community.openai.com/t/how-to-calculate-the-tokens-when-using-function-call/266573/11
     """
-    try:
-        # Attempt to search for the encoding based on the model string
-        encoding = tiktoken.encoding_for_model(model)
-    except KeyError:
-        # logger.error("Warning: model not found. Using cl100k_base encoding.")
-        encoding = tiktoken.get_encoding("cl100k_base")
+    encoding = get_encoding(model)
     if model in {
         "gpt-3.5-turbo-0613",
         "gpt-3.5-turbo-16k-0613",
