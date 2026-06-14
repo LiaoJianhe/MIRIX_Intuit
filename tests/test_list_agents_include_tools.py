@@ -92,9 +92,7 @@ async def test_include_tools_false_yields_valid_agent_state_with_empty_tools():
         "mirix.database.relational_provider.get_relational_provider",
         return_value=fake_rp,
     ):
-        agents = await am.list_agents(
-            actor=_make_actor(), limit=1, include_tools=False
-        )
+        agents = await am.list_agents(actor=_make_actor(), limit=1, include_tools=False)
 
     assert len(agents) == 1
     assert agents[0].id == "agent-1"

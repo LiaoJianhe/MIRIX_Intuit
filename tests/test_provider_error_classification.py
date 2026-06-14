@@ -21,9 +21,9 @@ from __future__ import annotations
 import pytest
 
 from mirix.errors import (
+    ProviderConflictError,
     ProviderPermanentError,
     ProviderTransientError,
-    ProviderConflictError,
 )
 from mirix.queue.error_policy import (
     Bucket,
@@ -33,7 +33,6 @@ from mirix.queue.error_policy import (
     mark_inner_exhausted,
     process_with_policy,
 )
-
 
 # ---------- classify() ----------
 
@@ -120,9 +119,9 @@ async def test_inner_exhausted_transient_not_re_retried_at_whole_step():
 
     outcome = await process_with_policy(run_step, memory_source_id="src-x")
 
-    assert outcome.kind is SaveOutcome.TRANSIENT_EXHAUSTED, (
-        "marked exhausted transient must still verdict TRANSIENT_EXHAUSTED"
-    )
+    assert (
+        outcome.kind is SaveOutcome.TRANSIENT_EXHAUSTED
+    ), "marked exhausted transient must still verdict TRANSIENT_EXHAUSTED"
     assert calls["n"] == 1, (
         f"whole-step loop must NOT retry an inner-exhausted transient — "
         f"expected exactly 1 attempt, got {calls['n']}"
@@ -146,9 +145,7 @@ async def test_unmarked_transient_still_retried_at_whole_step():
     # The default whole_step_retry_max_attempts under MIRIX settings is 2,
     # so the loop runs initial + 2 = 3 attempts. Assert it ran more than
     # the single inner-exhausted attempt.
-    assert calls["n"] >= 2, (
-        f"unmarked transient must still get whole-step retries — got {calls['n']}"
-    )
+    assert calls["n"] >= 2, f"unmarked transient must still get whole-step retries — got {calls['n']}"
 
 
 @pytest.mark.asyncio

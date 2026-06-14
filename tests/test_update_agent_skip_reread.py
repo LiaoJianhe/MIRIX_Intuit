@@ -20,8 +20,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from mirix.schemas.agent import AgentType, UpdateAgent
 from mirix.schemas.agent import AgentState as PydanticAgentState
+from mirix.schemas.agent import AgentType, UpdateAgent
 from mirix.schemas.client import Client
 from mirix.schemas.embedding_config import EmbeddingConfig
 from mirix.schemas.llm_config import LLMConfig

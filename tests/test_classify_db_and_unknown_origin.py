@@ -50,16 +50,12 @@ class TestSqlAlchemyClassification:
 
     def test_integrity_error_is_permanent(self):
         """Constraint violation — re-running won't change the outcome."""
-        exc = IntegrityError(
-            "INSERT INTO ...", {}, Exception("duplicate key value")
-        )
+        exc = IntegrityError("INSERT INTO ...", {}, Exception("duplicate key value"))
         assert classify(exc) is Bucket.PERMANENT
 
     def test_data_error_is_permanent(self):
         """Bad data shape — input is the problem; retry won't fix it."""
-        exc = DataError(
-            "INSERT INTO ...", {}, Exception("invalid input syntax for type")
-        )
+        exc = DataError("INSERT INTO ...", {}, Exception("invalid input syntax for type"))
         assert classify(exc) is Bucket.PERMANENT
 
     def test_asyncio_timeout_is_transient(self):
@@ -137,9 +133,7 @@ class TestUnknownOriginSplit:
         """
         import mirix.queue.error_policy as ep
 
-        monkeypatch.setattr(
-            ep, "_PROVIDER_FRAME_HINTS", ep._PROVIDER_FRAME_HINTS + (__name__,)
-        )
+        monkeypatch.setattr(ep, "_PROVIDER_FRAME_HINTS", ep._PROVIDER_FRAME_HINTS + (__name__,))
         try:
             _Model(filter_tags=[{"bad": "shape"}])
         except ValidationError as exc:

@@ -118,9 +118,7 @@ async def test_vepage_1228_attribute_error_propagates_not_silently_finalized():
     async def _resolve_child_agents_attribute_error(*args, **kwargs):
         # Mirrors the actual VEPAGE-1228 shape — a pure-Python
         # AttributeError raised inside the tool body, no provider frame.
-        raise AttributeError(
-            "'NoneType' object has no attribute 'is_type'  # VEPAGE-1228 shape"
-        )
+        raise AttributeError("'NoneType' object has no attribute 'is_type'  # VEPAGE-1228 shape")
 
     agent.execute_tool_and_persist_state = _resolve_child_agents_attribute_error
 

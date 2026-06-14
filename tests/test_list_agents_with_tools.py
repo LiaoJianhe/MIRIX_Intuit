@@ -277,9 +277,7 @@ async def test_passes_result_set_entity_class_to_named_query():
     SELECT order — otherwise positional rows reach the grouping as lists.
     """
     am = AgentManager()
-    fake_rp = _provider_that_hydrates_positional_rows(
-        [_positional_row("agent-core", "core_memory_agent", None, None)]
-    )
+    fake_rp = _provider_that_hydrates_positional_rows([_positional_row("agent-core", "core_memory_agent", None, None)])
 
     with patch(
         "mirix.database.relational_provider.get_relational_provider",
@@ -290,6 +288,4 @@ async def test_passes_result_set_entity_class_to_named_query():
     cls = fake_rp.find_using_named_query.await_args.kwargs.get("result_set_entity_class")
     assert cls is not None, "list_agents_with_tools must pass result_set_entity_class"
     field_order = list(getattr(cls, "__dataclass_fields__", {}).keys())
-    assert field_order == _NQ_COLUMN_ORDER, (
-        "dataclass field order must match the NQ SELECT projection order"
-    )
+    assert field_order == _NQ_COLUMN_ORDER, "dataclass field order must match the NQ SELECT projection order"

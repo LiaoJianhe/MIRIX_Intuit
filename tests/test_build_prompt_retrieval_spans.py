@@ -1,6 +1,7 @@
 """Each per-memory-type retrieval in build_system_prompt_with_memories must emit
 its own timed_span so per-type duration + backend are attributable in the trace.
 This is the instrumentation that proves whether the retrievals run serially."""
+
 from contextlib import asynccontextmanager
 from datetime import datetime
 from types import SimpleNamespace
@@ -98,9 +99,7 @@ async def test_each_memory_type_emits_a_retrieve_span(monkeypatch):
     # time). If that import is ever hoisted to module top, this patch would stop
     # intercepting and the test would fail to capture spans -- at which point
     # patch ``mirix.agent.agent.timed_span`` instead.
-    monkeypatch.setattr(
-        "mirix.observability.timed_spans.timed_span", fake_timed_span
-    )
+    monkeypatch.setattr("mirix.observability.timed_spans.timed_span", fake_timed_span)
 
     agent = _make_agent_for_prompt_build()
     await agent.build_system_prompt_with_memories(raw_system="SYS", topics="hello")

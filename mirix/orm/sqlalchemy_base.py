@@ -828,8 +828,7 @@ class SqlalchemyBase(CommonSqlalchemyMetaMixins, Base):
                 except Exception:
                     _chain = "<chain-format-failed>"
                 logger.error(
-                    "update_with_redis EXC: cls=%s id=%s exc_type=%s "
-                    "session_in_tx=%s session_active=%s — chain: %s",
+                    "update_with_redis EXC: cls=%s id=%s exc_type=%s " "session_in_tx=%s session_active=%s — chain: %s",
                     self.__class__.__name__,
                     _id,
                     type(e).__name__,

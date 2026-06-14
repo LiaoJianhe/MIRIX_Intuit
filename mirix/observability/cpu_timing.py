@@ -54,9 +54,7 @@ def time_cpu(name: str, warn_ms: float = _DEFAULT_WARN_MS) -> Iterator[None]:
         elapsed_ms = (time.monotonic() - start) * 1000.0
         if elapsed_ms >= warn_ms:
             tid = _safe_tid()
-            logger.info(
-                "[CPU SEGMENT] name=%s ms=%.1f tid=%s", name, elapsed_ms, tid
-            )
+            logger.info("[CPU SEGMENT] name=%s ms=%.1f tid=%s", name, elapsed_ms, tid)
 
 
 def _safe_tid() -> Optional[str]:

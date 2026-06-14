@@ -871,7 +871,9 @@ class AgentManager:
             # per-tool join) entirely. Otherwise fall back to the re-read.
             if current_state is not None and not tools_changed:
                 agent_state = current_state.model_copy(
-                    update={k: getattr(agent_update, k) for k in scalar_fields if getattr(agent_update, k, None) is not None}
+                    update={
+                        k: getattr(agent_update, k) for k in scalar_fields if getattr(agent_update, k, None) is not None
+                    }
                 )
             else:
                 result = await provider.read("agents", agent_id, include_relationships=["tools"])
