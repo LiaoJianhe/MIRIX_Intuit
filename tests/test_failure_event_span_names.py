@@ -30,9 +30,7 @@ async def test_citation_write_failed_span_uses_aligned_name():
     # exhausted its budget" — `is_transient(e)` is pure isinstance against
     # this type, so the manager routes into the skip-span branch.
     provider = MagicMock()
-    provider.create = AsyncMock(
-        side_effect=ProviderTransientError("503 after inner retries")
-    )
+    provider.create = AsyncMock(side_effect=ProviderTransientError("503 after inner retries"))
 
     captured = {}
 
@@ -65,9 +63,7 @@ async def test_source_message_write_failed_span_uses_aligned_name():
     manager = object.__new__(SourceMessageManager)
 
     provider = MagicMock()
-    provider.create = AsyncMock(
-        side_effect=ProviderTransientError("503 after inner retries")
-    )
+    provider.create = AsyncMock(side_effect=ProviderTransientError("503 after inner retries"))
 
     captured = {}
 

@@ -126,9 +126,7 @@ async def test_correctable_tool_error_is_contained_and_flags_function_failed():
     agent = _make_meta_agent()
 
     async def _exec_that_raises_correctable(*args, **kwargs):
-        raise CorrectableToolError(
-            "trigger_memory_update missing required arg 'memory_types'"
-        )
+        raise CorrectableToolError("trigger_memory_update missing required arg 'memory_types'")
 
     agent.execute_tool_and_persist_state = _exec_that_raises_correctable
 
@@ -144,8 +142,7 @@ async def test_correctable_tool_error_is_contained_and_flags_function_failed():
     )
 
     assert function_failed is True, (
-        "Correctable tool errors must flag function_failed so the bounded "
-        "re-prompt fires."
+        "Correctable tool errors must flag function_failed so the bounded " "re-prompt fires."
     )
     # The friendly error message should be appended as the tool response
     # so the LLM can read it on the next turn.
@@ -212,9 +209,7 @@ async def test_unknown_tool_name_raises_correctable_error_contained():
         tool_calls=[
             ToolCall(
                 id="call-1",
-                function=FunctionCall(
-                    name="not_a_real_tool_name_xyz", arguments="{}"
-                ),
+                function=FunctionCall(name="not_a_real_tool_name_xyz", arguments="{}"),
             ),
         ],
     )

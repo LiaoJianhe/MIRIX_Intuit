@@ -30,7 +30,6 @@ import pytest
 
 from mirix.schemas.usage import MirixUsageStatistics  # noqa: F401
 
-
 # Reuse the fixture-style helpers from test_processing_skip.py to drive step().
 
 
@@ -88,9 +87,7 @@ def _setup_agent(memory_source_id: str):
     agent.memory_source_id = memory_source_id
     agent.direct_writes = None
     agent.memory_source_manager = MagicMock()
-    agent.memory_source_manager.get_by_id = AsyncMock(
-        return_value=_make_pydantic_source(processing_complete=False)
-    )
+    agent.memory_source_manager.get_by_id = AsyncMock(return_value=_make_pydantic_source(processing_complete=False))
     agent.memory_source_manager.mark_processing_complete = AsyncMock()
     agent.memory_source_manager.finalize_source = AsyncMock()
     agent._persist_memory_source = AsyncMock()

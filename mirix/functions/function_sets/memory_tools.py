@@ -7,6 +7,7 @@ from mirix.agent import Agent
 
 if TYPE_CHECKING:
     from mirix.schemas.memory import Memory
+
 from mirix.log import get_logger
 from mirix.observability.context import (
     clear_trace_context,
@@ -16,13 +17,13 @@ from mirix.observability.context import (
 )
 from mirix.observability.langfuse_client import get_langfuse_client
 from mirix.observability.skip_spans import emit_idempotency_skip_span
-from mirix.testing import fault_injection
 from mirix.schemas.episodic_memory import EpisodicEventForLLM
 from mirix.schemas.knowledge_vault import KnowledgeVaultItemBase
 from mirix.schemas.mirix_message_content import TextContent
 from mirix.schemas.procedural_memory import ProceduralMemoryItemBase
 from mirix.schemas.resource_memory import ResourceMemoryItemBase
 from mirix.schemas.semantic_memory import SemanticMemoryItemBase
+from mirix.testing import fault_injection
 
 logger = get_logger(__name__)
 

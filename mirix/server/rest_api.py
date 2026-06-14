@@ -2607,9 +2607,7 @@ async def retrieve_memory_with_conversation(
     # Fetch one agent for this client (filtered by client via apply_access_predicate)
     # for its llm/embedding config only — no tools needed here, so skip the
     # per-agent tool hydration (include_tools=False) and the full-roster list.
-    all_agents = await server.agent_manager.list_agents(
-        actor=client, limit=1, include_tools=False
-    )
+    all_agents = await server.agent_manager.list_agents(actor=client, limit=1, include_tools=False)
 
     if not all_agents:
         return {
@@ -2794,9 +2792,7 @@ async def retrieve_memory_with_topic(
     # Fetch one agent for this client (filtered by client via apply_access_predicate)
     # for its llm/embedding config only — no tools needed here, so skip the
     # per-agent tool hydration (include_tools=False) and the full-roster list.
-    all_agents = await server.agent_manager.list_agents(
-        actor=client, limit=1, include_tools=False
-    )
+    all_agents = await server.agent_manager.list_agents(actor=client, limit=1, include_tools=False)
 
     if not all_agents:
         return {
@@ -3044,9 +3040,7 @@ async def search_memory(
     # Fetch one agent for this client (filtered by client via apply_access_predicate)
     # for its llm/embedding config only — no tools needed here, so skip the
     # per-agent tool hydration (include_tools=False) and the full-roster list.
-    all_agents = await server.agent_manager.list_agents(
-        actor=client, limit=1, include_tools=False
-    )
+    all_agents = await server.agent_manager.list_agents(actor=client, limit=1, include_tools=False)
 
     if not all_agents:
         return {
@@ -3688,9 +3682,7 @@ async def search_memory_all_users(
 
     # Fetch one agent for this client for its embedding config only — no tools
     # needed here, so skip per-agent tool hydration and the full-roster list.
-    all_agents = await server.agent_manager.list_agents(
-        actor=client, limit=1, include_tools=False
-    )
+    all_agents = await server.agent_manager.list_agents(actor=client, limit=1, include_tools=False)
     if not all_agents:
         return {
             "success": False,

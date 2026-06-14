@@ -58,6 +58,7 @@ from mirix.errors import (
     ProviderPermanentError,
     ProviderTransientError,
 )
+from mirix.observability.context import clear_tid, clear_trace_context
 from mirix.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -233,6 +234,7 @@ def is_inner_exhausted(exc: BaseException) -> bool:
     the exception doesn't accept attrs."""
     return bool(getattr(exc, _INNER_EXHAUSTED_ATTR, False))
 
+
 # One-shot warning per unknown exception class so the log doesn't flood when
 # a new error type starts appearing in production.
 _unknown_warned: set[type[BaseException]] = set()
@@ -305,9 +307,7 @@ def classify(exc: BaseException) -> Bucket:
     # burns redeliveries. With a provider frame on the chain, fall
     # through to the historical Transient default (the provider might
     # have wrapped real infra trouble).
-    if isinstance(exc, _PYTHON_BUG_TYPES) and not _traceback_has_provider_frame(
-        exc.__traceback__
-    ):
+    if isinstance(exc, _PYTHON_BUG_TYPES) and not _traceback_has_provider_frame(exc.__traceback__):
         logger.info(
             "error_policy.classify: PERMANENT (pure-Python bug shape %s, no provider "
             "frame in traceback) — chain: %s",
@@ -399,9 +399,7 @@ async def process_with_policy(
                     memory_source_id,
                     format_exc_chain(exc),
                 )
-                return Outcome(
-                    kind=SaveOutcome.TRANSIENT_EXHAUSTED, cause=exc, bucket=Bucket.TRANSIENT
-                )
+                return Outcome(kind=SaveOutcome.TRANSIENT_EXHAUSTED, cause=exc, bucket=Bucket.TRANSIENT)
             if attempt < max_attempts:
                 sleep_s = _backoff_seconds(attempt, base, cap)
                 logger.info(
@@ -468,17 +466,28 @@ async def dispatch_save(
     # set_active_source no-ops (returns None) when injection is disabled.
     from mirix.testing import fault_injection
 
-    fi_token = fault_injection.set_active_source(memory_source_id)
     try:
-        outcome = await process_with_policy(run_step, memory_source_id=memory_source_id)
+        fi_token = fault_injection.set_active_source(memory_source_id)
+        try:
+            outcome = await process_with_policy(run_step, memory_source_id=memory_source_id)
+        finally:
+            fault_injection.reset_active_source(fi_token)
+
+        if memory_source_id is not None:
+            # Late import to avoid cycle (memory_source_manager doesn't import
+            # error_policy at runtime).
+            from mirix.services.memory_source_manager import MemorySourceManager
+
+            await MemorySourceManager().finalize_source(memory_source_id, outcome.kind)
+
+        return outcome
     finally:
-        fault_injection.reset_active_source(fi_token)
-
-    if memory_source_id is not None:
-        # Late import to avoid cycle (memory_source_manager doesn't import
-        # error_policy at runtime).
-        from mirix.services.memory_source_manager import MemorySourceManager
-
-        await MemorySourceManager().finalize_source(memory_source_id, outcome.kind)
-
-    return outcome
+        # The step restored the message's TID + trace context into this task's
+        # contextvars (worker._process_message_async). Clear them HERE — after
+        # finalize_source — never inside the step: the "Finalized
+        # memory_source=... outcome=..." log line is the save's terminal
+        # correlation signal and must carry the TID. A worker task processes
+        # messages sequentially, so this boundary is also what prevents one
+        # message's TID leaking into the next.
+        clear_trace_context()
+        clear_tid()

@@ -12,15 +12,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mirix.errors import (
-    ProviderConflictError as _ProviderConflictError,
-)
-from mirix.errors import (
-    ProviderPermanentError as _ProviderPermanentError,
-)
-from mirix.errors import (
-    ProviderTransientError as _ProviderTransientError,
-)
+from mirix.errors import ProviderConflictError as _ProviderConflictError
+from mirix.errors import ProviderPermanentError as _ProviderPermanentError
+from mirix.errors import ProviderTransientError as _ProviderTransientError
 from mirix.schemas.client import Client as PydanticClient
 from mirix.services.memory_citation_manager import MemoryCitationManager
 from mirix.services.memory_source_manager import MemorySourceManager
@@ -149,9 +143,7 @@ class TestMemorySourceManagerDelegation:
         for complete in (True, False):
             existing = _memory_source_row(id="src-bbbbbbbb", processing_complete=complete)
             mock_provider = MagicMock()
-            mock_provider.create = AsyncMock(
-                side_effect=_ProviderConflictError("uq_test")
-            )
+            mock_provider.create = AsyncMock(side_effect=_ProviderConflictError("uq_test"))
             mock_provider.find_using_named_query = AsyncMock(return_value=[existing])
 
             with patch(
@@ -697,7 +689,7 @@ class TestBestEffortSourceMessageWrite:
         mock_provider.create = AsyncMock(
             side_effect=[
                 _FakeServerError(503),  # row 0: provider exhausted -> skip
-                {},                     # row 1: success
+                {},  # row 1: success
             ]
         )
         with (
