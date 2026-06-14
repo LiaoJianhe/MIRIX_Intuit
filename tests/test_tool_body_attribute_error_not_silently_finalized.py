@@ -1,22 +1,21 @@
-"""VEPAGE-1228 regression anchor for VEPAGE-1251.
+"""Regression anchor: a tool-body AttributeError must not be laundered into a
+"complete" save.
 
-VEPAGE-1228 was a silent-data-loss bug: a tool body raised an
-`AttributeError` (in `Resolve Child Agents`), the save-path swallow at
-`agent.py:576` turned it into a friendly string, `_handle_ai_response`
-detected "function_failed" via the string-prefix check, the bounded
-re-prompt ran one extra "please finish" round-trip, then the loop
-broke and `mark_processing_complete` ran unconditionally. The source
-was marked complete with zero memories extracted.
+The bug this guards against was silent data loss: a tool body raised an
+`AttributeError` (in `Resolve Child Agents`), the save-path swallow turned it
+into a friendly string, `_handle_ai_response` detected "function_failed" via the
+string-prefix check, the bounded re-prompt ran one extra "please finish"
+round-trip, then the loop broke and `mark_processing_complete` ran
+unconditionally. The source was marked complete with zero memories extracted.
 
-This test reproduces the exact failure mode end-to-end (the swallow
-chain, not the LLM driver itself) and asserts:
+This test reproduces the exact failure mode end-to-end (the swallow chain, not
+the LLM driver itself) and asserts the fixed behavior:
 
-  Before VEPAGE-1251:  AttributeError -> processing_complete=True
-                       (no memories), no exception propagated.
+  Old (buggy):  AttributeError -> processing_complete=True (no memories),
+                no exception propagated.
 
-  After  VEPAGE-1251:  AttributeError propagates out of step() so
-                       process_with_policy sees the typed exception
-                       AND `finalize_source` is NOT called.
+  Fixed:        AttributeError propagates out of step() so process_with_policy
+                sees the typed exception AND `finalize_source` is NOT called.
 
 Together with the origin-split (S4), classify() additionally maps a
 pure-Python AttributeError with no provider frame to PERMANENT — so
@@ -102,9 +101,9 @@ def _make_messages(function_name: str = "trigger_memory_update"):
 
 
 @pytest.mark.asyncio
-async def test_vepage_1228_attribute_error_propagates_not_silently_finalized():
-    """The headline VEPAGE-1228 bug, end-to-end at the layer it was
-    swallowed. After this story:
+async def test_attribute_error_propagates_not_silently_finalized():
+    """The headline bug, end-to-end at the layer it was swallowed. Fixed
+    behavior:
 
     * AttributeError is NOT caught by _handle_ai_response — it escapes.
     * mark_processing_complete is NOT called.
@@ -116,9 +115,9 @@ async def test_vepage_1228_attribute_error_propagates_not_silently_finalized():
     agent = _meta_agent_stub()
 
     async def _resolve_child_agents_attribute_error(*args, **kwargs):
-        # Mirrors the actual VEPAGE-1228 shape — a pure-Python
-        # AttributeError raised inside the tool body, no provider frame.
-        raise AttributeError("'NoneType' object has no attribute 'is_type'  # VEPAGE-1228 shape")
+        # Mirrors the actual failure shape — a pure-Python AttributeError
+        # raised inside the tool body, no provider frame.
+        raise AttributeError("'NoneType' object has no attribute 'is_type'")
 
     agent.execute_tool_and_persist_state = _resolve_child_agents_attribute_error
 
@@ -146,7 +145,7 @@ async def test_vepage_1228_attribute_error_propagates_not_silently_finalized():
     #    Transient default and got 3x whole-step retries + numaflow
     #    redeliveries for an exception that never succeeds on retry.
     assert classify(excinfo.value) is Bucket.PERMANENT, (
-        "VEPAGE-1228 shape (AttributeError, no provider frame in traceback) "
-        "must classify PERMANENT so the policy fails fast — retrying a "
-        "deterministic code bug burns cost and hides the bug under noise."
+        "this shape (AttributeError, no provider frame in traceback) must "
+        "classify PERMANENT so the policy fails fast — retrying a deterministic "
+        "code bug burns cost and hides the bug under noise."
     )

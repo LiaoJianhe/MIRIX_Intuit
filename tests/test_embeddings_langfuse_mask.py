@@ -1,4 +1,4 @@
-"""VEPAGE-1314: embeddings tracing pre-masks the text input before it
+"""embeddings tracing pre-masks the text input before it
 becomes a LangFuse span attribute.
 
 ``traced_embedding_with_retry`` sends the embedded text as the span

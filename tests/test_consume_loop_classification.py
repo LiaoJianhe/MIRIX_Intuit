@@ -1,4 +1,4 @@
-"""VEPAGE-1251 / VEPAGE-1299: the in-memory batch consumer dispatches every
+"""The in-memory batch consumer dispatches every
 save through `dispatch_save`.
 
 Same flow as the numaflow path — and now through the BatchQueueWorker (which

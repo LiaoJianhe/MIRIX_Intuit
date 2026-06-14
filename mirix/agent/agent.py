@@ -1320,12 +1320,6 @@ class Agent(BaseAgent):
                         limit=retention,
                     )
 
-            # Retention is otherwise silent; surface the decision + how much
-            # history loaded. retained_count drives context-overflow recovery
-            # eligibility (recovery only runs when it is > 0), so this is the
-            # first thing to check when a save unexpectedly does/doesn't retain
-            # prior turns. retention=0 here means the CLIENT's
-            # message_set_retention_count is unset/zero.
             logger.info(
                 "[RETENTION] agent=%s retention=%d should_read=%s loaded=%d",
                 self.agent_state.id,
@@ -1565,9 +1559,6 @@ class Agent(BaseAgent):
                     actor=self.actor,
                     keep_newest_n=retention,
                 )
-                # Companion to the [RETENTION] read line: confirms this save
-                # actually persisted its turns for a LATER save to retain (the
-                # write half of the retention round-trip).
                 logger.info(
                     "[RETENTION] agent=%s wrote=%d kept_newest=%d",
                     self.agent_state.id,

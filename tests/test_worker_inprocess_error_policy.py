@@ -1,6 +1,6 @@
 """Worker error-handling contract for the internal in-memory consumer path.
 
-After VEPAGE-1251 consolidation + VEPAGE-1299 (serial loop replaced by the
+After the batch-consumer consolidation (serial loop replaced by the
 BatchQueueWorker):
 
   * ``_process_message_async`` (the shared per-message core) does NOT classify

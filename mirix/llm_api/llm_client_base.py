@@ -136,7 +136,7 @@ class LLMClientBase:
 
         # Try to start Langfuse observation - if this fails, execute without tracing
         try:
-            # Pre-mask PII (VEPAGE-1314): redact user content BEFORE it becomes a
+            # Pre-mask PII: redact user content BEFORE it becomes a
             # span attribute, so the SDK's mask= callback is a cheap synchronous
             # no-op instead of a blocking ispy-pii POST on the event-loop thread.
             # Mask ONLY messages — tools are static JSON schemas with no PII, and
@@ -189,7 +189,7 @@ class LLMClientBase:
                 output_message = self._build_output_message(chat_completion_data)
                 usage_dict = self._build_usage_dict(chat_completion_data)
 
-                # Pre-mask PII (VEPAGE-1314) before it becomes a span attribute.
+                # Pre-mask PII before it becomes a span attribute.
                 output_message = await mask_structure(output_message)
                 generation.update(output=output_message, usage_details=usage_dict)
             except Exception as update_err:

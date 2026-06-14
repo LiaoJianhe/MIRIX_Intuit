@@ -5,7 +5,7 @@ constructor and invokes it **synchronously, at span start, on whatever
 thread opens the span** (OTel captures attributes by value at set-time).
 On MIRIX's save/search path that thread is the event-loop thread, so the
 callback must be cheap and must NOT do network I/O — a blocking ispy-pii
-``httpx.Client.post()`` here starves the loop (VEPAGE-1311 / VEPAGE-1314).
+``httpx.Client.post()`` here starves the loop.
 
 Real PII masking therefore happens **upstream** now: the LLM/embedding
 generation sites pre-redact their span input/output via
@@ -24,9 +24,8 @@ What this callback does:
 The Langfuse client wiring (see ``langfuse_client.py``) reads the mask via
 :func:`get_langfuse_mask` at construction time, defaulting to the backstop
 (:func:`ispy_pii_mask`) when no override has been registered. Downstream
-consumers (e.g. ECMS) can register a different — but still **synchronous,
-non-network** — callable via :func:`set_langfuse_mask` before calling
-``initialize_langfuse()``.
+consumers can register a different — but still **synchronous, non-network** —
+callable via :func:`set_langfuse_mask` before calling ``initialize_langfuse()``.
 
 The kill switch ``MIRIX_LANGFUSE_MASK_ENABLED=false`` turns the callback
 into a passthrough. Defaults to enabled.
@@ -131,10 +130,10 @@ def ispy_pii_mask(data: Any = None, **kwargs: Any) -> Any:
 
 
 # Module-level singleton holding the active mask callable. Exposed via
-# set_langfuse_mask / get_langfuse_mask so downstream consumers (notably
-# ECMS) can register their own callable before initialize_langfuse()
-# constructs the Langfuse client. Module-level (not pydantic-settings)
-# because Callable isn't an env-driven setting type.
+# set_langfuse_mask / get_langfuse_mask so downstream consumers can register
+# their own callable before initialize_langfuse() constructs the Langfuse
+# client. Module-level (not pydantic-settings) because Callable isn't an
+# env-driven setting type.
 _active_mask: Optional[Callable[..., Any]] = None
 
 

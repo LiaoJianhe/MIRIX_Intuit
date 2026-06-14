@@ -30,7 +30,7 @@ The Langfuse trace path pre-masks PII at the generation sites via
 :func:`mask_structure` (this module) *before* the value becomes a span
 attribute, because the SDK applies its ``mask=`` callback synchronously
 on whatever thread opens the span — which on the save/search path is the
-event-loop thread, not a background flush thread (VEPAGE-1314). The
+event-loop thread, not a background flush thread. The
 ``mirix.observability.pii_mask`` callback is therefore reduced to a cheap
 synchronous, pure-CPU backstop (no network). The two paths are
 intentionally separate: error logs go to Splunk via stdlib logging; trace
@@ -254,7 +254,7 @@ async def mask_structure(data: Any) -> Any:
     wall-clock instead of K serial round-trips. Because the work is
     ``await``-ed, the event loop stays free to run other coroutines while
     the masks are in flight — this is what keeps the LangFuse span path
-    off the blocking hot path (VEPAGE-1314).
+    off the blocking hot path.
 
     Never raises: each leaf already fails closed to
     :data:`REDACTED_PLACEHOLDER` inside :func:`_mask_async`. Honors the
@@ -312,9 +312,8 @@ async def log_error_strip_pii(
     The helper injects two structured fields automatically alongside
     the caller's ``extra``: ``error_type`` (the exception class name)
     and ``error`` (the masked exception message). This gives Splunk
-    dashboards a structured field to key on — symmetric with the
-    ECMS helper in ``common.pii.log_error_strip_pii``. Caller-supplied
-    fields take precedence on name collision.
+    dashboards a structured field to key on. Caller-supplied fields take
+    precedence on name collision.
 
     Yields the event loop for up to ``MIRIX_ISPY_PII_TIMEOUT_MS``
     waiting on ispy-pii. Do not call from a hot path.

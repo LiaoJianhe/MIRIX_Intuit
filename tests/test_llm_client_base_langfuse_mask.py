@@ -1,4 +1,4 @@
-"""VEPAGE-1314: LLMClientBase pre-masks PII before it becomes a LangFuse
+"""LLMClientBase pre-masks PII before it becomes a LangFuse
 span attribute.
 
 The value handed to ``start_as_current_observation(input=...)`` and to

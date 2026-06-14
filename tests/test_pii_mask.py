@@ -1,6 +1,6 @@
 """Tests for mirix.observability.pii_mask.
 
-VEPAGE-1314: real PII masking now happens UPSTREAM (mirix.pii.mask_structure
+real PII masking now happens UPSTREAM (mirix.pii.mask_structure
 at the LLM/embedding generation sites). The Langfuse ``mask=`` callback is
 reduced to a cheap **synchronous backstop**. It must:
 - Do NO network I/O (no httpx.Client, no ispy-pii POST) — the SDK invokes it
@@ -12,7 +12,7 @@ reduced to a cheap **synchronous backstop**. It must:
   zero network.
 - Honor the MIRIX_LANGFUSE_MASK_ENABLED kill switch (passthrough).
 - Preserve the set_langfuse_mask / get_langfuse_mask / ispy_pii_mask seam so
-  downstream consumers (ECMS) can register their own synchronous callable.
+  downstream consumers can register their own synchronous callable.
 """
 
 import pytest

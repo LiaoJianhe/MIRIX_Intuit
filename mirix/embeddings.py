@@ -64,7 +64,7 @@ async def traced_embedding_with_retry(
     trace_id = trace_context.get("trace_id")
     parent_span_id = trace_context.get("observation_id")
 
-    # Pre-mask PII (VEPAGE-1314): redact the embedded text BEFORE it becomes a
+    # Pre-mask PII: redact the embedded text BEFORE it becomes a
     # span attribute, so the SDK's mask= callback is a cheap synchronous no-op
     # instead of a blocking ispy-pii POST on the event-loop thread. Masked once
     # here (not per retry attempt). Degrade to the unmasked text on failure

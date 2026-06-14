@@ -187,11 +187,11 @@ async def create(
             if parent_span_id:
                 trace_context_dict["parent_span_id"] = parent_span_id
 
-            # Pre-mask PII (VEPAGE-1314): redact user content BEFORE it becomes a
-            # span attribute, so the SDK's mask= callback is a cheap synchronous
-            # no-op instead of a blocking ispy-pii POST on the event-loop thread.
-            # Mask ONLY messages — tools/functions are static JSON schemas with no
-            # PII, and masking them would be wasted load on the path we're relieving.
+            # Pre-mask PII: redact user content BEFORE it becomes a span
+            # attribute, so the tracing SDK's mask= callback is a cheap
+            # synchronous no-op instead of a blocking PII-service POST on the
+            # event-loop thread. Mask ONLY messages — tools/functions are static
+            # JSON schemas with no PII, so masking them would be wasted work.
             trace_input["messages"] = await mask_structure(messages_for_trace)
 
             observation_cm = langfuse.start_as_current_observation(
@@ -298,7 +298,7 @@ async def create(
                                 "total": getattr(response.usage, "total_tokens", 0),
                             }
 
-                        # Pre-mask PII (VEPAGE-1314) before it becomes a span attribute.
+                        # Pre-mask PII before it becomes a span attribute.
                         output_message = await mask_structure(output_message)
                         generation.update(output=output_message, usage=usage_dict)
                     except Exception as e:
