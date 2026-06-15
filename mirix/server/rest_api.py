@@ -44,7 +44,7 @@ from mirix.schemas.tool import Tool
 from mirix.schemas.tool_rule import BaseToolRule
 from mirix.schemas.user import User
 from mirix.server.server import AsyncServer, ensure_tables_created
-from mirix.settings import model_settings
+from mirix.settings import model_settings, settings
 from mirix.utils import convert_message_to_mirix_message
 
 logger = get_logger(__name__)
@@ -2301,6 +2301,14 @@ async def retrieve_memories_by_keywords(
 
     try:
         user = await server.user_manager.get_user_by_id(user_id)
+        # Users are GLOBAL (not org-scoped). The org to filter this read by is
+        # the CALLING CLIENT's org, not whatever org the global user row carries
+        # — read back through IPS-R the user's org relationship is not hydrated
+        # onto the scalar field, so it falls to the all-zeros default org and
+        # filters out every document. Scope the read to the client's org so it
+        # matches what the write path stamped (client.organization_id).
+        if client is not None and client.organization_id:
+            user.organization_id = client.organization_id
         timezone_str = user.timezone
     except NoResultFound:
         logger.info(
@@ -2350,11 +2358,17 @@ async def retrieve_memories_by_keywords(
     keys: list = []
 
     # Episodic: recent (always) + relevant (only when key_words present) + count
+    # The "recent" bucket is a pure-recency window (no query) and is therefore
+    # NOT relevance-filtered — every call returns the latest N episodic events
+    # regardless of topic. Cap it at conversation_recent_window (default 5, vs.
+    # the relevant bucket's full limit) so off-topic recent turns don't flood
+    # the agent's context. Never exceed the caller's own limit.
+    recent_limit = min(settings.conversation_recent_window, limit)
     tasks.append(
         episodic_manager.list_episodic_memory(
             agent_state=agent_state,  # Not accessed during BM25 search
             user=user,
-            limit=limit,
+            limit=recent_limit,
             timezone_str=timezone_str,
             filter_tags=filter_tags,
             scopes=scopes,
@@ -3061,6 +3075,12 @@ async def search_memory(
 
     try:
         user = await server.user_manager.get_user_by_id(user_id)
+        # Users are GLOBAL (not org-scoped). Scope this read by the CALLING
+        # CLIENT's org rather than the global user row's org (which, read back
+        # through IPS-R, defaults to the all-zeros org and filters out every
+        # document). Matches the org the write path stamped.
+        if client is not None and client.organization_id:
+            user.organization_id = client.organization_id
         timezone_str = user.timezone
     except NoResultFound:
         logger.info(

@@ -160,6 +160,12 @@ class Settings(BaseSettings):
     multi_agent_send_message_timeout: int = 20 * 60
     multi_agent_concurrent_sends: int = 50
 
+    # conversation retrieval: size of the topic-agnostic "recent" episodic
+    # window returned alongside the relevance-ranked "relevant" results. This
+    # window is pure recency (no query), so it is not relevance-filtered — keep
+    # it small to avoid flooding the agent with off-topic recent turns.
+    conversation_recent_window: int = 5
+
     # telemetry logging
     verbose_telemetry_logging: bool = False
     otel_exporter_otlp_endpoint: Optional[str] = None  # otel default: "http://localhost:4317"
