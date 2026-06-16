@@ -294,10 +294,9 @@ class EpisodicMemoryManager:
             logger.warning("user_id not provided to create_episodic_memory, using ADMIN_USER_ID as fallback")
 
         # Ensure ID is set before model_dump. This must happen for BOTH the
-        # provider and PG paths: in provider mode the id is furnished to IPS as
-        # the entity's BaseEntity.id and flows into the domain event's
-        # entityId/partitionKey, so an empty id makes IPS reject the create
-        # with "partition key is missing".
+        # provider and PG paths: when a relational provider is configured it may
+        # persist this id as the row key, so it must exist before the write
+        # (an empty id is rejected downstream). Generate it up front.
         if not episodic_memory.id:
             from mirix.utils import generate_unique_short_id_async
 
@@ -660,9 +659,9 @@ class EpisodicMemoryManager:
             if provider:
                 from mirix.utils import generate_unique_short_id_async
 
-                # The id is furnished to IPS as the entity's BaseEntity.id and
-                # flows into the domain event's entityId/partitionKey; an empty
-                # id makes IPS reject the create with "partition key is missing".
+                # A relational provider may persist this id as the row key, so it
+                # must be set before the write (an empty id is rejected
+                # downstream). Generate it up front.
                 episodic_id = await generate_unique_short_id_async(
                     self.session_maker, EpisodicEvent, "ep"
                 )
