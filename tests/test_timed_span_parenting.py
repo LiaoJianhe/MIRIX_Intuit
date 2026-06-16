@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from mirix.observability import context as obs_context
-from mirix.observability.timed_spans import timed_span
+from mirix.observability.timed import timedspan as timed_span
 
 
 def _make_langfuse_with_span(span_id):
@@ -47,8 +47,8 @@ async def test_block_runs_under_timed_span_as_parent():
 
     captured = {}
     with (
-        patch("mirix.observability.timed_spans.get_langfuse_client", return_value=langfuse),
-        patch("mirix.observability.timed_spans.mark_observation_as_child"),
+        patch("mirix.observability.timed.get_langfuse_client", return_value=langfuse),
+        patch("mirix.observability.timed.mark_observation_as_child"),
     ):
         async with timed_span("Load Agent"):
             captured["observation_id"] = obs_context.get_trace_context().get("observation_id")
@@ -67,8 +67,8 @@ async def test_nested_timed_span_parents_under_outer_timed_span():
 
     captured = {}
     with (
-        patch("mirix.observability.timed_spans.get_langfuse_client", return_value=outer_langfuse),
-        patch("mirix.observability.timed_spans.mark_observation_as_child"),
+        patch("mirix.observability.timed.get_langfuse_client", return_value=outer_langfuse),
+        patch("mirix.observability.timed.mark_observation_as_child"),
     ):
         async with timed_span("Load Agent"):
             # The inner timed_span must build its trace context with the OUTER
@@ -91,8 +91,8 @@ async def test_observation_id_restored_after_block():
     langfuse, _span = _make_langfuse_with_span("timed-span-obs")
 
     with (
-        patch("mirix.observability.timed_spans.get_langfuse_client", return_value=langfuse),
-        patch("mirix.observability.timed_spans.mark_observation_as_child"),
+        patch("mirix.observability.timed.get_langfuse_client", return_value=langfuse),
+        patch("mirix.observability.timed.mark_observation_as_child"),
     ):
         async with timed_span("Load Agent"):
             pass
@@ -110,8 +110,8 @@ async def test_observation_id_restored_to_none_when_no_prior_parent():
     langfuse, _span = _make_langfuse_with_span("timed-span-obs")
 
     with (
-        patch("mirix.observability.timed_spans.get_langfuse_client", return_value=langfuse),
-        patch("mirix.observability.timed_spans.mark_observation_as_child"),
+        patch("mirix.observability.timed.get_langfuse_client", return_value=langfuse),
+        patch("mirix.observability.timed.mark_observation_as_child"),
     ):
         async with timed_span("Load Agent"):
             pass
@@ -136,9 +136,9 @@ async def test_timed_span_stamps_tid_in_metadata():
     langfuse, _span = _make_langfuse_with_span("timed-span-obs")
 
     with (
-        patch("mirix.observability.timed_spans.get_langfuse_client", return_value=langfuse),
-        patch("mirix.observability.timed_spans.mark_observation_as_child"),
-        patch("mirix.observability.timed_spans.get_tid", return_value="tid-xyz"),
+        patch("mirix.observability.timed.get_langfuse_client", return_value=langfuse),
+        patch("mirix.observability.timed.mark_observation_as_child"),
+        patch("mirix.observability.timed.get_tid", return_value="tid-xyz"),
     ):
         async with timed_span("Resolve Child Agents", metadata={"k": "v"}):
             pass
@@ -159,9 +159,9 @@ async def test_timed_span_omits_tid_when_absent():
     langfuse, _span = _make_langfuse_with_span("timed-span-obs")
 
     with (
-        patch("mirix.observability.timed_spans.get_langfuse_client", return_value=langfuse),
-        patch("mirix.observability.timed_spans.mark_observation_as_child"),
-        patch("mirix.observability.timed_spans.get_tid", return_value=None),
+        patch("mirix.observability.timed.get_langfuse_client", return_value=langfuse),
+        patch("mirix.observability.timed.mark_observation_as_child"),
+        patch("mirix.observability.timed.get_tid", return_value=None),
     ):
         async with timed_span("Resolve Child Agents"):
             pass
@@ -178,7 +178,7 @@ async def test_no_op_when_langfuse_disabled_leaves_context_untouched():
     obs_context.set_trace_context(trace_id="trace-1", observation_id="outer-obs")
 
     ran = {}
-    with patch("mirix.observability.timed_spans.get_langfuse_client", return_value=None):
+    with patch("mirix.observability.timed.get_langfuse_client", return_value=None):
         async with timed_span("Load Agent"):
             ran["did_run"] = True
             ran["observation_id"] = obs_context.get_trace_context().get("observation_id")

@@ -683,9 +683,9 @@ class AsyncServer(Server):
         user: Optional[User] = None,
     ) -> Agent:
         """Updated method to load agents from persisted storage."""
-        from mirix.observability.timed_spans import timed_span
+        from mirix.observability.timed import timedspan
 
-        async with timed_span(
+        async with timedspan(
             "Load Agent State",
             metadata={"agent_id": agent_id},
         ):
@@ -766,9 +766,9 @@ class AsyncServer(Server):
             raise ValueError("AsyncServer._step requires a non-null user.")
         mirix_agent = None
         try:
-            from mirix.observability.timed_spans import timed_span
+            from mirix.observability.timed import timedspan
 
-            async with timed_span(
+            async with timedspan(
                 "Load Agent",
                 metadata={"agent_id": agent_id},
             ):
