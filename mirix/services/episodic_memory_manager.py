@@ -293,6 +293,16 @@ class EpisodicMemoryManager:
             user_id = UserManager.ADMIN_USER_ID
             logger.warning("user_id not provided to create_episodic_memory, using ADMIN_USER_ID as fallback")
 
+        # Ensure ID is set before model_dump. This must happen for BOTH the
+        # provider and PG paths: in provider mode the id is furnished to IPS as
+        # the entity's BaseEntity.id and flows into the domain event's
+        # entityId/partitionKey, so an empty id makes IPS reject the create
+        # with "partition key is missing".
+        if not episodic_memory.id:
+            from mirix.utils import generate_unique_short_id_async
+
+            episodic_memory.id = await generate_unique_short_id_async(self.session_maker, EpisodicEvent, "ep")
+
         # Provider delegation (create via lower-level method)
         from mirix.database.relational_provider import get_relational_provider
 
@@ -304,12 +314,6 @@ class EpisodicMemoryManager:
             data_dict.setdefault("organization_id", actor.organization_id)
             result = await provider.create("episodic_memory", data_dict, actor=actor)
             return PydanticEpisodicEvent(**result)
-
-        # Ensure ID is set before model_dump
-        if not episodic_memory.id:
-            from mirix.utils import generate_unique_short_id_async
-
-            episodic_memory.id = await generate_unique_short_id_async(self.session_maker, EpisodicEvent, "ep")
 
         # Convert the Pydantic model into a dict
         episodic_memory_dict = episodic_memory.model_dump()
@@ -654,7 +658,16 @@ class EpisodicMemoryManager:
 
             provider = get_relational_provider()
             if provider:
+                from mirix.utils import generate_unique_short_id_async
+
+                # The id is furnished to IPS as the entity's BaseEntity.id and
+                # flows into the domain event's entityId/partitionKey; an empty
+                # id makes IPS reject the create with "partition key is missing".
+                episodic_id = await generate_unique_short_id_async(
+                    self.session_maker, EpisodicEvent, "ep"
+                )
                 data_dict = {
+                    "id": episodic_id,
                     "summary": summary,
                     "details": details,
                     "event_type": event_type,

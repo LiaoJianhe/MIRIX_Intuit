@@ -559,6 +559,14 @@ class SemanticMemoryManager:
         if not item_data.name:
             raise ValueError("Required field 'name' missing from semantic memory data")
 
+        # Ensure ID is set before model_dump. This must happen for BOTH the
+        # provider and PG paths: in provider mode the id is furnished to IPS as
+        # the entity's BaseEntity.id and flows into the domain event's
+        # entityId/partitionKey, so an empty id makes IPS reject the create
+        # with "partition key is missing".
+        if not item_data.id:
+            item_data.id = await generate_unique_short_id_async(self.session_maker, SemanticMemoryItem, "sem")
+
         provider = get_relational_provider()
         if provider:
             data_dict = item_data.model_dump()
@@ -570,10 +578,6 @@ class SemanticMemoryManager:
                 data_dict["created_at"] = created.astimezone(timezone.utc).replace(tzinfo=None)
             result = await provider.create("semantic_memory", data_dict, actor=actor)
             return PydanticSemanticMemoryItem(**result)
-
-        # Ensure ID is set before model_dump
-        if not item_data.id:
-            item_data.id = await generate_unique_short_id_async(self.session_maker, SemanticMemoryItem, "sem")
 
         data_dict = item_data.model_dump()
 
@@ -1083,7 +1087,14 @@ class SemanticMemoryManager:
 
             provider = get_relational_provider()
             if provider:
+                # The id is furnished to IPS as the entity's BaseEntity.id and
+                # flows into the domain event's entityId/partitionKey; an empty
+                # id makes IPS reject the create with "partition key is missing".
+                semantic_id = await generate_unique_short_id_async(
+                    self.session_maker, SemanticMemoryItem, "sem"
+                )
                 data_dict = {
+                    "id": semantic_id,
                     "name": name,
                     "summary": summary,
                     "details": details,

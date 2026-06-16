@@ -525,6 +525,16 @@ class ProceduralMemoryManager:
 
         from mirix.database.relational_provider import get_relational_provider
 
+        # Ensure ID is set before model_dump. This must happen for BOTH the
+        # provider and PG paths: in provider mode the id is furnished to IPS as
+        # the entity's BaseEntity.id and flows into the domain event's
+        # entityId/partitionKey, so an empty id makes IPS reject the create
+        # with "partition key is missing".
+        if not item_data.id:
+            from mirix.utils import generate_unique_short_id_async
+
+            item_data.id = await generate_unique_short_id_async(self.session_maker, ProceduralMemoryItem, "proc")
+
         provider = get_relational_provider()
         if provider:
             data_dict = item_data.model_dump()
@@ -538,12 +548,6 @@ class ProceduralMemoryManager:
             logger.debug("create_item: client_id=%s, user_id=%s", client_id, user_id)
             result = await provider.create("procedural_memory", data_dict, actor=actor)
             return PydanticProceduralMemoryItem(**result)
-
-        # Ensure ID is set before model_dump
-        if not item_data.id:
-            from mirix.utils import generate_unique_short_id_async
-
-            item_data.id = await generate_unique_short_id_async(self.session_maker, ProceduralMemoryItem, "proc")
 
         data_dict = item_data.model_dump()
 
@@ -1023,7 +1027,16 @@ class ProceduralMemoryManager:
                 client_id = actor.id
                 if user_id is None:
                     user_id = UserManager.ADMIN_USER_ID
+                from mirix.utils import generate_unique_short_id_async
+
+                # The id is furnished to IPS as the entity's BaseEntity.id and
+                # flows into the domain event's entityId/partitionKey; an empty
+                # id makes IPS reject the create with "partition key is missing".
+                procedural_id = await generate_unique_short_id_async(
+                    self.session_maker, ProceduralMemoryItem, "proc"
+                )
                 data_dict = {
+                    "id": procedural_id,
                     "entry_type": entry_type,
                     "summary": summary,
                     "steps": steps,
