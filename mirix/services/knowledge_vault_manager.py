@@ -536,6 +536,15 @@ class KnowledgeVaultManager:
         """
         from mirix.database.relational_provider import get_relational_provider
 
+        # Ensure ID is set before model_dump. This must happen for BOTH the
+        # provider and PG paths: when a relational provider is configured it may
+        # persist this id as the row key, so it must exist before the write
+        # (an empty id is rejected downstream). Generate it up front.
+        if not knowledge_vault_item.id:
+            from mirix.utils import generate_unique_short_id_async
+
+            knowledge_vault_item.id = await generate_unique_short_id_async(self.session_maker, KnowledgeVaultItem, "kv")
+
         provider = get_relational_provider()
         if provider:
             item_data = knowledge_vault_item.model_dump()
@@ -548,12 +557,6 @@ class KnowledgeVaultManager:
             item_data.setdefault("organization_id", actor.organization_id)
             result = await provider.create("knowledge_vault", item_data, actor=actor)
             return PydanticKnowledgeVaultItem(**result)
-
-        # Ensure ID is set before model_dump
-        if not knowledge_vault_item.id:
-            from mirix.utils import generate_unique_short_id_async
-
-            knowledge_vault_item.id = await generate_unique_short_id_async(self.session_maker, KnowledgeVaultItem, "kv")
 
         item_data = knowledge_vault_item.model_dump()
 
@@ -623,7 +626,16 @@ class KnowledgeVaultManager:
             if provider:
                 from datetime import datetime, timezone
 
+                from mirix.utils import generate_unique_short_id_async
+
+                # A relational provider may persist this id as the row key, so it
+                # must be set before the write (an empty id is rejected
+                # downstream). Generate it up front.
+                vault_id = await generate_unique_short_id_async(
+                    self.session_maker, KnowledgeVaultItem, "kv"
+                )
                 data_dict = {
+                    "id": vault_id,
                     "user_id": user_id,
                     "agent_id": agent_id,
                     "entry_type": entry_type,
