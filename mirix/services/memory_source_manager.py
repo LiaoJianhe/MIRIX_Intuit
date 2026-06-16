@@ -294,7 +294,7 @@ class MemorySourceManager:
                         clean = {k: v for k, v in cached_data.items() if k in known_fields}
                         return PydanticMemorySource(**clean)
             except Exception as e:
-                logger.warning("Cache read failed for memory source %s: %s", memory_source_id, e)
+                logger.debug("Cache read failed for memory source %s: %s", memory_source_id, e)
 
         # Fall back to DB
         async with self.session_maker() as session:

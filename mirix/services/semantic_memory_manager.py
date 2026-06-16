@@ -450,7 +450,7 @@ class SemanticMemoryManager:
                     cached_data = RedisMemoryClient.clean_redis_fields([cached_data])[0]
                     return PydanticSemanticMemoryItem(**cached_data)
         except Exception as e:
-            logger.warning(
+            logger.debug(
                 "Cache read failed for semantic memory %s: %s",
                 semantic_memory_id,
                 e,

@@ -116,7 +116,7 @@ class ToolManager:
                         cached["tags"] = _json.loads(cached["tags"])
                     return PydanticTool(**cached)
             except Exception as e:
-                logger.warning("Cache read failed for tool %s: %s", tool_id, e)
+                logger.debug("Cache read failed for tool %s: %s", tool_id, e)
 
         provider = get_relational_provider()
         if provider:

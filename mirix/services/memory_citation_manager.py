@@ -218,7 +218,7 @@ class MemoryCitationManager:
                         )
                         return True
             except Exception as e:
-                logger.warning("Cache read failed for citation exists check: %s", e)
+                logger.debug("Cache read failed for citation exists check: %s", e)
 
         # Fall back to DB
         async with self.session_maker() as session:

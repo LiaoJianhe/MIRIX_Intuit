@@ -1640,7 +1640,7 @@ class AgentManager:
 
                     return agent_state  # Cache HIT (agent + tools + memory)
         except Exception as e:
-            logger.warning("Cache read failed for agent %s: %s", agent_id, e)
+            logger.debug("Cache read failed for agent %s: %s", agent_id, e)
 
         # Relational DB provider delegation (named query with include_relationships for tools)
         from mirix.database.relational_provider import get_relational_provider

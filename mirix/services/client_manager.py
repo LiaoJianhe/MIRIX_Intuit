@@ -882,7 +882,7 @@ class ClientManager:
                     logger.debug("Cache HIT for client %s", client_id)
                     return PydanticClient(**cached_data)
         except Exception as e:
-            logger.warning("Cache read failed for client %s: %s", client_id, e)
+            logger.debug("Cache read failed for client %s: %s", client_id, e)
 
         from mirix.database.relational_provider import get_relational_provider
 

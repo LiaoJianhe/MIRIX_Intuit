@@ -726,7 +726,7 @@ class BlockManager:
                         cached_data["value"] = ""
                     return PydanticBlock(**cached_data)
         except Exception as e:
-            logger.warning("Cache read failed for block %s: %s", block_id, e)
+            logger.debug("Cache read failed for block %s: %s", block_id, e)
 
         async with self.session_maker() as session:
             try:

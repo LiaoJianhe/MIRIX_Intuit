@@ -393,7 +393,7 @@ class ResourceMemoryManager:
                     cached_data = RedisMemoryClient.clean_redis_fields([cached_data])[0]
                     return PydanticResourceMemoryItem(**cached_data)
         except Exception as e:
-            logger.warning("Cache read failed for resource memory %s: %s", item_id, e)
+            logger.debug("Cache read failed for resource memory %s: %s", item_id, e)
 
         async with self.session_maker() as session:
             try:

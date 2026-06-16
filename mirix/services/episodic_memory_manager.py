@@ -172,7 +172,7 @@ class EpisodicMemoryManager:
                     cached_data = RedisMemoryClient.clean_redis_fields([cached_data])[0]
                     return PydanticEpisodicEvent(**cached_data)
         except Exception as e:
-            logger.warning(
+            logger.debug(
                 "Cache read failed for episodic memory %s: %s",
                 episodic_memory_id,
                 e,

@@ -42,7 +42,7 @@ class MessageManager:
                 if cached_data:
                     return PydanticMessage(**cached_data)
         except Exception as e:
-            logger.warning("Cache read failed for message %s: %s", message_id, e)
+            logger.debug("Cache read failed for message %s: %s", message_id, e)
 
         from mirix.database.relational_provider import get_relational_provider
 
