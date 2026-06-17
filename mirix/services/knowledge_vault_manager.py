@@ -541,9 +541,7 @@ class KnowledgeVaultManager:
         # persist this id as the row key, so it must exist before the write
         # (an empty id is rejected downstream). Generate it up front.
         if not knowledge_vault_item.id:
-            from mirix.utils import generate_unique_short_id_async
-
-            knowledge_vault_item.id = await generate_unique_short_id_async(self.session_maker, KnowledgeVaultItem, "kv")
+            knowledge_vault_item.id = PydanticKnowledgeVaultItem._generate_id()
 
         provider = get_relational_provider()
         if provider:
@@ -626,14 +624,10 @@ class KnowledgeVaultManager:
             if provider:
                 from datetime import datetime, timezone
 
-                from mirix.utils import generate_unique_short_id_async
-
                 # A relational provider may persist this id as the row key, so it
                 # must be set before the write (an empty id is rejected
                 # downstream). Generate it up front.
-                vault_id = await generate_unique_short_id_async(
-                    self.session_maker, KnowledgeVaultItem, "kv"
-                )
+                vault_id = PydanticKnowledgeVaultItem._generate_id()
                 data_dict = {
                     "id": vault_id,
                     "user_id": user_id,

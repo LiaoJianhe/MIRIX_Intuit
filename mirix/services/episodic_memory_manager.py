@@ -298,9 +298,7 @@ class EpisodicMemoryManager:
         # persist this id as the row key, so it must exist before the write
         # (an empty id is rejected downstream). Generate it up front.
         if not episodic_memory.id:
-            from mirix.utils import generate_unique_short_id_async
-
-            episodic_memory.id = await generate_unique_short_id_async(self.session_maker, EpisodicEvent, "ep")
+            episodic_memory.id = PydanticEpisodicEvent._generate_id()
 
         # Provider delegation (create via lower-level method)
         from mirix.database.relational_provider import get_relational_provider
@@ -657,14 +655,10 @@ class EpisodicMemoryManager:
 
             provider = get_relational_provider()
             if provider:
-                from mirix.utils import generate_unique_short_id_async
-
                 # A relational provider may persist this id as the row key, so it
                 # must be set before the write (an empty id is rejected
                 # downstream). Generate it up front.
-                episodic_id = await generate_unique_short_id_async(
-                    self.session_maker, EpisodicEvent, "ep"
-                )
+                episodic_id = PydanticEpisodicEvent._generate_id()
                 data_dict = {
                     "id": episodic_id,
                     "summary": summary,

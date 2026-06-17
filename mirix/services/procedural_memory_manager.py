@@ -530,9 +530,7 @@ class ProceduralMemoryManager:
         # persist this id as the row key, so it must exist before the write
         # (an empty id is rejected downstream). Generate it up front.
         if not item_data.id:
-            from mirix.utils import generate_unique_short_id_async
-
-            item_data.id = await generate_unique_short_id_async(self.session_maker, ProceduralMemoryItem, "proc")
+            item_data.id = PydanticProceduralMemoryItem._generate_id()
 
         provider = get_relational_provider()
         if provider:
@@ -1026,14 +1024,11 @@ class ProceduralMemoryManager:
                 client_id = actor.id
                 if user_id is None:
                     user_id = UserManager.ADMIN_USER_ID
-                from mirix.utils import generate_unique_short_id_async
 
                 # A relational provider may persist this id as the row key, so it
                 # must be set before the write (an empty id is rejected
                 # downstream). Generate it up front.
-                procedural_id = await generate_unique_short_id_async(
-                    self.session_maker, ProceduralMemoryItem, "proc"
-                )
+                procedural_id = PydanticProceduralMemoryItem._generate_id()
                 data_dict = {
                     "id": procedural_id,
                     "entry_type": entry_type,
