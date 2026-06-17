@@ -57,7 +57,7 @@ class OrganizationManager:
                     logger.debug("Cache HIT for organization %s", org_id)
                     return PydanticOrganization(**cached_data)
         except Exception as e:
-            logger.warning("Cache read failed for organization %s: %s", org_id, e)
+            logger.debug("Cache read failed for organization %s: %s", org_id, e)
 
         from mirix.database.relational_provider import get_relational_provider
 

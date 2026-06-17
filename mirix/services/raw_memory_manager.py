@@ -273,7 +273,7 @@ class RawMemoryManager:
             raise
         except Exception as e:
             # Log but continue to PostgreSQL on cache error
-            logger.warning(
+            logger.debug(
                 "Cache read failed for raw memory %s: %s",
                 memory_id,
                 e,

@@ -1291,9 +1291,9 @@ class Agent(BaseAgent):
             else:
                 raise ValueError(f"input_messages items must be Message or MessageCreate, got {type(m)}")
 
-        from mirix.observability.timed_spans import timed_span
+        from mirix.observability.timed import timedspan
 
-        async with timed_span(
+        async with timedspan(
             "Agent Step",
             metadata={"agent_type": str(self.agent_state.agent_type)},
         ):
@@ -1309,7 +1309,7 @@ class Agent(BaseAgent):
             should_write_retention = retention > 0 and is_meta_agent and self.actor and self.user_id
             retained_input_sets: List[Message] = []
             if should_read_retention:
-                async with timed_span(
+                async with timedspan(
                     "Load Retained History",
                     metadata={"agent_id": retention_agent_id, "limit": retention},
                 ):
@@ -1349,7 +1349,7 @@ class Agent(BaseAgent):
                 # Note: this catches scenarios where the same source (same id) is being retried.
                 # It does not catch scenarios where the same source with a different id was queued as a separate message/
                 # It also ONLY short circuits if the matched result has been marked as complete.
-                async with timed_span(
+                async with timedspan(
                     "Check Source Processing State",
                     metadata={"memory_source_id": self.memory_source_id},
                 ):
@@ -1373,7 +1373,7 @@ class Agent(BaseAgent):
                 fault_injection.resolve_directives(self.memory_source_id, getattr(self, "source_metadata", None))
 
                 # Persist the memory source and its messages before we process it.
-                async with timed_span(
+                async with timedspan(
                     "Persist Memory Source",
                     metadata={"memory_source_id": self.memory_source_id},
                 ):
@@ -1466,7 +1466,7 @@ class Agent(BaseAgent):
                     )
                     loop_iteration_messages.append(meta_message)
 
-                async with timed_span("Inner Step", metadata={"step_count": step_count}):
+                async with timedspan("Inner Step", metadata={"step_count": step_count}):
                     step_response = await self.inner_step(
                         messages=loop_iteration_messages,
                         accumulated=accumulated,
@@ -2028,12 +2028,12 @@ class Agent(BaseAgent):
         if not (sp and rp):
             return []
 
-        from mirix.observability.timed_spans import timed_span
+        from mirix.observability.timed import timedspan
 
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=HYBRID_READ_WINDOW_SECONDS)
         # Child span so the IPS-R recent-window leg shows up distinctly under the
         # parent "Retrieve <type>" span, separate from the IPS-S "IPS Search" leg.
-        async with timed_span("Recent window fetch", metadata={"backend": "ipsr", "table": table}):
+        async with timedspan("Recent window fetch", metadata={"backend": "ipsr", "table": table}):
             recent_records = await rp.list(
                 table,
                 user_id=self.user.id,
@@ -2064,7 +2064,7 @@ class Agent(BaseAgent):
         Returns:
             Tuple[str, dict]: The complete system prompt and the retrieved memories dict
         """
-        from mirix.observability.timed_spans import timed_span
+        from mirix.observability.timed import timedspan
         from mirix.schemas.agent import AgentType
 
         timezone_str = self.user.timezone
@@ -2099,13 +2099,13 @@ class Agent(BaseAgent):
         # write disjoint keys in ``retrieved_memories`` and read only the
         # inputs computed once above (key_words, embedded_text, timezone_str,
         # search_method), so there is no inter-block data dependency. Each
-        # coroutine keeps its own per-type gate, timed_span, and recent+relevant
+        # coroutine keeps its own per-type gate, timedspan, and recent+relevant
         # merge, and computes its own owning-agent flag locally (no shared
         # mutable owning-flag variable across the concurrent blocks).
 
         async def _retrieve_core():
             if self.agent_state.is_type(AgentType.core_memory_agent) or "core" not in retrieved_memories:
-                async with timed_span("Retrieve core", metadata={"backend": "ipsr", "memory_type": "core"}):
+                async with timedspan("Retrieve core", metadata={"backend": "ipsr", "memory_type": "core"}):
                     blocks_result = await self.block_manager.get_blocks(
                         user=self.user,
                         auto_create_from_default=False,  # Don't auto-create here, only in step()
@@ -2128,7 +2128,7 @@ class Agent(BaseAgent):
                 self.agent_state.is_type(AgentType.knowledge_vault_memory_agent)
                 or "knowledge_vault" not in retrieved_memories
             ):
-                async with timed_span(
+                async with timedspan(
                     "Retrieve knowledge_vault",
                     metadata={"backend": "ipss+ipsr", "memory_type": "knowledge_vault"},
                 ):
@@ -2166,7 +2166,7 @@ class Agent(BaseAgent):
         async def _retrieve_episodic():
             is_owning_agent = self.agent_state.is_type(AgentType.episodic_memory_agent, AgentType.reflexion_agent)
             if is_owning_agent or "episodic" not in retrieved_memories:
-                async with timed_span(
+                async with timedspan(
                     "Retrieve episodic",
                     metadata={"backend": "ipss+ipsr", "memory_type": "episodic"},
                 ):
@@ -2218,7 +2218,7 @@ class Agent(BaseAgent):
             # Owning agents need IDs for merge/update operations, so always retrieve fresh
             is_owning_agent = self.agent_state.is_type(AgentType.resource_memory_agent, AgentType.reflexion_agent)
             if is_owning_agent or "resource" not in retrieved_memories:
-                async with timed_span(
+                async with timedspan(
                     "Retrieve resource",
                     metadata={"backend": "ipss+ipsr", "memory_type": "resource"},
                 ):
@@ -2259,7 +2259,7 @@ class Agent(BaseAgent):
             # Owning agents need IDs for merge/update operations, so always retrieve fresh
             is_owning_agent = self.agent_state.is_type(AgentType.procedural_memory_agent, AgentType.reflexion_agent)
             if is_owning_agent or "procedural" not in retrieved_memories:
-                async with timed_span(
+                async with timedspan(
                     "Retrieve procedural",
                     metadata={"backend": "ipss+ipsr", "memory_type": "procedural"},
                 ):
@@ -2302,7 +2302,7 @@ class Agent(BaseAgent):
             # Owning agents need IDs for merge/update operations, so always retrieve fresh
             is_owning_agent = self.agent_state.is_type(AgentType.semantic_memory_agent, AgentType.reflexion_agent)
             if is_owning_agent or "semantic" not in retrieved_memories:
-                async with timed_span(
+                async with timedspan(
                     "Retrieve semantic",
                     metadata={"backend": "ipss+ipsr", "memory_type": "semantic"},
                 ):
@@ -2826,9 +2826,9 @@ These keywords have been used to retrieve relevant memories from the database.
             raw_system = self.agent_state.system or ""
 
             # Build the complete system prompt with memories
-            from mirix.observability.timed_spans import timed_span
+            from mirix.observability.timed import timedspan
 
-            async with timed_span(
+            async with timedspan(
                 "Build System Prompt With Memories",
                 metadata={
                     "agent_type": str(self.agent_state.agent_type),

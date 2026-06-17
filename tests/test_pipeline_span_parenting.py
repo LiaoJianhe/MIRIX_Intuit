@@ -23,7 +23,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from mirix.observability import context as obs_context
-from mirix.observability.timed_spans import timed_span
+from mirix.observability.timed import timedspan as timed_span
 
 
 def _make_langfuse():
@@ -57,8 +57,8 @@ async def test_pre_loop_span_parents_under_agent_step():
 
     captured = {}
     with (
-        patch("mirix.observability.timed_spans.get_langfuse_client", return_value=langfuse),
-        patch("mirix.observability.timed_spans.mark_observation_as_child"),
+        patch("mirix.observability.timed.get_langfuse_client", return_value=langfuse),
+        patch("mirix.observability.timed.mark_observation_as_child"),
     ):
         async with timed_span("Agent Step", metadata={"agent_type": "meta_memory_agent"}):
             agent_step_id = obs_context.get_trace_context().get("observation_id")
@@ -79,8 +79,8 @@ async def test_agent_step_parents_under_meta_agent():
     langfuse = _make_langfuse()
 
     with (
-        patch("mirix.observability.timed_spans.get_langfuse_client", return_value=langfuse),
-        patch("mirix.observability.timed_spans.mark_observation_as_child"),
+        patch("mirix.observability.timed.get_langfuse_client", return_value=langfuse),
+        patch("mirix.observability.timed.mark_observation_as_child"),
     ):
         async with timed_span("Agent Step", metadata={"agent_type": "meta_memory_agent"}):
             pass
@@ -99,8 +99,8 @@ async def test_inner_step_uses_stable_name_with_step_count_metadata():
     langfuse = _make_langfuse()
 
     with (
-        patch("mirix.observability.timed_spans.get_langfuse_client", return_value=langfuse),
-        patch("mirix.observability.timed_spans.mark_observation_as_child"),
+        patch("mirix.observability.timed.get_langfuse_client", return_value=langfuse),
+        patch("mirix.observability.timed.mark_observation_as_child"),
     ):
         for step_count in range(2):
             async with timed_span("Inner Step", metadata={"step_count": step_count}):
@@ -120,8 +120,8 @@ async def test_inner_step_iterations_are_siblings_under_agent_step():
     langfuse = _make_langfuse()
 
     with (
-        patch("mirix.observability.timed_spans.get_langfuse_client", return_value=langfuse),
-        patch("mirix.observability.timed_spans.mark_observation_as_child"),
+        patch("mirix.observability.timed.get_langfuse_client", return_value=langfuse),
+        patch("mirix.observability.timed.mark_observation_as_child"),
     ):
         for step_count in range(2):
             async with timed_span("Inner Step", metadata={"step_count": step_count}):

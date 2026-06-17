@@ -116,7 +116,7 @@ class ToolManager:
                         cached["tags"] = _json.loads(cached["tags"])
                     return PydanticTool(**cached)
             except Exception as e:
-                logger.warning("Cache read failed for tool %s: %s", tool_id, e)
+                logger.debug("Cache read failed for tool %s: %s", tool_id, e)
 
         provider = get_relational_provider()
         if provider:
@@ -271,13 +271,13 @@ class ToolManager:
             return []
 
         from mirix.database.relational_provider import get_relational_provider
-        from mirix.observability.timed_spans import timed_span
+        from mirix.observability.timed import timedspan
 
         provider = get_relational_provider()
         results: List[PydanticTool] = []
         # Span the batch tool resolution: it is one of the save-path network
         # reads, and the chunk count makes a regressed N+1 visible in the trace.
-        async with timed_span(
+        async with timedspan(
             "List Tools By Ids",
             metadata={
                 "tool_id_count": len(unique_ids),

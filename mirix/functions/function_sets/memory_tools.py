@@ -55,9 +55,9 @@ async def _write_citation(agent: "Agent", memory_type: str, memory_id: str, cita
     actor = getattr(agent, "actor", None)
     created_by_id = getattr(actor, "id", None) if actor else None
 
-    from mirix.observability.timed_spans import timed_span
+    from mirix.observability.timed import timedspan
 
-    async with timed_span(
+    async with timedspan(
         "Write Citation",
         metadata={
             "memory_type": memory_type,
@@ -949,9 +949,9 @@ async def trigger_memory_update(self: "Agent", user_message: object, memory_type
     # Spanned so the trace attributes how much of the
     # trigger_memory_update -> first sub-agent gap is this child resolution
     # vs. elsewhere in the dispatch.
-    from mirix.observability.timed_spans import timed_span
+    from mirix.observability.timed import timedspan
 
-    async with timed_span(
+    async with timedspan(
         "Resolve Child Agents",
         metadata={"meta_agent_id": self.agent_state.id},
     ):

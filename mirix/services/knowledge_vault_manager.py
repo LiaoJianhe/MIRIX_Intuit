@@ -447,7 +447,7 @@ class KnowledgeVaultManager:
                     cached_data = RedisMemoryClient.clean_redis_fields([cached_data])[0]
                     return PydanticKnowledgeVaultItem(**cached_data)
         except Exception as e:
-            logger.warning("Cache read failed for knowledge vault %s: %s", knowledge_vault_item_id, e)
+            logger.debug("Cache read failed for knowledge vault %s: %s", knowledge_vault_item_id, e)
 
         async with self.session_maker() as session:
             try:

@@ -557,7 +557,7 @@ class UserManager:
                     logger.debug("Cache HIT for user %s", user_id)
                     return PydanticUser(**cached_data)
         except Exception as e:
-            logger.warning("Cache read failed for user %s: %s", user_id, e)
+            logger.debug("Cache read failed for user %s: %s", user_id, e)
 
         from mirix.database.relational_provider import get_relational_provider
 
