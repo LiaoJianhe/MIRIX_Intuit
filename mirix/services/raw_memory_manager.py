@@ -24,7 +24,7 @@ from mirix.schemas.raw_memory import RawMemoryItemCreate as PydanticRawMemoryIte
 from mirix.schemas.user import User as PydanticUser
 from mirix.services.user_manager import UserManager
 from mirix.settings import settings
-from mirix.utils import enforce_types, generate_unique_short_id_async
+from mirix.utils import enforce_types
 
 logger = get_logger(__name__)
 
@@ -116,7 +116,7 @@ class RawMemoryManager:
 
         # Ensure ID is set before model_dump
         if not raw_memory.id:
-            raw_memory.id = await generate_unique_short_id_async(self.session_maker, RawMemory, "raw_mem")
+            raw_memory.id = PydanticRawMemoryItem._generate_id()
 
         # Auto-inject scope from actor's write_scope
         if actor.write_scope is None:

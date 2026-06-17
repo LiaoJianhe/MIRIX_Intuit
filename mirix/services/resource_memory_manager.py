@@ -476,9 +476,7 @@ class ResourceMemoryManager:
 
         # Ensure ID is set before model_dump
         if not item_data.id:
-            from mirix.utils import generate_unique_short_id_async
-
-            item_data.id = await generate_unique_short_id_async(self.session_maker, ResourceMemoryItem, "res")
+            item_data.id = PydanticResourceMemoryItem._generate_id()
 
         data_dict = item_data.model_dump()
 

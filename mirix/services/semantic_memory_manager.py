@@ -22,7 +22,7 @@ from mirix.schemas.semantic_memory import (
 from mirix.schemas.user import User as PydanticUser
 from mirix.services.utils import build_query, update_timezone
 from mirix.settings import settings
-from mirix.utils import enforce_types, generate_unique_short_id_async
+from mirix.utils import enforce_types
 
 logger = get_logger(__name__)
 
@@ -564,7 +564,7 @@ class SemanticMemoryManager:
         # persist this id as the row key, so it must exist before the write
         # (an empty id is rejected downstream). Generate it up front.
         if not item_data.id:
-            item_data.id = await generate_unique_short_id_async(self.session_maker, SemanticMemoryItem, "sem")
+            item_data.id = PydanticSemanticMemoryItem._generate_id()
 
         provider = get_relational_provider()
         if provider:
@@ -1089,9 +1089,7 @@ class SemanticMemoryManager:
                 # A relational provider may persist this id as the row key, so it
                 # must be set before the write (an empty id is rejected
                 # downstream). Generate it up front.
-                semantic_id = await generate_unique_short_id_async(
-                    self.session_maker, SemanticMemoryItem, "sem"
-                )
+                semantic_id = PydanticSemanticMemoryItem._generate_id()
                 data_dict = {
                     "id": semantic_id,
                     "name": name,
