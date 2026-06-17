@@ -1367,9 +1367,9 @@ class Agent(BaseAgent):
                 # persist so a directive scoped to the source_messages write (in
                 # persist, incl. the conflict path) can fire. Only registers;
                 # idempotent; no-op when disabled.
-                # TODO: This is currently placed AFTER the check above so that the fault injection for the
-                # persist memory source wont accidentally trigger early, but the need to manage the placement
-                # of this call is a hack and the underlying mechanism should be redesigned to be more robust.
+                # Placed after the check above so a persist-memory-source
+                # fault directive is not resolved before the persist actually
+                # runs.
                 fault_injection.resolve_directives(self.memory_source_id, getattr(self, "source_metadata", None))
 
                 # Persist the memory source and its messages before we process it.
@@ -1438,7 +1438,6 @@ class Agent(BaseAgent):
                         f"[Mirix.Agent.{self.agent_state.name}] INFO: Error in extracting the topic "
                         f"from the input: error_type={type(e).__name__}"
                     )
-                    pass
 
             # Main loop:ing
             # Each iteration calls inner_step and then makes a decision about whether to continue chaining
