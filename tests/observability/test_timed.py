@@ -50,8 +50,9 @@ async def test_timed_no_slow_ms_never_warns(caplog):
 async def test_custom_line_receives_ms_and_rec(caplog):
     log = logging.getLogger("test.timed")
     with caplog.at_level(logging.DEBUG, logger="test.timed"):
-        async with timed("op_d", logger=log,
-                         line=lambda ms, rec: f"[CUSTOM] hits={rec['hits']} execute_ms={ms:.1f}") as rec:
+        async with timed(
+            "op_d", logger=log, line=lambda ms, rec: f"[CUSTOM] hits={rec['hits']} execute_ms={ms:.1f}"
+        ) as rec:
             rec["hits"] = 7
     recs = [r for r in caplog.records if "CUSTOM" in r.getMessage()]
     assert any("hits=7" in r.getMessage() and "execute_ms=" in r.getMessage() for r in recs)

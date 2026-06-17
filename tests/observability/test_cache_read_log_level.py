@@ -3,6 +3,7 @@ from pathlib import Path
 
 MANAGERS = Path("mirix/services")
 
+
 def test_cache_read_failed_is_not_warning():
     offenders = []
     for f in MANAGERS.glob("*_manager.py"):

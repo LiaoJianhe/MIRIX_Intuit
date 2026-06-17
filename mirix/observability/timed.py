@@ -34,9 +34,7 @@ from mirix.observability.langfuse_client import get_langfuse_client
 
 logger = get_logger(__name__)
 
-_active_record: ContextVar[Optional[Dict[str, Any]]] = ContextVar(
-    "timed_active_record", default=None
-)
+_active_record: ContextVar[Optional[Dict[str, Any]]] = ContextVar("timed_active_record", default=None)
 LineBuilder = Callable[[float, Dict[str, Any]], str]
 
 
@@ -174,11 +172,7 @@ class _TimedOp:
             finally:
                 ms = (time.monotonic() - start) * 1000.0
                 slow = self._slow_ms is not None and ms >= self._slow_ms
-                msg = (
-                    self._line(ms, rec)
-                    if self._line is not None
-                    else f"[{self._name} TIMING] execute_ms={ms:.1f}"
-                )
+                msg = self._line(ms, rec) if self._line is not None else f"[{self._name} TIMING] execute_ms={ms:.1f}"
                 emit = self._log.warning if slow else self._log.debug
                 emit("%s%s", msg, " SLOW" if slow else "")
 
@@ -217,9 +211,7 @@ def timed(
     an ``async def``. Logs the default ``[<name> TIMING] execute_ms=<ms>`` line
     at DEBUG, or at WARNING (with a ``SLOW`` suffix) when ``slow_ms`` is crossed.
     """
-    return _TimedOp(
-        name, metadata, open_span=False, log=logger, slow_ms=slow_ms, line=line, extra=extra
-    )
+    return _TimedOp(name, metadata, open_span=False, log=logger, slow_ms=slow_ms, line=line, extra=extra)
 
 
 def timedspan(
@@ -236,6 +228,4 @@ def timedspan(
     The span is a no-op when Langfuse is disabled or no trace context is active,
     so this is always safe to use. Usable as a context manager or decorator.
     """
-    return _TimedOp(
-        name, metadata, open_span=True, log=logger, slow_ms=slow_ms, line=line, extra=extra
-    )
+    return _TimedOp(name, metadata, open_span=True, log=logger, slow_ms=slow_ms, line=line, extra=extra)
