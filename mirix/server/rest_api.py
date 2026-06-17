@@ -2093,18 +2093,12 @@ async def add_memory(
     server = get_server()
     client_id, org_id = await get_client_and_org(x_client_id, x_org_id)
 
-    # VEPAGE-1310: keep the pre-queue path lookup-free. The save path previously
-    # fetched the full client (only to read write_scope) and the full meta-agent
-    # (only to read .id) before queuing — two IPS-R round-trips on the request
-    # thread that are not needed to enqueue. Both are resolved by the worker on
-    # dequeue (worker.py resolves the client by client_id; the agent is loaded
-    # when the message is processed), so:
-    #   - write_scope is now derived worker-side from the authoritative client
-    #     (see mirix/queue/worker.py); the API never trusts an inbound scope.
-    #   - the meta-agent id is taken straight from the request (it round-tripped
-    #     unchanged through get_agent_by_id before).
-    # The queue carries only client_id (actor.id), so we hand put_messages a
-    # minimal actor that carries the id and org without touching the datastore.
+    # The pre-queue path is lookup-free: enqueuing needs neither the full client
+    # nor the meta-agent. The worker resolves the client by client_id on dequeue
+    # (and derives write_scope from it), and loads the agent when it processes the
+    # message; the meta-agent id is taken straight from the request. The queue
+    # carries only client_id (actor.id), so hand put_messages a minimal actor with
+    # the id and org and skip the datastore reads.
     actor = Client(id=client_id, name=client_id, organization_id=org_id)
 
     # If user_id is not provided, use the admin user for this client
@@ -2168,9 +2162,9 @@ async def add_memory(
         # Create new filter_tags if not provided
         filter_tags = {}
 
-    # VEPAGE-1310: scope is owned by the worker (derived from the authoritative
-    # client), not the caller. Strip any inbound "scope" so a forged value can
-    # never reach the queue/topic — the worker overwrites it unconditionally.
+    # Scope is owned by the worker (derived from the client), not the caller.
+    # Strip any inbound "scope" so a forged value can never reach the queue; the
+    # worker sets it from the client and overwrites whatever is present.
     filter_tags.pop("scope", None)
 
     if request.block_filter_tags is not None and not isinstance(request.block_filter_tags, dict):

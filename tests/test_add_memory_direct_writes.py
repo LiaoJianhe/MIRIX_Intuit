@@ -74,9 +74,9 @@ async def test_add_memory_threads_direct_writes_to_put_messages():
         ],
     )
 
-    # VEPAGE-1310: add_memory no longer fetches the client or the meta-agent
-    # before queuing. The server mock has lookup methods that would blow up if
-    # called, proving the pre-queue path is lookup-free.
+    # The save path performs no client or meta-agent lookup before queuing. The
+    # server mock's lookup methods raise if called, proving the path stays
+    # lookup-free.
     fake_server = MagicMock()
     fake_server.client_manager = MagicMock()
     fake_server.client_manager.get_client_by_id = AsyncMock(

@@ -1,10 +1,9 @@
-"""VEPAGE-1310: the worker is the sole authority for write scope.
+"""The worker is the authority for write scope.
 
-The save HTTP path no longer fetches the client to bake filter_tags["scope"]
-in before queuing. Instead the worker derives "scope" from the authoritative
-client (resolved by client_id on dequeue), overwriting any inbound value and
-rejecting a client that has no write_scope. These are pure-unit tests that
-drive QueueWorker._process_message_async with the DB/user/agent layers mocked.
+The worker derives "scope" from the client (resolved by client_id on dequeue),
+overwrites any scope present on the queue message, and rejects a client that has
+no write_scope. These are pure-unit tests that drive
+QueueWorker._process_message_async with the DB/user/agent layers mocked.
 """
 
 from types import SimpleNamespace
