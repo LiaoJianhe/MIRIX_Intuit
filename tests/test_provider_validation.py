@@ -11,6 +11,7 @@ from mirix.database.provider_validation import validate_provider_pairing_or_rais
 from mirix.database.relational_provider import (
     get_registered_relational_providers,
     register_relational_provider,
+    reset_provider_mode_latch,
     unregister_relational_provider,
 )
 from mirix.database.search_provider import (
@@ -26,11 +27,13 @@ def cleanup_registries():
         unregister_relational_provider(name)
     for name in list(get_registered_search_providers().keys()):
         unregister_search_provider(name)
+    reset_provider_mode_latch()
     yield
     for name in list(get_registered_relational_providers().keys()):
         unregister_relational_provider(name)
     for name in list(get_registered_search_providers().keys()):
         unregister_search_provider(name)
+    reset_provider_mode_latch()
 
 
 class TestValidateProviderPairing:

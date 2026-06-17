@@ -11,6 +11,7 @@ from mirix.database.relational_provider import (
     get_registered_relational_providers,
     get_relational_provider,
     register_relational_provider,
+    reset_provider_mode_latch,
     unregister_relational_provider,
 )
 from mirix.database.search_provider import (
@@ -19,15 +20,18 @@ from mirix.database.search_provider import (
     register_search_provider,
     unregister_search_provider,
 )
+from mirix.errors import RelationalProviderRequiredError
 
 
 @pytest.fixture(autouse=True)
 def cleanup_relational_registry():
     for name in list(get_registered_relational_providers().keys()):
         unregister_relational_provider(name)
+    reset_provider_mode_latch()
     yield
     for name in list(get_registered_relational_providers().keys()):
         unregister_relational_provider(name)
+    reset_provider_mode_latch()
 
 
 @pytest.fixture(autouse=True)
@@ -55,7 +59,10 @@ class TestRelationalProviderRegistry:
         register_relational_provider("ips_relational", p)
         unregister_relational_provider("ips_relational")
         assert "ips_relational" not in get_registered_relational_providers()
-        assert get_relational_provider() is None
+        # Provider mode has latched (we registered above), so a now-missing
+        # provider is a hard error, NOT a silent fall-through to PostgreSQL.
+        with pytest.raises(RelationalProviderRequiredError):
+            get_relational_provider()
 
     def test_get_registered_returns_all_providers(self):
         a, b = object(), object()
@@ -111,7 +118,51 @@ class TestRegistryLastWins:
 
 class TestEmptyRegistry:
     def test_get_relational_provider_none_when_empty(self):
+        # Never latched (no provider ever registered) -> pure-PG fallback.
         assert get_relational_provider() is None
 
     def test_get_search_provider_none_when_empty(self):
         assert get_search_provider() is None
+
+
+class TestProviderModeLatch:
+    """Once provider mode latches, a missing provider must fail closed.
+
+    Regression coverage for the shutdown teardown race (VEPAGE-1400): the IPS
+    providers were unregistered while saves were still in flight, so
+    get_relational_provider() returned None and managers silently took the
+    PostgreSQL ORM path — reading/writing the wrong store under provider mode
+    (surfacing as spurious NoResultFound and "No child memory agents found").
+    """
+
+    def test_missing_provider_raises_after_latch(self):
+        register_relational_provider("ips_relational", object())
+        unregister_relational_provider("ips_relational")
+        with pytest.raises(RelationalProviderRequiredError):
+            get_relational_provider()
+
+    def test_no_latch_no_raise_pure_pg(self):
+        # A process that never registers a provider keeps the ORM fallback.
+        assert get_relational_provider() is None
+
+    def test_error_classifies_transient(self):
+        from mirix.errors import ProviderTransientError
+        from mirix.queue.error_policy import Bucket, classify
+
+        register_relational_provider("ips_relational", object())
+        unregister_relational_provider("ips_relational")
+        try:
+            get_relational_provider()
+        except RelationalProviderRequiredError as e:
+            assert isinstance(e, ProviderTransientError)
+            assert classify(e) is Bucket.TRANSIENT
+        else:
+            pytest.fail("expected RelationalProviderRequiredError")
+
+    def test_reregister_after_latch_returns_provider(self):
+        register_relational_provider("ips_relational", object())
+        unregister_relational_provider("ips_relational")
+        # Next startup re-registers; the call succeeds again (no permanent break).
+        p2 = object()
+        register_relational_provider("ips_relational", p2)
+        assert get_relational_provider() is p2

@@ -97,21 +97,33 @@ logger = get_logger(__name__)
 _relational_providers: Dict[str, Any] = {}
 _active_provider_name: Optional[str] = None
 
+# Provider-mode latch. Set True the first time ANY relational provider is
+# registered in this process and never cleared on unregister. It records the
+# fact that this deployment runs against a relational provider, so a *later*
+# missing provider (e.g. unregistered during shutdown teardown while a save is
+# still in flight) must be treated as a hard error rather than a silent
+# fall-through to the PostgreSQL ORM path. Pure-PG deployments never register a
+# provider, so the latch stays False and the ORM fallback is preserved.
+_provider_mode_latched: bool = False
+
 
 def register_relational_provider(name: str, provider: Any) -> None:
     """
     Register a relational database provider with Mirix.
 
-    Last registered provider becomes the active one.
+    Last registered provider becomes the active one. Registering also latches
+    "provider mode" on for the lifetime of the process (see
+    ``get_relational_provider``).
 
     Args:
         name: Provider identifier (e.g., "ips_relational").
         provider: Provider instance implementing the relational interface.
     """
-    global _relational_providers, _active_provider_name
+    global _relational_providers, _active_provider_name, _provider_mode_latched
 
     _relational_providers[name] = provider
     _active_provider_name = name
+    _provider_mode_latched = True
     logger.info("Registered relational provider: %s", name)
 
 
@@ -119,13 +131,30 @@ def get_relational_provider() -> Optional[Any]:
     """
     Get the active relational database provider.
 
-    Returns None if no provider is registered (graceful fallback to PostgreSQL).
+    Returns the active provider, or ``None`` when no provider has ever been
+    registered in this process (pure-PostgreSQL deployments — callers fall back
+    to the ORM path).
 
-    Returns:
-        Relational provider instance or None.
+    Raises:
+        RelationalProviderRequiredError: when provider mode has latched (a
+            provider was registered at least once) but no provider is currently
+            registered. This prevents callers from silently using PostgreSQL
+            under provider mode — e.g. when the provider was unregistered during
+            shutdown teardown while a save was still in flight. The error
+            classifies TRANSIENT so the save redelivers and succeeds on the next
+            startup once the provider is registered again.
     """
     if _active_provider_name and _active_provider_name in _relational_providers:
         return _relational_providers[_active_provider_name]
+    if _provider_mode_latched:
+        # Import here to avoid a module-import cycle (errors -> schemas -> ...).
+        from mirix.errors import RelationalProviderRequiredError
+
+        raise RelationalProviderRequiredError(
+            "Relational provider mode is active for this process but no "
+            "relational provider is currently registered. Refusing to fall "
+            "back to PostgreSQL (would read/write the wrong store)."
+        )
     return None
 
 
@@ -153,3 +182,15 @@ def get_registered_relational_providers() -> Dict[str, Any]:
         Dictionary of provider_name -> provider_instance.
     """
     return dict(_relational_providers)
+
+
+def reset_provider_mode_latch() -> None:
+    """Clear the provider-mode latch. For test isolation ONLY.
+
+    The latch is deliberately never cleared in production (an unregister during
+    shutdown must keep provider mode active so saves fail-closed rather than
+    silently using PostgreSQL). Tests that exercise the unlatched / pure-PG
+    path must reset it explicitly between cases.
+    """
+    global _provider_mode_latched
+    _provider_mode_latched = False
