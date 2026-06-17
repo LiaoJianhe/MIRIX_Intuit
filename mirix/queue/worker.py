@@ -312,6 +312,25 @@ class QueueWorker:
             if message.HasField("filter_tags") and message.filter_tags:
                 filter_tags = MessageToDict(message.filter_tags)
 
+            # VEPAGE-1310: the worker is the sole authority for write scope. Derive
+            # "scope" from the authoritative client (actor) resolved above by
+            # client_id — never trust a scope that rode in on the queue message
+            # (the API strips it, but a direct-to-topic writer could forge one).
+            # This is the same gate the API used to enforce (403 when write_scope
+            # is None), now enforced at the trust boundary just before the write.
+            # Raise a permanent error: a client with no write_scope is a
+            # deterministic misconfiguration (the old API path returned 403
+            # immediately), so it must dead-letter, not burn transient retries.
+            if actor.write_scope is None:
+                from mirix.errors import ProviderPermanentError
+
+                raise ProviderPermanentError(
+                    f"Client {actor.id} has no write_scope - cannot create memories"
+                )
+            if filter_tags is None:
+                filter_tags = {}
+            filter_tags["scope"] = actor.write_scope
+
             use_cache = message.use_cache if message.HasField("use_cache") else True
             occurred_at = message.occurred_at if message.HasField("occurred_at") else None
 
