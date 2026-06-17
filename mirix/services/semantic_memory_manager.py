@@ -647,10 +647,9 @@ class SemanticMemoryManager:
     ) -> List[PydanticSemanticMemoryItem]:
         """Create multiple semantic memory items.
 
-        Signature mirrors :meth:`create_item` (was previously taking a user,
-        which produced confused call sites that had to inline-build a
-        ``PydanticClient``). Now both single- and many-create entry points
-        accept the same ``actor`` arg and optional ``client_id`` / ``user_id``.
+        Mirrors :meth:`create_item`: both the single- and many-create entry
+        points take the same ``actor`` arg plus optional ``client_id`` /
+        ``user_id``.
         """
         return [await self.create_item(i, actor, client_id=client_id, user_id=user_id) for i in items]
 
