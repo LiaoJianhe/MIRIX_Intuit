@@ -312,6 +312,22 @@ class QueueWorker:
             if message.HasField("filter_tags") and message.filter_tags:
                 filter_tags = MessageToDict(message.filter_tags)
 
+            # The worker is the authority for write scope: "scope" is derived from
+            # the client (actor) resolved by client_id, and any scope present on the
+            # queue message is ignored and overwritten. A client with no write_scope
+            # cannot create memories; this is a deterministic misconfiguration, so
+            # raise a permanent error to dead-letter the message rather than burning
+            # transient retries.
+            if actor.write_scope is None:
+                from mirix.errors import ProviderPermanentError
+
+                raise ProviderPermanentError(
+                    f"Client {actor.id} has no write_scope - cannot create memories"
+                )
+            if filter_tags is None:
+                filter_tags = {}
+            filter_tags["scope"] = actor.write_scope
+
             use_cache = message.use_cache if message.HasField("use_cache") else True
             occurred_at = message.occurred_at if message.HasField("occurred_at") else None
 
