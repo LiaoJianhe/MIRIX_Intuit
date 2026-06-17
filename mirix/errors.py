@@ -213,6 +213,22 @@ class ProviderNotFoundError(ProviderPermanentError):
     pass
 
 
+class RelationalProviderRequiredError(ProviderTransientError):
+    """A relational provider was required but none is currently registered.
+
+    Raised by ``get_relational_provider()`` once provider mode has latched (a
+    relational provider was registered at least once this process) but the
+    active provider is now missing — e.g. it was unregistered during shutdown
+    teardown while a save was still in flight. Subclasses
+    ``ProviderTransientError`` so the queue classifies it TRANSIENT and
+    redelivers the save: on the next startup the provider is registered again
+    and the save succeeds, rather than silently reading/writing the wrong store
+    (PostgreSQL) under provider mode.
+    """
+
+    pass
+
+
 class ProviderConflictError(MirixError):
     """Provider call hit a unique-constraint / duplicate-key conflict.
 

@@ -26,10 +26,16 @@ def validate_provider_pairing_or_raise() -> None:
 
     Cache provider state is independent and not checked here.
     """
-    from mirix.database.relational_provider import get_relational_provider
+    from mirix.database.relational_provider import (
+        get_registered_relational_providers,
+    )
     from mirix.database.search_provider import get_search_provider
 
-    has_relational = get_relational_provider() is not None
+    # Use the raw registry for the presence check, not get_relational_provider():
+    # the latter raises once provider mode has latched but no provider is
+    # currently registered, whereas here we only want "is one registered right
+    # now" (a plain membership test that never triggers the guard).
+    has_relational = bool(get_registered_relational_providers())
     has_search = get_search_provider() is not None
 
     if has_relational and not has_search:
