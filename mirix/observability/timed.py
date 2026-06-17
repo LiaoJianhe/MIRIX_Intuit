@@ -170,11 +170,22 @@ class _TimedOp:
             try:
                 yield rec
             finally:
-                ms = (time.monotonic() - start) * 1000.0
-                slow = self._slow_ms is not None and ms >= self._slow_ms
-                msg = self._line(ms, rec) if self._line is not None else f"[{self._name} TIMING] execute_ms={ms:.1f}"
-                emit = self._log.warning if slow else self._log.debug
-                emit("%s%s", msg, " SLOW" if slow else "")
+                # Emitting the timing line must NEVER raise out of this finally:
+                # when the body is unwinding an exception, a faulty ``line``
+                # callback (e.g. one that subscripts a ``rec`` key the body only
+                # sets on success) would otherwise REPLACE the real exception and
+                # mask the true failure all the way up the call stack.
+                # Instrumentation is best-effort; the wrapped work's outcome wins.
+                try:
+                    ms = (time.monotonic() - start) * 1000.0
+                    slow = self._slow_ms is not None and ms >= self._slow_ms
+                    msg = (
+                        self._line(ms, rec) if self._line is not None else f"[{self._name} TIMING] execute_ms={ms:.1f}"
+                    )
+                    emit = self._log.warning if slow else self._log.debug
+                    emit("%s%s", msg, " SLOW" if slow else "")
+                except Exception as e:  # noqa: BLE001 - timing must not break the call
+                    logger.warning("timed(%s) failed to emit timing line: %s", self._name, e)
 
     async def __aenter__(self) -> Dict[str, Any]:
         self._cm = self._run()
