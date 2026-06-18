@@ -320,7 +320,32 @@ class QueueWorker:
             # transient retries.
             if actor.write_scope is None:
                 from mirix.errors import ProviderPermanentError
+                from mirix.observability.skip_spans import (
+                    emit_refused_to_process_span,
+                )
 
+                # Make the refusal explicit in the trace (parallel to the
+                # idempotency-skip spans) so a read-only client's dropped save is
+                # visible in Langfuse rather than looking like a silent failure.
+                emit_refused_to_process_span(
+                    reason="no-write-scope",
+                    metadata={
+                        "client_id": actor.id,
+                        "memory_source_id": (
+                            message.memory_source_id
+                            if message.HasField("memory_source_id")
+                            else None
+                        ),
+                    },
+                )
+                logger.warning(
+                    "Refused to process: client %s has no write_scope - "
+                    "cannot create memories (memory_source_id=%s)",
+                    actor.id,
+                    message.memory_source_id
+                    if message.HasField("memory_source_id")
+                    else None,
+                )
                 raise ProviderPermanentError(
                     f"Client {actor.id} has no write_scope - cannot create memories"
                 )
