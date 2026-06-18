@@ -20,7 +20,10 @@ from mirix.observability.pii_mask import (
     ispy_pii_mask,
     set_langfuse_mask,
 )
-from mirix.observability.skip_spans import emit_idempotency_skip_span
+from mirix.observability.skip_spans import (
+    emit_idempotency_skip_span,
+    emit_refused_to_process_span,
+)
 from mirix.observability.trace_propagation import (
     add_trace_to_queue_message,
     restore_trace_from_queue_message,
@@ -39,6 +42,7 @@ __all__ = [
     "get_tid",
     "clear_tid",
     "emit_idempotency_skip_span",
+    "emit_refused_to_process_span",
     # PII masking for Langfuse exports.
     "REDACTED_PLACEHOLDER",
     "build_langfuse_mask",
