@@ -67,6 +67,43 @@ async def test_raising_body_still_logs(caplog):
     assert len(_records(caplog)) == 1
 
 
+async def test_faulty_line_never_masks_propagating_exception(caplog):
+    """A ``line`` callback that blows up while the body is unwinding an
+    exception must NOT replace the in-flight exception.
+
+    Regression: the IPS Search timing line does ``rec['hits']`` but only seeds
+    that key AFTER the fallible ``_post_json`` call. When ``_post_json`` raised,
+    the ``finally`` evaluated the line on an empty ``rec`` and the resulting
+    ``KeyError: 'hits'`` clobbered the real (transient) error all the way up the
+    agent stack. Instrumentation must never mask real failures.
+    """
+    log = logging.getLogger("test.timed")
+    with caplog.at_level(logging.DEBUG, logger="test.timed"):
+        with pytest.raises(ValueError, match="real failure"):
+            async with timed(
+                "op_mask",
+                logger=log,
+                line=lambda ms, rec: f"[X] hits={rec['hits']}",
+            ) as rec:
+                # body raises before ever seeding rec["hits"]
+                raise ValueError("real failure")
+                rec["hits"] = 0  # noqa: unreachable
+
+
+async def test_faulty_line_on_success_does_not_break_block(caplog):
+    """Even on the happy path, a ``line`` that raises must be swallowed so the
+    timed block returns normally (the work already succeeded)."""
+    log = logging.getLogger("test.timed")
+    with caplog.at_level(logging.DEBUG, logger="test.timed"):
+        async with timed(
+            "op_mask_ok",
+            logger=log,
+            line=lambda ms, rec: f"[X] missing={rec['nope']}",
+        ):
+            await _noop_block()
+    # No exception escaped; block completed.
+
+
 async def test_decorator_form_logs_and_record_timing_reaches_line(caplog):
     log = logging.getLogger("test.timed")
 
