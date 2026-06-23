@@ -630,6 +630,68 @@ class TestBlockManagerDelegation:
             assert kwargs["scopes"] == ["scope-a"]
             assert len(out) == 1
 
+    @pytest.mark.asyncio
+    async def test_search_blocks_delegates_to_search_provider_single_user(self):
+        """The query path reads core blocks from the search provider so that
+        filter_tags are honoured (the relational list() drops them)."""
+        row = _block_row_dict()
+        mock_search = MagicMock()
+        mock_search.search = AsyncMock(return_value=([row], None))
+
+        with patch("mirix.database.search_provider.get_search_provider", return_value=mock_search):
+            mgr = _block_mgr()
+            out = await mgr.search_blocks(
+                user_id="user-1",
+                organization_id="org-1",
+                query="q",
+                search_method="bm25",
+                scopes=["scope-a"],
+                filter_tags={"seller_id": "tom"},
+                limit=10,
+            )
+            mock_search.search.assert_awaited_once()
+            args, kwargs = mock_search.search.await_args
+            assert args[0] == "block"
+            assert kwargs["user_id"] == "user-1"
+            assert kwargs["organization_id"] == "org-1"
+            assert kwargs["scopes"] == ["scope-a"]
+            assert kwargs["filter_tags"] == {"seller_id": "tom"}
+            assert kwargs["search_method"] == "bm25"
+            assert len(out) == 1
+            assert out[0].id == "block-c0ffee00"
+
+    @pytest.mark.asyncio
+    async def test_search_blocks_delegates_org_wide_when_user_id_none(self):
+        """Cross-user (org-wide) core search passes user_id=None and an org id."""
+        row = _block_row_dict()
+        mock_search = MagicMock()
+        mock_search.search = AsyncMock(return_value=([row], None))
+
+        with patch("mirix.database.search_provider.get_search_provider", return_value=mock_search):
+            mgr = _block_mgr()
+            out = await mgr.search_blocks(
+                user_id=None,
+                organization_id="org-1",
+                query="",
+                search_method="bm25",
+                scopes=["scope-a"],
+                filter_tags={"fettuchini": "noodles"},
+                limit=10,
+            )
+            mock_search.search.assert_awaited_once()
+            _, kwargs = mock_search.search.await_args
+            assert kwargs["user_id"] is None
+            assert kwargs["organization_id"] == "org-1"
+            assert kwargs["filter_tags"] == {"fettuchini": "noodles"}
+            assert len(out) == 1
+
+    @pytest.mark.asyncio
+    async def test_search_blocks_returns_empty_when_no_search_provider(self):
+        with patch("mirix.database.search_provider.get_search_provider", return_value=None):
+            mgr = _block_mgr()
+            out = await mgr.search_blocks(user_id="user-1", organization_id="org-1")
+            assert out == []
+
 
 @pytest.mark.asyncio
 class TestOrganizationManagerDelegation:
