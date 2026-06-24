@@ -3335,10 +3335,17 @@ async def search_memory(
 
         async def search_core():
             try:
-                blocks = await server.block_manager.get_blocks(
-                    user=user,
-                    any_scopes=client.read_scopes,
-                    auto_create_from_default=False,
+                # Core blocks are read from the search index (IPS Search) on the
+                # query path so filter_tags are honoured (the relational list()
+                # cannot filter on block filterTags). The save/agent pipeline
+                # still reads blocks from the relational store via get_blocks().
+                blocks = await server.block_manager.search_blocks(
+                    user_id=user.id,
+                    organization_id=user.organization_id,
+                    query=query,
+                    search_method=search_method,
+                    scopes=scopes,
+                    filter_tags=parsed_filter_tags,
                     limit=limit or 50,
                 )
                 return [
@@ -3536,10 +3543,16 @@ async def search_memory(
     # For single memory type searches, fetch core memory sequentially if requested
     if include_core_memory and memory_type != "all":
         try:
-            blocks = await server.block_manager.get_blocks(
-                user=user,
-                any_scopes=client.read_scopes,
-                auto_create_from_default=False,
+            # Read core blocks from the search index so filter_tags apply (see
+            # the search_core() note above); the relational get_blocks() path is
+            # reserved for the save/agent pipeline.
+            blocks = await server.block_manager.search_blocks(
+                user_id=user.id,
+                organization_id=user.organization_id,
+                query=query,
+                search_method=search_method,
+                scopes=scopes,
+                filter_tags=parsed_filter_tags,
                 limit=limit or 50,
             )
             for block in blocks:
@@ -4100,12 +4113,17 @@ async def search_memory_all_users(
                     block_filter_tags_parsed = json.loads(block_filter_tags)
                 except json.JSONDecodeError:
                     raise HTTPException(status_code=400, detail="Invalid block_filter_tags JSON format")
-            blocks = await server.block_manager.get_blocks(
-                user=None,
+            # Org-wide core read goes through the search index (IPS Search) so
+            # block_filter_tags are applied server-side. The relational list()
+            # path silently drops block filter_tags (no hashing key configured
+            # for the block namespace) and is reserved for the save pipeline.
+            blocks = await server.block_manager.search_blocks(
+                user_id=None,
                 organization_id=effective_org_id,
-                any_scopes=client.read_scopes,
+                query=query,
+                search_method=search_method,
+                scopes=client.read_scopes,
                 filter_tags=block_filter_tags_parsed,
-                auto_create_from_default=False,
                 limit=limit or 50,
             )
             logger.info(

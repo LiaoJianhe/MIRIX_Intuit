@@ -458,6 +458,51 @@ class BlockManager:
 
             return [block.to_pydantic() for block in blocks]
 
+    async def search_blocks(
+        self,
+        *,
+        user_id: Optional[str] = None,
+        organization_id: Optional[str] = None,
+        query: str = "",
+        search_method: str = "bm25",
+        search_field: Optional[str] = None,
+        scopes: Optional[List[str]] = None,
+        filter_tags: Optional[Dict[str, Any]] = None,
+        limit: Optional[int] = 50,
+    ) -> List[PydanticBlock]:
+        """Search core memory blocks via the search provider (IPS Search).
+
+        This is the read path for query-driven retrieval (the search endpoints),
+        and is the only block read path that honours ``filter_tags`` — they are
+        applied server-side by the search provider's query builder.
+
+        It is deliberately separate from :meth:`get_blocks`, which reads from the
+        relational store for the save/agent pipeline (strong read-after-write,
+        no ranking, gates write decisions). ``search_blocks`` must NOT be used on
+        the save path: the search index is eventually consistent.
+
+        Pass ``user_id`` for a single-user search, or leave it ``None`` and pass
+        ``organization_id`` for an org-wide (cross-user) search.
+        """
+        from mirix.database.search_provider import get_search_provider
+
+        search_provider = get_search_provider()
+        if not search_provider:
+            return []
+
+        results, _cursor = await search_provider.search(
+            "block",
+            query_text=query,
+            search_method=search_method,
+            search_field=search_field,
+            user_id=user_id,
+            organization_id=organization_id,
+            filter_tags=filter_tags,
+            scopes=scopes,
+            limit=limit,
+        )
+        return [PydanticBlock(**r) for r in results]
+
     async def _copy_blocks_from_default_user_via_provider(
         self,
         target_user: PydanticUser,
