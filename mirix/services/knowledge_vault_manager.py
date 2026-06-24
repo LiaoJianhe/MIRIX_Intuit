@@ -628,6 +628,11 @@ class KnowledgeVaultManager:
                 # must be set before the write (an empty id is rejected
                 # downstream). Generate it up front.
                 vault_id = PydanticKnowledgeVaultItem._generate_id()
+                # Embeddings are owned by the search index in provider mode, not
+                # Mirix. We forward embedding_config as metadata but never compute
+                # a caption embedding -- the vector is stripped before persistence,
+                # so computing it is wasted work. (Matches the other memory
+                # managers' provider branches.)
                 data_dict = {
                     "id": vault_id,
                     "user_id": user_id,
@@ -640,14 +645,8 @@ class KnowledgeVaultManager:
                     "organization_id": organization_id,
                     "filter_tags": filter_tags or {},
                     "client_id": client_id,
+                    "embedding_config": agent_state.embedding_config,
                 }
-                if BUILD_EMBEDDINGS_FOR_MEMORY:
-                    embed_model = await embedding_model(agent_state.embedding_config)
-                    data_dict["caption_embedding"] = await embed_model.get_text_embedding(caption)
-                    data_dict["embedding_config"] = agent_state.embedding_config
-                else:
-                    data_dict["caption_embedding"] = None
-                    data_dict["embedding_config"] = None
                 data_dict["last_modify"] = {
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "operation": "created",
