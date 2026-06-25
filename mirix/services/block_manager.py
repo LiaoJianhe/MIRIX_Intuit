@@ -488,7 +488,27 @@ class BlockManager:
 
         search_provider = get_search_provider()
         if not search_provider:
-            return []
+            # PostgreSQL fallback (no search provider registered): read blocks
+            # directly from the relational store, applying scope + filter_tags
+            # via the operator-aware ORM builder. Unlike the save-path get_blocks,
+            # this honours filter_tags ($contains etc.) so block_filter_tags work
+            # in non-provider mode. A non-empty query does a case-insensitive
+            # substring match on the block value (no BM25 ranking in fallback).
+            if organization_id is None:
+                return []
+            async with self.session_maker() as session:
+                blocks = await BlockModel.list_by_scopes(
+                    db_session=session,
+                    user_id=user_id,
+                    organization_id=organization_id,
+                    scopes=scopes or [],
+                    limit=limit or 50,
+                    filter_tags=filter_tags,
+                )
+                if query:
+                    needle = query.lower()
+                    blocks = [b for b in blocks if b.value and needle in b.value.lower()]
+                return [b.to_pydantic() for b in blocks]
 
         results, _cursor = await search_provider.search(
             "block",

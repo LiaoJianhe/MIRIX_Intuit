@@ -686,10 +686,77 @@ class TestBlockManagerDelegation:
             assert len(out) == 1
 
     @pytest.mark.asyncio
-    async def test_search_blocks_returns_empty_when_no_search_provider(self):
+    async def test_search_blocks_falls_back_to_postgres_when_no_search_provider(self):
+        """With no search provider (PG-fallback / provider mode off), block search
+        reads from the relational store via Block.list_by_scopes, honouring
+        scope + filter_tags so block_filter_tags still work."""
+        pyd = MagicMock(spec=Block)
+        pyd.id = "block-c0ffee00"
+        orm_block = MagicMock()
+        orm_block.value = "pizza party at acme"
+        orm_block.to_pydantic = MagicMock(return_value=pyd)
+
+        mock_session = MagicMock()
+        mgr = _block_mgr()
+        mgr.session_maker = _session_maker_cm(mock_session)
+
+        with patch("mirix.database.search_provider.get_search_provider", return_value=None):
+            with patch(
+                "mirix.orm.block.Block.list_by_scopes",
+                new=AsyncMock(return_value=[orm_block]),
+            ) as mock_list:
+                out = await mgr.search_blocks(
+                    user_id=None,
+                    organization_id="org-1",
+                    query="pizza",
+                    scopes=["scope-a"],
+                    filter_tags={"account_ids": {"$contains": "acct-1999"}},
+                    limit=50,
+                )
+                mock_list.assert_awaited_once()
+                _, kwargs = mock_list.await_args
+                assert kwargs["organization_id"] == "org-1"
+                assert kwargs["user_id"] is None
+                assert kwargs["scopes"] == ["scope-a"]
+                assert kwargs["filter_tags"] == {"account_ids": {"$contains": "acct-1999"}}
+                assert len(out) == 1
+                assert out[0].id == "block-c0ffee00"
+
+    @pytest.mark.asyncio
+    async def test_search_blocks_fallback_query_filters_by_value_substring(self):
+        """In PG-fallback a non-empty query does a case-insensitive substring
+        filter on the block value (no BM25 ranking available)."""
+        match = MagicMock()
+        match.value = "PIZZA toppings"
+        match.to_pydantic = MagicMock(return_value=MagicMock(spec=Block))
+        miss = MagicMock()
+        miss.value = "sushi menu"
+        miss.to_pydantic = MagicMock(return_value=MagicMock(spec=Block))
+
+        mgr = _block_mgr()
+        mgr.session_maker = _session_maker_cm(MagicMock())
+        with patch("mirix.database.search_provider.get_search_provider", return_value=None):
+            with patch(
+                "mirix.orm.block.Block.list_by_scopes",
+                new=AsyncMock(return_value=[match, miss]),
+            ):
+                out = await mgr.search_blocks(
+                    user_id=None,
+                    organization_id="org-1",
+                    query="pizza",
+                    scopes=["scope-a"],
+                    limit=50,
+                )
+                assert len(out) == 1
+                match.to_pydantic.assert_called_once()
+                miss.to_pydantic.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_search_blocks_fallback_returns_empty_without_org(self):
+        """Fallback needs an organization_id; without one it returns []."""
         with patch("mirix.database.search_provider.get_search_provider", return_value=None):
             mgr = _block_mgr()
-            out = await mgr.search_blocks(user_id="user-1", organization_id="org-1")
+            out = await mgr.search_blocks(user_id="user-1", organization_id=None)
             assert out == []
 
 
