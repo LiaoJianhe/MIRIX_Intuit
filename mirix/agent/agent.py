@@ -364,9 +364,12 @@ class Agent(BaseAgent):
                         f"[Mirix.Agent.{self.agent_state.name}] INFO: Updated block {label} with value {updated_value} and user {self.user.id}"
                     )
 
-            # refresh memory from DB (using block ids)
+            # refresh memory from DB (using block ids), scoped to this save's
+            # scope so the reloaded set never pulls in another scope's blocks
+            # (mirrors step()/_retrieve_core; see VEPAGE-1474).
             blocks_result = await self.block_manager.get_blocks(
                 user=self.user,
+                any_scopes=self._block_scopes,
                 auto_create_from_default=False,  # Don't auto-create here, only in step()
             )
             self.blocks_in_memory = Memory(
@@ -2106,8 +2109,14 @@ class Agent(BaseAgent):
         async def _retrieve_core():
             if self.agent_state.is_type(AgentType.core_memory_agent) or "core" not in retrieved_memories:
                 async with timedspan("Retrieve core", metadata={"backend": "ipsr", "memory_type": "core"}):
+                    # Scope the core memory fed into the prompt to the current
+                    # save's scope. Without any_scopes this returns the user's
+                    # blocks across ALL scopes, leaking another scope's core
+                    # memory into this scope's LLM context (and thus into the
+                    # block written here). See VEPAGE-1474.
                     blocks_result = await self.block_manager.get_blocks(
                         user=self.user,
+                        any_scopes=self._block_scopes,
                         auto_create_from_default=False,  # Don't auto-create here, only in step()
                     )
                     current_persisted_memory = Memory(
