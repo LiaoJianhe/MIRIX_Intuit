@@ -332,9 +332,7 @@ class QueueWorker:
                     metadata={
                         "client_id": actor.id,
                         "memory_source_id": (
-                            message.memory_source_id
-                            if message.HasField("memory_source_id")
-                            else None
+                            message.memory_source_id if message.HasField("memory_source_id") else None
                         ),
                     },
                 )
@@ -342,13 +340,9 @@ class QueueWorker:
                     "Refused to process: client %s has no write_scope - "
                     "cannot create memories (memory_source_id=%s)",
                     actor.id,
-                    message.memory_source_id
-                    if message.HasField("memory_source_id")
-                    else None,
+                    message.memory_source_id if message.HasField("memory_source_id") else None,
                 )
-                raise ProviderPermanentError(
-                    f"Client {actor.id} has no write_scope - cannot create memories"
-                )
+                raise ProviderPermanentError(f"Client {actor.id} has no write_scope - cannot create memories")
             if filter_tags is None:
                 filter_tags = {}
             filter_tags["scope"] = actor.write_scope

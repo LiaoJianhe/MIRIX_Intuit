@@ -48,9 +48,7 @@ def _message(source_id: str | None) -> QueueMessage:
 @pytest.mark.asyncio
 async def test_core_reraises_on_failure(monkeypatch):
     """_process_message_async must propagate, not swallow, processing failures."""
-    actor = SimpleNamespace(
-        id="client-test", organization_id="org-test", write_scope="test-scope"
-    )
+    actor = SimpleNamespace(id="client-test", organization_id="org-test", write_scope="test-scope")
     server = Mock()
     server.client_manager = Mock(get_client_by_id=AsyncMock(return_value=actor))
     server.send_messages = AsyncMock(side_effect=RuntimeError("boom"))

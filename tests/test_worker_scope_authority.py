@@ -32,9 +32,7 @@ def _build_message(client_id="client-1", scope_on_message=None):
 def _make_worker(write_scope):
     """Worker whose client_manager returns a client with the given write_scope
     and whose send_messages is a no-op spy. Returns (worker, send_spy)."""
-    actor = SimpleNamespace(
-        id="client-1", organization_id="org-1", write_scope=write_scope
-    )
+    actor = SimpleNamespace(id="client-1", organization_id="org-1", write_scope=write_scope)
     user = SimpleNamespace(id="user-1", organization_id="org-1")
 
     server = MagicMock()
