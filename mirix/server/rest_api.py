@@ -2986,6 +2986,104 @@ async def _attach_citations_to_memories_dict(memories: dict) -> dict:
     return memories
 
 
+# Search-result projection helpers.
+#
+# Each derived memory type and the core block are projected to the API result
+# shape in exactly one place so every search path (single-user / all-users,
+# concurrent / sequential) returns the same fields — including filter_tags,
+# which the schema object carries and consumers filter on. Pass
+# include_user_id=True for the all-users/cross-user responses, which additionally
+# expose the owning user_id.
+
+
+def _project_episodic(x, include_user_id: bool = False) -> Dict[str, Any]:
+    out = {
+        "memory_type": "episodic",
+        "id": x.id,
+        "timestamp": (x.occurred_at.isoformat() if x.occurred_at else None),
+        "event_type": x.event_type,
+        "actor": x.actor,
+        "summary": x.summary,
+        "details": x.details,
+        "filter_tags": x.filter_tags,
+    }
+    if include_user_id:
+        out["user_id"] = str(x.user_id)
+    return out
+
+
+def _project_resource(x, include_user_id: bool = False) -> Dict[str, Any]:
+    out = {
+        "memory_type": "resource",
+        "id": x.id,
+        "resource_type": x.resource_type,
+        "title": x.title,
+        "summary": x.summary,
+        "content": x.content[:200] if x.content else None,
+        "filter_tags": x.filter_tags,
+    }
+    if include_user_id:
+        out["user_id"] = str(x.user_id)
+    return out
+
+
+def _project_procedural(x, include_user_id: bool = False) -> Dict[str, Any]:
+    out = {
+        "memory_type": "procedural",
+        "id": x.id,
+        "entry_type": x.entry_type,
+        "summary": x.summary,
+        "steps": x.steps,
+        "filter_tags": x.filter_tags,
+    }
+    if include_user_id:
+        out["user_id"] = str(x.user_id)
+    return out
+
+
+def _project_knowledge(x, include_user_id: bool = False) -> Dict[str, Any]:
+    out = {
+        "memory_type": "knowledge_vault",
+        "id": x.id,
+        "entry_type": x.entry_type,
+        "source": x.source,
+        "sensitivity": x.sensitivity,
+        "secret_value": x.secret_value,
+        "caption": x.caption,
+        "filter_tags": x.filter_tags,
+    }
+    if include_user_id:
+        out["user_id"] = str(x.user_id)
+    return out
+
+
+def _project_semantic(x, include_user_id: bool = False) -> Dict[str, Any]:
+    out = {
+        "memory_type": "semantic",
+        "id": x.id,
+        "name": x.name,
+        "summary": x.summary,
+        "details": x.details,
+        "source": x.source,
+        "filter_tags": x.filter_tags,
+    }
+    if include_user_id:
+        out["user_id"] = str(x.user_id)
+    return out
+
+
+def _project_core_block(block) -> Dict[str, Any]:
+    return {
+        "memory_type": "core",
+        "id": block.id,
+        "user_id": block.user_id,
+        "label": block.label,
+        "value": block.value,
+        "filter_tags": block.filter_tags,
+        "scope": (block.filter_tags or {}).get("scope", "default"),
+    }
+
+
 @router.get("/memory/search")
 @with_langfuse_tracing
 async def search_memory(
@@ -3205,18 +3303,7 @@ async def search_memory(
                     end_date=parsed_end_date,
                     similarity_threshold=similarity_threshold,
                 )
-                return [
-                    {
-                        "memory_type": "episodic",
-                        "id": x.id,
-                        "timestamp": (x.occurred_at.isoformat() if x.occurred_at else None),
-                        "event_type": x.event_type,
-                        "actor": x.actor,
-                        "summary": x.summary,
-                        "details": x.details,
-                    }
-                    for x in memories
-                ]
+                return [_project_episodic(x) for x in memories]
             except Exception as e:
                 logger.error("Error searching episodic memories: %s", e)
                 return []
@@ -3240,17 +3327,7 @@ async def search_memory(
                     scopes=scopes,
                     similarity_threshold=similarity_threshold,
                 )
-                return [
-                    {
-                        "memory_type": "resource",
-                        "id": x.id,
-                        "resource_type": x.resource_type,
-                        "title": x.title,
-                        "summary": x.summary,
-                        "content": x.content[:200] if x.content else None,
-                    }
-                    for x in memories
-                ]
+                return [_project_resource(x) for x in memories]
             except Exception as e:
                 logger.error("Error searching resource memories: %s", e)
                 return []
@@ -3270,16 +3347,7 @@ async def search_memory(
                     scopes=scopes,
                     similarity_threshold=similarity_threshold,
                 )
-                return [
-                    {
-                        "memory_type": "procedural",
-                        "id": x.id,
-                        "entry_type": x.entry_type,
-                        "summary": x.summary,
-                        "steps": x.steps,
-                    }
-                    for x in memories
-                ]
+                return [_project_procedural(x) for x in memories]
             except Exception as e:
                 logger.error("Error searching procedural memories: %s", e)
                 return []
@@ -3299,18 +3367,7 @@ async def search_memory(
                     scopes=scopes,
                     similarity_threshold=similarity_threshold,
                 )
-                return [
-                    {
-                        "memory_type": "knowledge_vault",
-                        "id": x.id,
-                        "entry_type": x.entry_type,
-                        "source": x.source,
-                        "sensitivity": x.sensitivity,
-                        "secret_value": x.secret_value,
-                        "caption": x.caption,
-                    }
-                    for x in memories
-                ]
+                return [_project_knowledge(x) for x in memories]
             except Exception as e:
                 logger.error("Error searching knowledge vault: %s", e)
                 return []
@@ -3330,15 +3387,7 @@ async def search_memory(
                     scopes=scopes,
                     similarity_threshold=similarity_threshold,
                 )
-                return [
-                    {
-                        "memory_type": "semantic",
-                        "id": x.id,
-                        "summary": x.summary,
-                        "details": x.details,
-                    }
-                    for x in memories
-                ]
+                return [_project_semantic(x) for x in memories]
             except Exception as e:
                 logger.error("Error searching semantic memories: %s", e)
                 return []
@@ -3358,17 +3407,7 @@ async def search_memory(
                     filter_tags=parsed_filter_tags,
                     limit=limit or 50,
                 )
-                return [
-                    {
-                        "memory_type": "core",
-                        "id": block.id,
-                        "user_id": block.user_id,
-                        "label": block.label,
-                        "value": block.value,
-                        "scope": (block.filter_tags or {}).get("scope", "default"),
-                    }
-                    for block in blocks
-                ]
+                return [_project_core_block(block) for block in blocks]
             except Exception as e:
                 logger.error("Error retrieving core memory blocks: %s", e, exc_info=True)
                 return []
@@ -3401,20 +3440,7 @@ async def search_memory(
                 end_date=parsed_end_date,
                 similarity_threshold=similarity_threshold,
             )
-            all_results.extend(
-                [
-                    {
-                        "memory_type": "episodic",
-                        "id": x.id,
-                        "timestamp": (x.occurred_at.isoformat() if x.occurred_at else None),
-                        "event_type": x.event_type,
-                        "actor": x.actor,
-                        "summary": x.summary,
-                        "details": x.details,
-                    }
-                    for x in episodic_memories
-                ]
-            )
+            all_results.extend([_project_episodic(x) for x in episodic_memories])
         except Exception as e:
             logger.error("Error searching episodic memories: %s", e)
 
@@ -3438,19 +3464,7 @@ async def search_memory(
                 scopes=scopes,
                 similarity_threshold=similarity_threshold,
             )
-            all_results.extend(
-                [
-                    {
-                        "memory_type": "resource",
-                        "id": x.id,
-                        "resource_type": x.resource_type,
-                        "title": x.title,
-                        "summary": x.summary,
-                        "content": (x.content[:200] if x.content else None),  # Truncate content for response
-                    }
-                    for x in resource_memories
-                ]
-            )
+            all_results.extend([_project_resource(x) for x in resource_memories])
         except Exception as e:
             logger.error("Error searching resource memories: %s", e)
 
@@ -3470,18 +3484,7 @@ async def search_memory(
                 scopes=scopes,
                 similarity_threshold=similarity_threshold,
             )
-            all_results.extend(
-                [
-                    {
-                        "memory_type": "procedural",
-                        "id": x.id,
-                        "entry_type": x.entry_type,
-                        "summary": x.summary,
-                        "steps": x.steps,
-                    }
-                    for x in procedural_memories
-                ]
-            )
+            all_results.extend([_project_procedural(x) for x in procedural_memories])
         except Exception as e:
             logger.error("Error searching procedural memories: %s", e)
 
@@ -3501,20 +3504,7 @@ async def search_memory(
                 scopes=scopes,
                 similarity_threshold=similarity_threshold,
             )
-            all_results.extend(
-                [
-                    {
-                        "memory_type": "knowledge_vault",
-                        "id": x.id,
-                        "entry_type": x.entry_type,
-                        "source": x.source,
-                        "sensitivity": x.sensitivity,
-                        "secret_value": x.secret_value,
-                        "caption": x.caption,
-                    }
-                    for x in knowledge_vault_memories
-                ]
-            )
+            all_results.extend([_project_knowledge(x) for x in knowledge_vault_memories])
         except Exception as e:
             logger.error("Error searching knowledge vault: %s", e)
 
@@ -3534,19 +3524,7 @@ async def search_memory(
                 scopes=scopes,
                 similarity_threshold=similarity_threshold,
             )
-            all_results.extend(
-                [
-                    {
-                        "memory_type": "semantic",
-                        "id": x.id,
-                        "name": x.name,
-                        "summary": x.summary,
-                        "details": x.details,
-                        "source": x.source,
-                    }
-                    for x in semantic_memories
-                ]
-            )
+            all_results.extend([_project_semantic(x) for x in semantic_memories])
         except Exception as e:
             logger.error("Error searching semantic memories: %s", e)
 
@@ -3566,16 +3544,7 @@ async def search_memory(
                 limit=limit or 50,
             )
             for block in blocks:
-                all_results.append(
-                    {
-                        "memory_type": "core",
-                        "id": block.id,
-                        "user_id": block.user_id,
-                        "label": block.label,
-                        "value": block.value,
-                        "scope": (block.filter_tags or {}).get("scope", "default"),
-                    }
-                )
+                all_results.append(_project_core_block(block))
         except Exception as e:
             logger.error("Error retrieving core memory blocks for single-user search: %s", e, exc_info=True)
 
@@ -3786,19 +3755,7 @@ async def search_memory_all_users(
                     end_date=parsed_end_date,
                     similarity_threshold=similarity_threshold,
                 )
-                return [
-                    {
-                        "memory_type": "episodic",
-                        "id": x.id,
-                        "timestamp": (x.occurred_at.isoformat() if x.occurred_at else None),
-                        "event_type": x.event_type,
-                        "actor": x.actor,
-                        "summary": x.summary,
-                        "details": x.details,
-                        "user_id": str(x.user_id),
-                    }
-                    for x in memories
-                ]
+                return [_project_episodic(x, include_user_id=True) for x in memories]
             except Exception as e:
                 logger.error("Error searching episodic memories across org: %s", e)
                 return []
@@ -3822,18 +3779,7 @@ async def search_memory_all_users(
                     scopes=scopes,
                     similarity_threshold=similarity_threshold,
                 )
-                return [
-                    {
-                        "memory_type": "resource",
-                        "id": x.id,
-                        "resource_type": x.resource_type,
-                        "title": x.title,
-                        "summary": x.summary,
-                        "content": x.content[:200] if x.content else None,
-                        "user_id": str(x.user_id),
-                    }
-                    for x in memories
-                ]
+                return [_project_resource(x, include_user_id=True) for x in memories]
             except Exception as e:
                 logger.error("Error searching resource memories across org: %s", e)
                 return []
@@ -3853,17 +3799,7 @@ async def search_memory_all_users(
                     scopes=scopes,
                     similarity_threshold=similarity_threshold,
                 )
-                return [
-                    {
-                        "memory_type": "procedural",
-                        "id": x.id,
-                        "entry_type": x.entry_type,
-                        "summary": x.summary,
-                        "steps": x.steps,
-                        "user_id": str(x.user_id),
-                    }
-                    for x in memories
-                ]
+                return [_project_procedural(x, include_user_id=True) for x in memories]
             except Exception as e:
                 logger.error("Error searching procedural memories across org: %s", e)
                 return []
@@ -3883,19 +3819,7 @@ async def search_memory_all_users(
                     scopes=scopes,
                     similarity_threshold=similarity_threshold,
                 )
-                return [
-                    {
-                        "memory_type": "knowledge_vault",
-                        "id": x.id,
-                        "entry_type": x.entry_type,
-                        "source": x.source,
-                        "sensitivity": x.sensitivity,
-                        "secret_value": x.secret_value,
-                        "caption": x.caption,
-                        "user_id": str(x.user_id),
-                    }
-                    for x in memories
-                ]
+                return [_project_knowledge(x, include_user_id=True) for x in memories]
             except Exception as e:
                 logger.error("Error searching knowledge vault across org: %s", e)
                 return []
@@ -3915,16 +3839,7 @@ async def search_memory_all_users(
                     scopes=scopes,
                     similarity_threshold=similarity_threshold,
                 )
-                return [
-                    {
-                        "memory_type": "semantic",
-                        "id": x.id,
-                        "summary": x.summary,
-                        "details": x.details,
-                        "user_id": str(x.user_id),
-                    }
-                    for x in memories
-                ]
+                return [_project_semantic(x, include_user_id=True) for x in memories]
             except Exception as e:
                 logger.error("Error searching semantic memories across org: %s", e)
                 return []
@@ -3960,21 +3875,7 @@ async def search_memory_all_users(
                 end_date=parsed_end_date,
                 similarity_threshold=similarity_threshold,
             )
-            all_results.extend(
-                [
-                    {
-                        "memory_type": "episodic",
-                        "user_id": x.user_id,
-                        "id": x.id,
-                        "timestamp": (x.occurred_at.isoformat() if x.occurred_at else None),
-                        "event_type": x.event_type,
-                        "actor": x.actor,
-                        "summary": x.summary,
-                        "details": x.details,
-                    }
-                    for x in episodic_memories
-                ]
-            )
+            all_results.extend([_project_episodic(x, include_user_id=True) for x in episodic_memories])
         except Exception as e:
             logger.error("Error searching episodic memories across organization: %s", e)
 
@@ -3998,20 +3899,7 @@ async def search_memory_all_users(
                 scopes=scopes,
                 similarity_threshold=similarity_threshold,
             )
-            all_results.extend(
-                [
-                    {
-                        "memory_type": "resource",
-                        "user_id": x.user_id,
-                        "id": x.id,
-                        "resource_type": x.resource_type,
-                        "title": x.title,
-                        "summary": x.summary,
-                        "content": x.content[:200] if x.content else None,
-                    }
-                    for x in resource_memories
-                ]
-            )
+            all_results.extend([_project_resource(x, include_user_id=True) for x in resource_memories])
         except Exception as e:
             logger.error("Error searching resource memories across organization: %s", e)
 
@@ -4031,19 +3919,7 @@ async def search_memory_all_users(
                 scopes=scopes,
                 similarity_threshold=similarity_threshold,
             )
-            all_results.extend(
-                [
-                    {
-                        "memory_type": "procedural",
-                        "user_id": x.user_id,
-                        "id": x.id,
-                        "entry_type": x.entry_type,
-                        "summary": x.summary,
-                        "steps": x.steps,
-                    }
-                    for x in procedural_memories
-                ]
-            )
+            all_results.extend([_project_procedural(x, include_user_id=True) for x in procedural_memories])
         except Exception as e:
             logger.error("Error searching procedural memories across organization: %s", e)
 
@@ -4063,21 +3939,7 @@ async def search_memory_all_users(
                 scopes=scopes,
                 similarity_threshold=similarity_threshold,
             )
-            all_results.extend(
-                [
-                    {
-                        "memory_type": "knowledge_vault",
-                        "user_id": x.user_id,
-                        "id": x.id,
-                        "entry_type": x.entry_type,
-                        "source": x.source,
-                        "sensitivity": x.sensitivity,
-                        "secret_value": x.secret_value,
-                        "caption": x.caption,
-                    }
-                    for x in knowledge_vault_memories
-                ]
-            )
+            all_results.extend([_project_knowledge(x, include_user_id=True) for x in knowledge_vault_memories])
         except Exception as e:
             logger.error("Error searching knowledge vault across organization: %s", e)
 
@@ -4097,20 +3959,7 @@ async def search_memory_all_users(
                 scopes=scopes,
                 similarity_threshold=similarity_threshold,
             )
-            all_results.extend(
-                [
-                    {
-                        "memory_type": "semantic",
-                        "user_id": x.user_id,
-                        "id": x.id,
-                        "name": x.name,
-                        "summary": x.summary,
-                        "details": x.details,
-                        "source": x.source,
-                    }
-                    for x in semantic_memories
-                ]
-            )
+            all_results.extend([_project_semantic(x, include_user_id=True) for x in semantic_memories])
         except Exception as e:
             logger.error("Error searching semantic memories across organization: %s", e)
 
@@ -4144,16 +3993,7 @@ async def search_memory_all_users(
                 block_filter_tags_parsed,
             )
             for block in blocks:
-                all_results.append(
-                    {
-                        "memory_type": "core",
-                        "id": block.id,
-                        "user_id": block.user_id,
-                        "label": block.label,
-                        "value": block.value,
-                        "scope": (block.filter_tags or {}).get("scope", "default"),
-                    }
-                )
+                all_results.append(_project_core_block(block))
         except HTTPException:
             raise
         except Exception as e:
