@@ -100,6 +100,38 @@ class TestSearchProviderRegistry:
         assert reg is not get_registered_search_providers()
 
 
+class TestPrecomputeEmbeddingProviderMode:
+    """In provider mode the search index auto-embeds the query, so Mirix must
+    NOT precompute a query embedding (wasted embedding-model call per search)."""
+
+    @pytest.mark.asyncio
+    async def test_skips_embedding_when_search_provider_registered(self):
+        from mirix.server.rest_api import _precompute_embedding_for_search
+
+        register_search_provider("ips_search", object())
+
+        # agent_state is irrelevant in provider mode — the guard returns before
+        # touching it, so a sentinel that would explode if used proves the
+        # embedding model is never invoked.
+        class _Boom:
+            @property
+            def embedding_config(self):  # pragma: no cover - must not run
+                raise AssertionError("embedding must not be computed in provider mode")
+
+        emb, padded = await _precompute_embedding_for_search("embedding", "some query", _Boom())
+        assert emb is None
+        assert padded is None
+
+    @pytest.mark.asyncio
+    async def test_non_embedding_method_short_circuits(self):
+        from mirix.server.rest_api import _precompute_embedding_for_search
+
+        # No provider, but bm25 still returns (None, None) without embedding.
+        emb, padded = await _precompute_embedding_for_search("bm25", "some query", object())
+        assert emb is None
+        assert padded is None
+
+
 class TestRegistryLastWins:
     def test_multiple_relational_only_last_active(self):
         p1, p2 = object(), object()
