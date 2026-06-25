@@ -2857,6 +2857,16 @@ async def _precompute_embedding_for_search(
     if search_method != "embedding" or not query:
         return None, None
 
+    # Provider mode: embeddings are owned by the search index, not Mirix. The
+    # registered search provider (e.g. IPS Search) auto-embeds the query at read
+    # time via its ML connector and ignores any vector we pass, so computing one
+    # here is a wasted embedding-model call per search. This mirrors the write
+    # path, where every memory manager's provider branch likewise never embeds.
+    from mirix.database.search_provider import get_search_provider
+
+    if get_search_provider() is not None:
+        return None, None
+
     import numpy as np
 
     from mirix.constants import MAX_EMBEDDING_DIM
