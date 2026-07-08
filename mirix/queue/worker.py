@@ -61,6 +61,7 @@ from mirix.queue.batch import process_batch
 from mirix.queue.error_policy import dispatch_save
 from mirix.queue.message_pb2 import QueueMessage
 from mirix.services.user_manager import UserManager
+from mirix.utils import flatten_messages_for_agent
 
 if TYPE_CHECKING:
     from mirix.schemas.client import Client
@@ -240,9 +241,9 @@ class QueueWorker:
 
             if server is None:
                 logger.warning(
-                    "No server available - skipping message: agent_id=%s, input_messages_count=%s",
+                    "No server available - skipping message: agent_id=%s, message_count=%s",
                     message.agent_id,
-                    len(message.input_messages),
+                    len(message.messages) or len(message.input_messages),
                 )
                 return
 
@@ -254,16 +255,45 @@ class QueueWorker:
 
             client_id = message.client_id if message.client_id else None
             if not client_id:
-                raise ValueError(f"Queue message for agent {message.agent_id} missing required client_id")
+                from mirix.errors import ProviderPermanentError
 
-            input_messages = [self._convert_proto_message_to_pydantic(msg) for msg in message.input_messages]
+                # Missing client_id is a deterministic producer bug (never
+                # resolvable by retrying), so raise Permanent — same reasoning
+                # as the no-write-scope refusal below — rather than a bare
+                # ValueError, which error_policy.classify() would default to
+                # Transient and burn a full retry cycle before dead-lettering.
+                raise ProviderPermanentError(f"Queue message for agent {message.agent_id} missing required client_id")
+
+            # Prefer the unified `messages` field (single per-turn wire copy,
+            # see message.proto). The worker derives BOTH the packed
+            # agent-input and the source_messages provenance records from it.
+            # Falls back to the legacy input_messages (already packed) +
+            # source_messages (original per-turn) pair for producers that
+            # haven't migrated / messages already in flight during rollout.
+            if message.messages:
+                source_message_dicts = [self._convert_proto_source_message_to_dict(msg) for msg in message.messages]
+                input_messages = flatten_messages_for_agent(source_message_dicts)
+            else:
+                input_messages = [self._convert_proto_message_to_pydantic(msg) for msg in message.input_messages]
+                source_message_dicts = (
+                    [self._convert_proto_source_message_to_dict(msg) for msg in message.source_messages]
+                    if message.source_messages
+                    else None
+                )
+
             chaining = message.chaining if message.HasField("chaining") else True
             user_id = message.user_id if message.HasField("user_id") else None
 
             async def _resolve_actor_and_user():
                 actor = await server.client_manager.get_client_by_id(client_id)
                 if not actor:
-                    raise ValueError(f"Client with id={client_id} not found in database")
+                    from mirix.errors import ProviderPermanentError
+
+                    # A client_id that doesn't resolve is deterministic
+                    # (retrying the same lookup won't make the row appear) —
+                    # raise Permanent so this dead-letters immediately instead
+                    # of defaulting to Transient and burning a retry cycle.
+                    raise ProviderPermanentError(f"Client with id={client_id} not found in database")
 
                 user_manager = UserManager()
                 if user_id:
@@ -393,15 +423,12 @@ class QueueWorker:
             summary = message.summary if hasattr(message, "summary") and message.HasField("summary") else None
             summarize = message.summarize if hasattr(message, "summarize") and message.HasField("summarize") else False
 
-            # Extract original per-turn messages for source_message persistence.
-            #
-            # These are converted to plain dicts (not Pydantic MessageCreate) because
-            # MessageCreate.role is Literal["user", "system"] and can't hold "assistant".
-            # The dicts go straight to _persist_memory_source() → normalize_message()
-            # which accepts dicts with string roles.
-            source_messages = None
-            if hasattr(message, "source_messages") and message.source_messages:
-                source_messages = [self._convert_proto_source_message_to_dict(msg) for msg in message.source_messages]
+            # source_message_dicts was already derived up front (from the unified
+            # `messages` field, or the legacy source_messages field as a fallback)
+            # alongside input_messages — see the comment there. These dicts go
+            # straight to _persist_memory_source() → normalize_message(), which
+            # accepts dicts with any string role (including "assistant", which
+            # Pydantic MessageCreate.role can't hold).
 
             # Extract direct_writes — each entry tells the meta-agent to call
             # the registered handler for memory_type instead of dispatching
@@ -451,7 +478,7 @@ class QueueWorker:
                     source_metadata=source_metadata,
                     summary=summary,
                     summarize=summarize,
-                    source_messages=source_messages,
+                    source_messages=source_message_dicts,
                     direct_writes=direct_writes,
                 )
 

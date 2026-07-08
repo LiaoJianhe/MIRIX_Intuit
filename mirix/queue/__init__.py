@@ -27,6 +27,7 @@ The queue should be initialized when the REST API starts (in lifespan event).
 """
 
 import logging
+from typing import Optional
 
 from mirix.queue.manager import get_manager
 from mirix.queue.message_pb2 import QueueMessage
@@ -99,9 +100,29 @@ async def process_external_message(raw_message: bytes) -> None:
 
     from mirix.queue.config import KAFKA_SERIALIZATION_FORMAT
     from mirix.queue.error_policy import dispatch_save
-    from mirix.queue.queue_util import deserialize_queue_message
+    from mirix.queue.queue_util import (
+        deserialize_queue_message,
+        normalize_and_validate_incoming_message,
+    )
 
     queue_message = deserialize_queue_message(raw_message, format=KAFKA_SERIALIZATION_FORMAT)
+
+    # Backfill memory_source_id/tid and normalize+validate filter_tags — the
+    # work that used to exist ONLY at the ECMS HTTP layer, unreachable by a
+    # message produced straight onto the Kafka topic. ID/tid backfill always
+    # runs (even on a validation failure below), so dispatch_save's
+    # classify/finalize/log path below has a real id to work with either way.
+    normalization_error: Optional[Exception] = None
+    try:
+        normalize_and_validate_incoming_message(queue_message)
+    except ValueError as e:
+        normalization_error = e
+        logger.error(
+            "Rejecting malformed queue message: agent_id=%s, memory_source_id=%s: %s",
+            queue_message.agent_id,
+            queue_message.memory_source_id if queue_message.HasField("memory_source_id") else None,
+            e,
+        )
 
     memory_source_id = queue_message.memory_source_id if queue_message.HasField("memory_source_id") else None
 
@@ -114,6 +135,14 @@ async def process_external_message(raw_message: bytes) -> None:
     )
 
     async def _run_step() -> None:
+        if normalization_error is not None:
+            # Raised HERE (inside the dispatch_save-wrapped step) rather than
+            # before it, so a deterministically-malformed message still goes
+            # through classify() -> PERMANENT -> finalize_source, and Numaflow
+            # acks it instead of redelivering it forever.
+            from mirix.errors import ProviderPermanentError
+
+            raise ProviderPermanentError(f"Malformed queue message: {normalization_error}") from normalization_error
         await worker.process_external_message(queue_message)
 
     await dispatch_save(_run_step, memory_source_id=memory_source_id)
