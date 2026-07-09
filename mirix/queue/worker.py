@@ -255,14 +255,26 @@ class QueueWorker:
 
             client_id = message.client_id if message.client_id else None
             if not client_id:
-                from mirix.errors import ProviderPermanentError
+                from mirix.errors import QueueMessageRejectedError
+                from mirix.observability.skip_spans import emit_refused_to_process_span
 
                 # Missing client_id is a deterministic producer bug (never
-                # resolvable by retrying), so raise Permanent — same reasoning
-                # as the no-write-scope refusal below — rather than a bare
-                # ValueError, which error_policy.classify() would default to
-                # Transient and burn a full retry cycle before dead-lettering.
-                raise ProviderPermanentError(f"Queue message for agent {message.agent_id} missing required client_id")
+                # resolvable by retrying) — refuse and dead-letter, same
+                # pattern as the no-write-scope refusal below, rather than a
+                # bare ValueError which error_policy.classify() would default
+                # to Transient and burn a full retry cycle first.
+                emit_refused_to_process_span(
+                    reason="missing-client-id",
+                    metadata={
+                        "agent_id": message.agent_id,
+                        "memory_source_id": (
+                            message.memory_source_id if message.HasField("memory_source_id") else None
+                        ),
+                    },
+                )
+                raise QueueMessageRejectedError(
+                    f"Queue message for agent {message.agent_id} missing required client_id"
+                )
 
             # Prefer the unified `messages` field (single per-turn wire copy,
             # see message.proto). The worker derives BOTH the packed
@@ -287,13 +299,23 @@ class QueueWorker:
             async def _resolve_actor_and_user():
                 actor = await server.client_manager.get_client_by_id(client_id)
                 if not actor:
-                    from mirix.errors import ProviderPermanentError
+                    from mirix.errors import QueueMessageRejectedError
+                    from mirix.observability.skip_spans import emit_refused_to_process_span
 
                     # A client_id that doesn't resolve is deterministic
                     # (retrying the same lookup won't make the row appear) —
-                    # raise Permanent so this dead-letters immediately instead
-                    # of defaulting to Transient and burning a retry cycle.
-                    raise ProviderPermanentError(f"Client with id={client_id} not found in database")
+                    # refuse and dead-letter immediately instead of defaulting
+                    # to Transient and burning a retry cycle.
+                    emit_refused_to_process_span(
+                        reason="client-not-found",
+                        metadata={
+                            "client_id": client_id,
+                            "memory_source_id": (
+                                message.memory_source_id if message.HasField("memory_source_id") else None
+                            ),
+                        },
+                    )
+                    raise QueueMessageRejectedError(f"Client with id={client_id} not found in database")
 
                 user_manager = UserManager()
                 if user_id:

@@ -140,9 +140,26 @@ async def process_external_message(raw_message: bytes) -> None:
             # before it, so a deterministically-malformed message still goes
             # through classify() -> PERMANENT -> finalize_source, and Numaflow
             # acks it instead of redelivering it forever.
-            from mirix.errors import ProviderPermanentError
+            from mirix.errors import QueueMessageRejectedError
+            from mirix.observability import restore_trace_from_queue_message
+            from mirix.observability.skip_spans import emit_refused_to_process_span
 
-            raise ProviderPermanentError(f"Malformed queue message: {normalization_error}") from normalization_error
+            # The worker (which normally restores trace context) never runs on
+            # this path, so restore it here first — otherwise the refusal span
+            # can't attach to the message's trace. dispatch_save clears the
+            # context after finalize, same as the normal path.
+            restore_trace_from_queue_message(queue_message)
+            emit_refused_to_process_span(
+                reason="malformed-message",
+                metadata={
+                    "agent_id": queue_message.agent_id,
+                    "memory_source_id": (
+                        queue_message.memory_source_id if queue_message.HasField("memory_source_id") else None
+                    ),
+                    "error": str(normalization_error),
+                },
+            )
+            raise QueueMessageRejectedError(f"Malformed queue message: {normalization_error}") from normalization_error
         await worker.process_external_message(queue_message)
 
     await dispatch_save(_run_step, memory_source_id=memory_source_id)

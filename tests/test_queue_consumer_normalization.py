@@ -122,6 +122,12 @@ async def test_malformed_message_finalizes_permanent_and_does_not_raise(monkeypa
         fake_source_manager_cls,
     )
 
+    refusal_span = Mock()
+    monkeypatch.setattr(
+        "mirix.observability.skip_spans.emit_refused_to_process_span",
+        refusal_span,
+    )
+
     await process_external_message(b"ignored-by-stub-deserializer")
 
     # The agent step never ran, and the (backfilled) source id was finalized
@@ -131,6 +137,10 @@ async def test_malformed_message_finalizes_permanent_and_does_not_raise(monkeypa
     source_id, outcome = finalize.await_args.args
     assert source_id.startswith("src-")
     assert outcome == SaveOutcome.PERMANENT_FAILURE
+
+    # The refusal is made visible in Langfuse, same pattern as no-write-scope.
+    refusal_span.assert_called_once()
+    assert refusal_span.call_args.kwargs["reason"] == "malformed-message"
 
 
 @pytest.mark.asyncio
