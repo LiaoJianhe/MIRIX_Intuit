@@ -441,7 +441,7 @@ class QueueWorker:
             # raise a permanent error to dead-letter the message rather than burning
             # transient retries.
             if actor.write_scope is None:
-                from mirix.errors import ProviderPermanentError
+                from mirix.errors import QueueMessageRejectedError
                 from mirix.observability.skip_spans import (
                     emit_refused_to_process_span,
                 )
@@ -464,7 +464,7 @@ class QueueWorker:
                     actor.id,
                     message.memory_source_id if message.HasField("memory_source_id") else None,
                 )
-                raise ProviderPermanentError(f"Client {actor.id} has no write_scope - cannot create memories")
+                raise QueueMessageRejectedError(f"Client {actor.id} has no write_scope - cannot create memories")
             if filter_tags is None:
                 filter_tags = {}
             filter_tags["scope"] = actor.write_scope
