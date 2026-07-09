@@ -3,9 +3,12 @@ Background worker that consumes messages from the queue.
 Runs as an asyncio.Task in the main event loop (async-native).
 
 Save dispatch is unified across all 3 run modes (numaflow / kafka /
-in-memory) via `error_policy.dispatch_save`. Each mode does the same
-thing: receive a message, run the save under process_with_policy, route
-the verdict through the single finalize chokepoint.
+in-memory) via `dispatch_incoming_message` (this file) →
+`error_policy.dispatch_save`. Each mode does the same thing: receive a
+message, normalize/validate it (filter_tags shape, memory_source_id/tid
+backfill, malformed → permanent refusal), run the save under
+process_with_policy, route the verdict through the single finalize
+chokepoint.
 
 * numaflow (external) — process_external_message in queue/__init__.py.
 * internal kafka manual / in-memory sim — this file's BatchQueueWorker.
@@ -95,6 +98,68 @@ def reconcile_user_org_to_actor(user, actor):
     if not actor_org or user.organization_id == actor_org:
         return user
     return user.model_copy(update={"organization_id": actor_org})
+
+
+async def dispatch_incoming_message(worker: "QueueWorker", message: QueueMessage) -> None:
+    """Shared consume-side entry for ALL THREE run modes (numaflow-external,
+    internal kafka manual, in-memory sim).
+
+    Normalizes/validates the incoming message (filter_tags/block_filter_tags
+    canonicalization, memory_source_id + tid backfill — the work that used to
+    exist only at the ECMS HTTP layer) and then runs it under the
+    `dispatch_save` chokepoint. A message that fails validation is refused:
+    a refused-to-process Langfuse span is emitted and a
+    `QueueMessageRejectedError` (classified PERMANENT) dead-letters it via the
+    same finalize path as any other permanent failure.
+
+    Living here (not in the external consumer) is the point: the internal
+    kafka-manual worker consumes the SAME topic a direct producer writes to,
+    so the normalization contract must hold regardless of which consumer
+    topology is deployed.
+    """
+    from mirix.queue.queue_util import normalize_and_validate_incoming_message
+
+    normalization_error: Optional[ValueError] = None
+    try:
+        normalize_and_validate_incoming_message(message)
+    except ValueError as e:
+        normalization_error = e
+        logger.error(
+            "Rejecting malformed queue message: agent_id=%s, memory_source_id=%s: %s",
+            message.agent_id,
+            message.memory_source_id if message.HasField("memory_source_id") else None,
+            e,
+        )
+
+    memory_source_id = message.memory_source_id if message.HasField("memory_source_id") else None
+
+    async def _run_step() -> None:
+        if normalization_error is not None:
+            # Raised HERE (inside the dispatch_save-wrapped step) rather than
+            # before it, so a deterministically-malformed message still goes
+            # through classify() -> PERMANENT -> finalize_source, and the
+            # consumer acks it instead of redelivering it forever.
+            from mirix.errors import QueueMessageRejectedError
+            from mirix.observability import restore_trace_from_queue_message
+            from mirix.observability.skip_spans import emit_refused_to_process_span
+
+            # The per-message processing (which normally restores trace
+            # context) never runs on this path, so restore it here first —
+            # otherwise the refusal span can't attach to the message's trace.
+            # dispatch_save clears the context after finalize, as usual.
+            restore_trace_from_queue_message(message)
+            emit_refused_to_process_span(
+                reason="malformed-message",
+                metadata={
+                    "agent_id": message.agent_id,
+                    "memory_source_id": (message.memory_source_id if message.HasField("memory_source_id") else None),
+                    "error": str(normalization_error),
+                },
+            )
+            raise QueueMessageRejectedError(f"Malformed queue message: {normalization_error}") from normalization_error
+        await worker.process_external_message(message)
+
+    await dispatch_save(_run_step, memory_source_id=memory_source_id)
 
 
 class QueueWorker:
@@ -218,13 +283,18 @@ class QueueWorker:
 
     async def process_external_message(self, message: QueueMessage) -> None:
         """
-        Process a message that was consumed by an external Kafka consumer.
+        Process one already-deserialized QueueMessage.
+
+        Named for its original (Numaflow/external-consumer) call site, but it
+        is the per-message processing entry for every run mode — the shared
+        `dispatch_incoming_message` funnel calls it for external, internal
+        kafka manual, and in-memory messages alike.
 
         Args:
-            message: QueueMessage protobuf already consumed from Kafka
+            message: QueueMessage protobuf already consumed from the transport
         """
         logger.debug(
-            "Processing externally consumed message: agent_id=%s, user_id=%s",
+            "Processing consumed message: agent_id=%s, user_id=%s",
             message.agent_id,
             message.user_id if message.HasField("user_id") else "None",
         )
@@ -714,16 +784,11 @@ class BatchQueueWorker(QueueWorker):
         )
 
         async def _process(message: QueueMessage) -> None:
-            # SAME per-message chokepoint the serial loop used: run the agent
-            # step under dispatch_save (classify + bounded retry + single
-            # finalize). memory_source_id is extracted per message exactly as
-            # before.
-            source_id = message.memory_source_id if message.HasField("memory_source_id") else None
-
-            async def _run() -> None:
-                await self._process_message_async(message)
-
-            await dispatch_save(_run, memory_source_id=source_id)
+            # SAME funnel as the external consumer: normalize/validate, then
+            # run the agent step under dispatch_save (classify + bounded retry
+            # + single finalize). See dispatch_incoming_message for why the
+            # internal paths must normalize too.
+            await dispatch_incoming_message(self, message)
 
         await process_batch(
             batch,

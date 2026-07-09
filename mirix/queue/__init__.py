@@ -27,7 +27,6 @@ The queue should be initialized when the REST API starts (in lifespan event).
 """
 
 import logging
-from typing import Optional
 
 from mirix.queue.manager import get_manager
 from mirix.queue.message_pb2 import QueueMessage
@@ -99,70 +98,24 @@ async def process_external_message(raw_message: bytes) -> None:
     worker = workers[0]
 
     from mirix.queue.config import KAFKA_SERIALIZATION_FORMAT
-    from mirix.queue.error_policy import dispatch_save
-    from mirix.queue.queue_util import (
-        deserialize_queue_message,
-        normalize_and_validate_incoming_message,
-    )
+    from mirix.queue.queue_util import deserialize_queue_message
+    from mirix.queue.worker import dispatch_incoming_message
 
     queue_message = deserialize_queue_message(raw_message, format=KAFKA_SERIALIZATION_FORMAT)
-
-    # Backfill memory_source_id/tid and normalize+validate filter_tags — the
-    # work that used to exist ONLY at the ECMS HTTP layer, unreachable by a
-    # message produced straight onto the Kafka topic. ID/tid backfill always
-    # runs (even on a validation failure below), so dispatch_save's
-    # classify/finalize/log path below has a real id to work with either way.
-    normalization_error: Optional[Exception] = None
-    try:
-        normalize_and_validate_incoming_message(queue_message)
-    except ValueError as e:
-        normalization_error = e
-        logger.error(
-            "Rejecting malformed queue message: agent_id=%s, memory_source_id=%s: %s",
-            queue_message.agent_id,
-            queue_message.memory_source_id if queue_message.HasField("memory_source_id") else None,
-            e,
-        )
-
-    memory_source_id = queue_message.memory_source_id if queue_message.HasField("memory_source_id") else None
 
     logger.debug(
         "Processing external message (%s format): agent_id=%s, user_id=%s, memory_source_id=%s",
         KAFKA_SERIALIZATION_FORMAT,
         queue_message.agent_id,
         queue_message.user_id if queue_message.HasField("user_id") else "None",
-        memory_source_id,
+        queue_message.memory_source_id if queue_message.HasField("memory_source_id") else None,
     )
 
-    async def _run_step() -> None:
-        if normalization_error is not None:
-            # Raised HERE (inside the dispatch_save-wrapped step) rather than
-            # before it, so a deterministically-malformed message still goes
-            # through classify() -> PERMANENT -> finalize_source, and Numaflow
-            # acks it instead of redelivering it forever.
-            from mirix.errors import QueueMessageRejectedError
-            from mirix.observability import restore_trace_from_queue_message
-            from mirix.observability.skip_spans import emit_refused_to_process_span
-
-            # The worker (which normally restores trace context) never runs on
-            # this path, so restore it here first — otherwise the refusal span
-            # can't attach to the message's trace. dispatch_save clears the
-            # context after finalize, same as the normal path.
-            restore_trace_from_queue_message(queue_message)
-            emit_refused_to_process_span(
-                reason="malformed-message",
-                metadata={
-                    "agent_id": queue_message.agent_id,
-                    "memory_source_id": (
-                        queue_message.memory_source_id if queue_message.HasField("memory_source_id") else None
-                    ),
-                    "error": str(normalization_error),
-                },
-            )
-            raise QueueMessageRejectedError(f"Malformed queue message: {normalization_error}") from normalization_error
-        await worker.process_external_message(queue_message)
-
-    await dispatch_save(_run_step, memory_source_id=memory_source_id)
+    # Normalize/validate + dispatch through the shared funnel — the same one
+    # the internal kafka-manual and in-memory consumers use, so the
+    # producer-facing contract (filter_tags shape, id/tid backfill,
+    # malformed-message dead-letter) holds identically in every run mode.
+    await dispatch_incoming_message(worker, queue_message)
 
 
 __all__ = ["initialize_queue", "save", "process_external_message", "QueueMessage"]

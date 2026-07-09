@@ -882,7 +882,10 @@ class TestQueueIntegration:
 
         assert mock_server.send_messages.call_count >= 1
         call_args = mock_server.send_messages.call_args
-        assert call_args.kwargs.get("block_filter_tags") == block_filter_tags
+        # The consume-side funnel canonicalizes tag values to lists (same
+        # shape ECMS's request validator produces), so scalars arrive at the
+        # agent as single-element lists.
+        assert call_args.kwargs.get("block_filter_tags") == {"env": ["staging"], "team": ["platform"]}
 
         await manager.cleanup()
 

@@ -210,6 +210,110 @@ async def test_worker_unified_messages_field_flattens_and_persists_per_turn():
 
 
 @pytest.mark.asyncio
+async def test_batch_worker_path_normalizes_and_rejects_like_external(monkeypatch):
+    """The internal consumer (BatchQueueWorker: kafka-manual / in-memory modes)
+    goes through the SAME dispatch funnel as the external Numaflow path — a
+    malformed message is refused, span-marked, and finalized PERMANENT there
+    too, not just on the external path."""
+    from mirix.queue.error_policy import SaveOutcome
+    from mirix.queue.worker import BatchQueueWorker
+
+    msg = QueueMessage()
+    msg.client_id = "client-1"
+    msg.agent_id = "agent-1"
+    msg.user_id = "user-1"
+    msg.filter_tags.update({"bad": {"nested": "dict"}})
+
+    finalize = AsyncMock()
+    fake_source_manager_cls = Mock(return_value=Mock(finalize_source=finalize))
+    monkeypatch.setattr(
+        "mirix.services.memory_source_manager.MemorySourceManager",
+        fake_source_manager_cls,
+    )
+    refusal_span = Mock()
+    monkeypatch.setattr(
+        "mirix.observability.skip_spans.emit_refused_to_process_span",
+        refusal_span,
+    )
+
+    worker = BatchQueueWorker.__new__(BatchQueueWorker)
+    worker._server = MagicMock()
+    worker._partition_id = None
+    worker.process_external_message = AsyncMock()
+
+    # Drive the per-message chokepoint BatchQueueWorker._run_one_iteration uses.
+    from mirix.queue.worker import dispatch_incoming_message
+
+    await dispatch_incoming_message(worker, msg)
+
+    worker.process_external_message.assert_not_awaited()
+    finalize.assert_awaited_once()
+    source_id, outcome = finalize.await_args.args
+    assert source_id.startswith("src-")
+    assert outcome == SaveOutcome.PERMANENT_FAILURE
+    refusal_span.assert_called_once()
+    assert refusal_span.call_args.kwargs["reason"] == "malformed-message"
+
+
+@pytest.mark.asyncio
+async def test_internal_path_normalizes_filter_tags_before_agent():
+    """A message consumed on the internal path (in-memory / kafka-manual) gets
+    the same filter_tags canonicalization as the external path: scalars arrive
+    at the agent as single-element lists (with worker-injected scalar scope)."""
+    import mirix.queue.worker as worker_module
+    from mirix.queue.worker import QueueWorker, dispatch_incoming_message
+
+    msg = QueueMessage()
+    msg.client_id = "client-1"
+    msg.agent_id = "agent-1"
+    msg.user_id = "user-1"
+    msg.memory_source_id = "src-normalize-internal"
+    turn = msg.messages.add()
+    turn.role = ProtoMessageCreate.ROLE_USER
+    turn.text_content = "hi"
+    msg.filter_tags.update({"env": "prod"})
+
+    fake_actor = MagicMock()
+    fake_actor.id = "client-1"
+    fake_actor.organization_id = "org-1"
+    fake_actor.write_scope = "test-scope"
+    fake_user = MagicMock()
+
+    server = MagicMock()
+    server.client_manager = MagicMock()
+    server.client_manager.get_client_by_id = AsyncMock(return_value=fake_actor)
+    server.send_messages = AsyncMock(return_value=None)
+
+    worker = QueueWorker.__new__(QueueWorker)
+    worker._server = server
+
+    class _FakeUserManager:
+        async def get_user_by_id(self, _):
+            return fake_user
+
+        async def get_admin_user(self):
+            return fake_user
+
+    from unittest.mock import patch as _patch
+
+    original_user_manager = worker_module.UserManager
+    worker_module.UserManager = _FakeUserManager
+    try:
+        with _patch(
+            "mirix.services.memory_source_manager.MemorySourceManager",
+            return_value=Mock(finalize_source=AsyncMock()),
+        ):
+            await dispatch_incoming_message(worker, msg)
+    finally:
+        worker_module.UserManager = original_user_manager
+
+    server.send_messages.assert_awaited_once()
+    filter_tags = server.send_messages.call_args.kwargs["filter_tags"]
+    assert filter_tags["env"] == ["prod"]
+    assert filter_tags["scope"] == "test-scope"
+
+
+@pytest.mark.asyncio
 async def test_worker_legacy_dual_array_fallback_still_works():
     """Messages already in flight (legacy input_messages + source_messages
     pair) keep processing unchanged during rollout."""
