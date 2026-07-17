@@ -14,6 +14,14 @@ ECMS configures MIRIX to run with `CHAINING_FOR_MEMORY_UPDATE=false` and
 `CHAINING_FOR_META_AGENT=false` (each agent runs exactly once) and registers Intuit
 auth/cache providers at startup.
 
+**Validating changes to this fork:** run ECMS's full-stack tests against your local
+MIRIX source — from the ECMS repo: `./full_stack_tests/run_tests.sh --mirix-from-source`
+(add `MIRIX_SOURCE_DIR=/path/to/this/checkout` if it isn't ECMS's sibling
+`../MIRIX_Intuit`, e.g. when working in a MIRIX worktree). The run banner prints the
+mounted MIRIX path + branch + commit — verify it matches what you edited. MIRIX-side
+unit tests alone are not sufficient for changes on the ECMS-facing paths (managers,
+rest_api handlers, providers, queue).
+
 ## Key Architecture
 - **Entry point**: `mirix/server/rest_api.py` (FastAPI, port 8531 when run standalone)
 - **Orchestration**: `mirix/agent/meta_agent.py` → 6 sub-agents. A **Summary Agent** task
