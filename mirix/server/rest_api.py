@@ -5586,7 +5586,10 @@ async def get_memory_source(
     """
     server = get_server()
     client_id, org_id = await get_client_and_org(x_client_id, x_org_id, x_api_key)
-    client = await server.client_manager.get_client_by_id(client_id)
+    try:
+        client = await server.client_manager.get_client_by_id(client_id)
+    except NoResultFound:
+        raise HTTPException(status_code=404, detail=f"Client {client_id} not found")
 
     from mirix.services.memory_source_manager import MemorySourceManager
 
@@ -5623,7 +5626,10 @@ async def get_memory_source_messages(
     """
     server = get_server()
     client_id, org_id = await get_client_and_org(x_client_id, x_org_id, x_api_key)
-    client = await server.client_manager.get_client_by_id(client_id)
+    try:
+        client = await server.client_manager.get_client_by_id(client_id)
+    except NoResultFound:
+        raise HTTPException(status_code=404, detail=f"Client {client_id} not found")
 
     from mirix.services.memory_source_manager import MemorySourceManager
     from mirix.services.source_message_manager import SourceMessageManager
