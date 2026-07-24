@@ -23,7 +23,7 @@ dependencies so the-loop can build the execution DAG. Keep tasks small and verif
 TDD mode is standard: tasks 1–2 land the failing tests; task 3 makes them pass.
 All tasks are tier-5 (single pure function, one caller, no interface/data change).
 
-- [ ] 1. Write the new unit-test module `tests/test_flatten_messages_for_agent.py` (RED)
+- [x] 1. Write the new unit-test module `tests/test_flatten_messages_for_agent.py` (RED)
   - Pure pytest, no fixtures/DB/server. Implement exactly the 8 named test cases from
     the design's Testing strategy table (design.md §Testing strategy), asserting the
     single-`TextContent` shape, `"\n"`-joined text (e.g.
@@ -39,7 +39,7 @@ All tasks are tier-5 (single pure function, one caller, no interface/data change
   - _Depends on:_ none
   - _Requirements:_ R1.1, R1.2, R2.1, R2.2
 
-- [ ] 2. Update the existing multi-part assertion to the single-block shape (RED)
+- [x] 2. Update the existing multi-part assertion to the single-block shape (RED)
   - In `tests/test_queue_consumer_normalization.py::test_worker_unified_messages_field_flattens_and_persists_per_turn`
     (lines ~198–202): replace `texts == ["[USER]", "hi there", "[ASSISTANT]", "hello!"]`
     with `len(input_messages[0].content) == 1` and
@@ -53,7 +53,7 @@ All tasks are tier-5 (single pure function, one caller, no interface/data change
   - _Depends on:_ none
   - _Requirements:_ R1.1, R1.2
 
-- [ ] 3. Implement buffer-and-flush coalescing in `flatten_messages_for_agent` (GREEN)
+- [x] 3. Implement buffer-and-flush coalescing in `flatten_messages_for_agent` (GREEN)
   - Replace the per-turn append body of `flatten_messages_for_agent`
     (`mirix/utils.py:1909`) with the buffer-and-flush algorithm given verbatim in
     design.md §Components & interfaces: buffer marker + text lines, `"\n"`-join on
@@ -69,7 +69,7 @@ All tasks are tier-5 (single pure function, one caller, no interface/data change
   - _Depends on:_ 1, 2
   - _Requirements:_ R1.1, R1.2, R2.1, R2.2
 
-- [ ] 4. Full non-integration suite + format/lint
+- [x] 4. Full non-integration suite + format/lint
   - Confirm no other test in the repo depended on the multi-part shape (design's
     blast-radius sweep predicts none) and the change is style-clean.
   - _Verification:_ `pytest -m "not integration" -v` green (or
