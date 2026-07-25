@@ -118,6 +118,74 @@ def test_trailing_non_text_item_flushes_prior_text_only():
     assert content[1].image_id == "img-2"
 
 
+def test_text_item_missing_text_key_coalesces_to_empty_line():
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text"},
+                {"type": "text", "text": "real text"},
+            ],
+        },
+    ]
+
+    result = flatten_messages_for_agent(messages)
+
+    assert len(result) == 1
+    content = result[0].content
+    assert len(content) == 1
+    # A text item with no "text" key contributes an empty line instead of
+    # raising — malformed items degrade to blank rather than dropping the turn.
+    assert content[0].text == "[USER]\n\nreal text"
+
+
+def test_leading_non_text_item_flushes_marker_alone():
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "database_image_id", "image_id": "img-3"},
+                {"type": "text", "text": "caption"},
+            ],
+        },
+    ]
+
+    result = flatten_messages_for_agent(messages)
+
+    assert len(result) == 1
+    content = result[0].content
+    assert len(content) == 3
+    assert isinstance(content[0], TextContent)
+    assert content[0].text == "[USER]"
+    assert isinstance(content[1], ImageContent)
+    assert content[1].image_id == "img-3"
+    assert isinstance(content[2], TextContent)
+    assert content[2].text == "caption"
+
+
+def test_text_recoalesces_across_turns_after_non_text_item():
+    messages = [
+        {"role": "user", "content": "look at this"},
+        {
+            "role": "user",
+            "content": [{"type": "database_image_id", "image_id": "img-4"}],
+        },
+        {"role": "assistant", "content": "nice photo"},
+    ]
+
+    result = flatten_messages_for_agent(messages)
+
+    assert len(result) == 1
+    content = result[0].content
+    assert len(content) == 3
+    assert isinstance(content[0], TextContent)
+    assert content[0].text == "[USER]\nlook at this\n[USER]"
+    assert isinstance(content[1], ImageContent)
+    assert content[1].image_id == "img-4"
+    assert isinstance(content[2], TextContent)
+    assert content[2].text == "[ASSISTANT]\nnice photo"
+
+
 def test_empty_messages_returns_empty_list():
     assert flatten_messages_for_agent([]) == []
 
