@@ -21,15 +21,11 @@ logger = get_logger(__name__)
 
 
 def _embedding_span_metadata(metadata: dict) -> dict:
-    """Stamp the current TID into embedding-span metadata (a copy). Mirrors
-    timed.py — the FST span capture filters by the tid metadata attribute."""
-    from mirix.observability.context import get_tid
+    """Stamp the current TID into embedding-span metadata (a copy) — the FST
+    span capture filters by the tid metadata attribute."""
+    from mirix.observability.context import stamp_tid
 
-    stamped = dict(metadata)
-    tid = get_tid()
-    if tid:
-        stamped.setdefault("tid", tid)
-    return stamped
+    return stamp_tid(metadata)
 
 
 def is_embedding_tracing_enabled() -> bool:

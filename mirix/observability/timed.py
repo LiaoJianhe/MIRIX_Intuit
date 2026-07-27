@@ -26,9 +26,9 @@ from typing import Any, AsyncIterator, Callable, Dict, Optional, cast
 from mirix.log import get_logger
 from mirix.observability.context import (
     current_observation_id,
-    get_tid,
     get_trace_context,
     mark_observation_as_child,
+    stamp_tid,
 )
 from mirix.observability.langfuse_client import get_langfuse_client
 
@@ -121,10 +121,7 @@ async def _open_span(
     # trace, worker "Meta Agent" observation) would survive. Mirrors the worker's
     # Meta Agent span metadata. Omitted when there's no active TID so we don't
     # write a misleading ``tid=None``.
-    span_metadata: Dict[str, Any] = dict(metadata or {})
-    tid = get_tid()
-    if tid:
-        span_metadata.setdefault("tid", tid)
+    span_metadata: Dict[str, Any] = stamp_tid(dict(metadata or {}))
 
     # Resolve the span input: mirror the CALLER's metadata by default (not the
     # tid-stamped span_metadata — the tid is a capture concern, not an input).

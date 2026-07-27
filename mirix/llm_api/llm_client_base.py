@@ -20,19 +20,11 @@ if TYPE_CHECKING:
 
 
 def _llm_span_metadata(metadata: dict) -> dict:
-    """Stamp the current TID into generation-span metadata (a copy).
+    """Stamp the current TID into generation-span metadata (a copy) — the FST
+    span capture filters by the tid metadata attribute."""
+    from mirix.observability.context import stamp_tid
 
-    The Langfuse OTel export emits ``langfuse.observation.metadata.tid``; the
-    full-stack-test span capture filters by it, so an un-stamped generation
-    span is silently dropped from every TID-scoped capture. Mirrors timed.py.
-    """
-    from mirix.observability.context import get_tid
-
-    stamped = dict(metadata)
-    tid = get_tid()
-    if tid:
-        stamped.setdefault("tid", tid)
-    return stamped
+    return stamp_tid(metadata)
 
 
 class LLMClientBase:

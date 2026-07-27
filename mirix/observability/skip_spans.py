@@ -8,7 +8,11 @@ instead of looking like processing stopped mid-flight.
 from typing import TYPE_CHECKING, Any, Dict, Optional, cast
 
 from mirix.log import get_logger
-from mirix.observability.context import get_trace_context, mark_observation_as_child
+from mirix.observability.context import (
+    get_trace_context,
+    mark_observation_as_child,
+    stamp_tid,
+)
 from mirix.observability.langfuse_client import get_langfuse_client
 from mirix.observability.trace_attrs import update_trace_attributes
 
@@ -49,18 +53,10 @@ def emit_idempotency_skip_span(
     if metadata:
         span_metadata.update(metadata)
 
-    # Stamp the TID into span metadata so the Langfuse OTel export emits
-    # ``langfuse.observation.metadata.tid``. Consumers that filter spans by TID
-    # (the full-stack-test span capture) would otherwise drop this span whenever
-    # it is the first/only worker span — it survives today only because skips
-    # usually nest under a tid-stamped parent (the "Meta Agent" observation).
-    # Mirrors timed.py. Omitted when there's no active TID so we don't write a
-    # misleading ``tid=None``.
-    from mirix.observability.context import get_tid
-
-    tid = get_tid()
-    if tid:
-        span_metadata.setdefault("tid", tid)
+    # Stamp the TID so the TID-filtered FST span capture keeps this span even
+    # when it is the first/only worker span (it survives today only because
+    # skips usually nest under the tid-stamped "Meta Agent" observation).
+    span_metadata = stamp_tid(span_metadata)
 
     trace_context_dict: Dict[str, Any] = {"trace_id": trace_id}
     if parent_span_id:
@@ -118,17 +114,10 @@ def emit_refused_to_process_span(
     if metadata:
         span_metadata.update(metadata)
 
-    # Stamp the TID into span metadata so the Langfuse OTel export emits
-    # ``langfuse.observation.metadata.tid``. This refusal span fires before any
-    # tid-stamped parent (e.g. the Meta Agent observation) exists, so consumers
-    # that filter spans by TID (the full-stack-test span capture) would drop it
-    # entirely without this. Mirrors timed.py. Omitted when there's no active
-    # TID so we don't write a misleading ``tid=None``.
-    from mirix.observability.context import get_tid
-
-    tid = get_tid()
-    if tid:
-        span_metadata.setdefault("tid", tid)
+    # Stamp the TID: this refusal span fires before any tid-stamped parent
+    # (e.g. the Meta Agent observation) exists, so the TID-filtered FST span
+    # capture would drop it entirely without this.
+    span_metadata = stamp_tid(span_metadata)
 
     trace_context_dict: Dict[str, Any] = {"trace_id": trace_id}
     if parent_span_id:
@@ -200,14 +189,9 @@ def emit_save_outcome_span(
             "memory_source_id": memory_source_id,
         }
 
-        # Stamp the TID so the Langfuse OTel export emits
-        # ``langfuse.observation.metadata.tid`` — the FST span capture filters
-        # by it and would otherwise drop the marker span. Mirrors timed.py.
-        from mirix.observability.context import get_tid
-
-        tid = get_tid()
-        if tid:
-            span_metadata.setdefault("tid", tid)
+        # Stamp the TID — the TID-filtered FST span capture would otherwise
+        # drop the marker span.
+        span_metadata = stamp_tid(span_metadata)
 
         trace_context_dict: Dict[str, Any] = {"trace_id": trace_id}
         if parent_span_id:
@@ -222,6 +206,7 @@ def emit_save_outcome_span(
         # normally seeds the accumulator with tid/client, so without it this
         # final full-set write would drop the trace's tid: tag (clobbering the
         # HTTP leg's write on a stitched trace).
+        tid = span_metadata.get("tid")
         trace_tags = [f"save_outcome:{outcome_value}"]
         trace_metadata: Dict[str, Any] = {"save_outcome": outcome_value}
         if tid:

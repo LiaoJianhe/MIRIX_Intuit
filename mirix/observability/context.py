@@ -36,6 +36,21 @@ def get_tid() -> Optional[str]:
     return current_tid.get()
 
 
+def stamp_tid(metadata: dict) -> dict:
+    """Return a copy of ``metadata`` with the current TID stamped in.
+
+    The Langfuse OTel export emits ``langfuse.observation.metadata.tid``, which
+    the full-stack-test span capture filters by — a span without it is silently
+    dropped from every TID-scoped capture. Omitted when there is no active TID
+    so we don't write a misleading ``tid=None``.
+    """
+    stamped = dict(metadata)
+    tid = get_tid()
+    if tid:
+        stamped.setdefault("tid", tid)
+    return stamped
+
+
 def set_trace_context(
     trace_id: Optional[str] = None,
     observation_id: Optional[str] = None,

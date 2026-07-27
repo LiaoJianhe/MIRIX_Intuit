@@ -667,7 +667,7 @@ class QueueWorker:
                     # helper never raises.
                     _worker_tid = get_tid()
                     _trace_tags = []
-                    _trace_metadata: dict = {"write_kind": write_kind}
+                    _trace_metadata: dict = {}
                     if _worker_tid:
                         _trace_tags.append(f"tid:{_worker_tid}")
                         _trace_metadata["tid"] = _worker_tid
@@ -677,6 +677,7 @@ class QueueWorker:
                         _trace_tags.append(f"client:{actor.name}")
                         _trace_metadata["client"] = actor.name
                     _trace_tags.append(f"write_kind:{write_kind}")
+                    _trace_metadata["write_kind"] = write_kind
                     update_trace_attributes(tags=_trace_tags, metadata=_trace_metadata)
 
                     span_observation_id = getattr(span, "id", None)

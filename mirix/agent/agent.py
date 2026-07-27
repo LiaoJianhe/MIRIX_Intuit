@@ -42,26 +42,13 @@ from mirix.llm_api.llm_api_tools import create
 from mirix.llm_api.llm_client import LLMClient
 from mirix.log import get_logger
 from mirix.memory import summarize_messages
-from mirix.observability.context import get_tid, get_trace_context, mark_observation_as_child
+from mirix.observability.context import (
+    get_trace_context,
+    mark_observation_as_child,
+    stamp_tid as _tid_stamped,
+)
 from mirix.observability.langfuse_client import get_langfuse_client
 from mirix.observability.skip_spans import emit_idempotency_skip_span
-
-
-def _tid_stamped(metadata: dict) -> dict:
-    """Return ``metadata`` with the current TID stamped in (a copy).
-
-    The Langfuse OTel export emits ``langfuse.observation.metadata.tid``, which
-    the full-stack-test span capture filters by — a span without it is silently
-    dropped from every TID-scoped capture. Mirrors ``timed.py``. Omitted when
-    there's no active TID so we don't write a misleading ``tid=None``.
-    """
-    stamped = dict(metadata)
-    tid = get_tid()
-    if tid:
-        stamped.setdefault("tid", tid)
-    return stamped
-
-
 from mirix.queue.error_policy import Bucket, classify
 from mirix.schemas.agent import AgentState, AgentStepResponse
 from mirix.schemas.block import BlockUpdate

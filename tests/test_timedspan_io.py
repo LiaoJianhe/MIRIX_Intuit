@@ -103,7 +103,7 @@ async def test_mirror_does_not_include_the_stamped_tid():
     langfuse, _span = _make_langfuse()
     with (
         _patched(langfuse),
-        patch("mirix.observability.timed.get_tid", return_value="tid-1"),
+        patch("mirix.observability.context.get_tid", return_value="tid-1"),
     ):
         async with timedspan("Retrieve core", metadata={"backend": "ipsr"}):
             pass
