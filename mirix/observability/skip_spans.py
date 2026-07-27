@@ -151,7 +151,7 @@ def emit_save_outcome_span(
 
     Called from ``dispatch_save`` immediately after the ``finalize_source``
     call — inside the ``try``, before the ``finally`` clears trace context, so
-    the marker still attaches to the right trace. Opens a ``Save Outcome`` span
+    the marker still attaches to the right trace. Opens an ``Outcome`` span
     (the skip-span pattern: explicit trace_context from the ContextVars, TID
     stamped in metadata for the FST capture, parented to the Meta Agent
     observation — a closed parent is fine for late-arriving children) and,
@@ -214,7 +214,7 @@ def emit_save_outcome_span(
             trace_metadata["tid"] = tid
 
         with langfuse.start_as_current_observation(
-            name="Save Outcome",
+            name="Outcome",
             as_type="span",
             trace_context=cast(TraceContext, trace_context_dict),
             input={"memory_source_id": memory_source_id},

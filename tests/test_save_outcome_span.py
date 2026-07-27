@@ -1,7 +1,7 @@
 """Unit tests for ``emit_save_outcome_span`` (the R4 completion marker).
 
 ``finalize_source`` is the only point that knows a save's terminal outcome and
-today it tells only the logs. The emitter opens a ``Save Outcome`` span at the
+today it tells only the logs. The emitter opens an ``Outcome`` span at the
 ``dispatch_save`` chokepoint — while the TID and trace context are still set —
 and writes the ``save_outcome:`` tag through the central trace-attribute
 helper, so ECMS-499 can filter finished traces instead of guessing with a
@@ -89,7 +89,7 @@ class TestEmitSaveOutcomeSpan:
             emit_save_outcome_span(SaveOutcome.SUCCESS, memory_source_id="src-1")
 
         kwargs = client.start_as_current_observation.call_args.kwargs
-        assert kwargs["name"] == "Save Outcome"
+        assert kwargs["name"] == "Outcome"
         assert kwargs["as_type"] == "span"
         assert kwargs["trace_context"]["trace_id"] == "t-1"
         # Parents to the Meta Agent observation (closed parent is fine for
