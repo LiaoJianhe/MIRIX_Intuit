@@ -217,6 +217,17 @@ def emit_save_outcome_span(
         if error_type:
             output["error_type"] = error_type
 
+        # Tags for the trace-level write. The tid tag rides along explicitly:
+        # on refusal paths the save never reaches the Meta Agent block that
+        # normally seeds the accumulator with tid/client, so without it this
+        # final full-set write would drop the trace's tid: tag (clobbering the
+        # HTTP leg's write on a stitched trace).
+        trace_tags = [f"save_outcome:{outcome_value}"]
+        trace_metadata: Dict[str, Any] = {"save_outcome": outcome_value}
+        if tid:
+            trace_tags.append(f"tid:{tid}")
+            trace_metadata["tid"] = tid
+
         with langfuse.start_as_current_observation(
             name="Save Outcome",
             as_type="span",
@@ -229,10 +240,7 @@ def emit_save_outcome_span(
             # (tag = dashboard-filterable; metadata = visible). The helper
             # rewrites the full accumulated tag set, so this write is a strict
             # superset of the worker's earlier tags — no clobbering.
-            update_trace_attributes(
-                tags=[f"save_outcome:{outcome_value}"],
-                metadata={"save_outcome": outcome_value},
-            )
+            update_trace_attributes(tags=trace_tags, metadata=trace_metadata)
             span.update(output=output)
     except Exception as e:  # noqa: BLE001 - instrumentation never raises
         logger.warning("Failed to emit save-outcome span: %s", e)

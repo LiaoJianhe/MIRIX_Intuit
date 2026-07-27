@@ -46,9 +46,11 @@ class TestEmitSaveOutcomeSpan:
     )
     def test_tag_and_metadata_use_verbatim_saveoutcome_vocabulary(self, outcome):
         """One vocabulary shared by the policy verdict, the DB log line, and the
-        trace tag: SaveOutcome.value verbatim."""
+        trace tag: SaveOutcome.value verbatim. The tid tag rides along so the
+        full-set write never drops the trace's tid on refusal paths (where the
+        worker accumulator was never seeded)."""
         client, _span = _make_client()
-        p1, p2, p3, p4 = _patches(client)
+        p1, p2, p3, p4 = _patches(client, tid="tid-1")
         with (
             p1,
             p2,
@@ -59,8 +61,25 @@ class TestEmitSaveOutcomeSpan:
             emit_save_outcome_span(outcome, memory_source_id="src-1")
 
         upd.assert_called_once_with(
-            tags=[f"save_outcome:{outcome.value}"],
-            metadata={"save_outcome": outcome.value},
+            tags=[f"save_outcome:{outcome.value}", "tid:tid-1"],
+            metadata={"save_outcome": outcome.value, "tid": "tid-1"},
+        )
+
+    def test_no_tid_tag_when_tid_absent(self):
+        client, _span = _make_client()
+        p1, p2, p3, p4 = _patches(client, tid=None)
+        with (
+            p1,
+            p2,
+            p3,
+            p4,
+            patch("mirix.observability.skip_spans.update_trace_attributes") as upd,
+        ):
+            emit_save_outcome_span(SaveOutcome.SUCCESS, memory_source_id="src-1")
+
+        upd.assert_called_once_with(
+            tags=["save_outcome:success"],
+            metadata={"save_outcome": "success"},
         )
 
     def test_span_shape_name_parent_input_output(self):

@@ -19,6 +19,22 @@ if TYPE_CHECKING:
     from langfuse.types import TraceContext
 
 
+def _llm_span_metadata(metadata: dict) -> dict:
+    """Stamp the current TID into generation-span metadata (a copy).
+
+    The Langfuse OTel export emits ``langfuse.observation.metadata.tid``; the
+    full-stack-test span capture filters by it, so an un-stamped generation
+    span is silently dropped from every TID-scoped capture. Mirrors timed.py.
+    """
+    from mirix.observability.context import get_tid
+
+    stamped = dict(metadata)
+    tid = get_tid()
+    if tid:
+        stamped.setdefault("tid", tid)
+    return stamped
+
+
 class LLMClientBase:
     """
     Abstract base class for LLM clients, formatting the request objects,
@@ -148,10 +164,12 @@ class LLMClientBase:
                 trace_context=cast("TraceContext", trace_context_dict),
                 model=self.llm_config.langfuse_model or self.llm_config.model,
                 input=trace_input,
-                metadata={
-                    "provider": self.llm_config.model_endpoint_type,
-                    "tools_count": len(tools) if tools else 0,
-                },
+                metadata=_llm_span_metadata(
+                    {
+                        "provider": self.llm_config.model_endpoint_type,
+                        "tools_count": len(tools) if tools else 0,
+                    }
+                ),
             )
         except Exception as e:
             # Langfuse failed to start observation - execute without tracing

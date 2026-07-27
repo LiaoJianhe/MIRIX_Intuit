@@ -1117,12 +1117,21 @@ async def trigger_memory_update(self: "Agent", user_message: object, memory_type
                     "memory_type": memory_type,
                     "agent_name": agent_state.name,
                 }
+                # Stamp the TID so the TID-filtered FST span capture keeps
+                # this span (mirrors timed.py; without it the sub-agent spans
+                # are silently dropped from every capture).
+                from mirix.observability.context import get_tid
+
+                sub_agent_metadata = dict(sub_agent_io)
+                _tid = get_tid()
+                if _tid:
+                    sub_agent_metadata.setdefault("tid", _tid)
                 with langfuse.start_as_current_observation(
                     name=span_name,
                     as_type="agent",
                     trace_context=cast(TraceContext, trace_context_dict),
                     input=sub_agent_io,
-                    metadata=sub_agent_io,
+                    metadata=sub_agent_metadata,
                 ) as span:
                     mark_observation_as_child(span)
 

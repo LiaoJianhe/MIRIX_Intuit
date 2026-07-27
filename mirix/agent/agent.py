@@ -42,9 +42,26 @@ from mirix.llm_api.llm_api_tools import create
 from mirix.llm_api.llm_client import LLMClient
 from mirix.log import get_logger
 from mirix.memory import summarize_messages
-from mirix.observability.context import get_trace_context, mark_observation_as_child
+from mirix.observability.context import get_tid, get_trace_context, mark_observation_as_child
 from mirix.observability.langfuse_client import get_langfuse_client
 from mirix.observability.skip_spans import emit_idempotency_skip_span
+
+
+def _tid_stamped(metadata: dict) -> dict:
+    """Return ``metadata`` with the current TID stamped in (a copy).
+
+    The Langfuse OTel export emits ``langfuse.observation.metadata.tid``, which
+    the full-stack-test span capture filters by — a span without it is silently
+    dropped from every TID-scoped capture. Mirrors ``timed.py``. Omitted when
+    there's no active TID so we don't write a misleading ``tid=None``.
+    """
+    stamped = dict(metadata)
+    tid = get_tid()
+    if tid:
+        stamped.setdefault("tid", tid)
+    return stamped
+
+
 from mirix.queue.error_policy import Bucket, classify
 from mirix.schemas.agent import AgentState, AgentStepResponse
 from mirix.schemas.block import BlockUpdate
@@ -629,11 +646,13 @@ class Agent(BaseAgent):
                     as_type="tool",
                     trace_context=cast(TraceContext, trace_context_dict),
                     input={"tool_name": function_name, "args": args_for_trace},
-                    metadata={
-                        "tool_type": str(target_mirix_tool.tool_type),
-                        "tool_name": function_name,
-                        "agent_name": self.agent_state.name,
-                    },
+                    metadata=_tid_stamped(
+                        {
+                            "tool_type": str(target_mirix_tool.tool_type),
+                            "tool_name": function_name,
+                            "agent_name": self.agent_state.name,
+                        }
+                    ),
                 ) as span:
                     mark_observation_as_child(span)
 
@@ -1704,7 +1723,7 @@ class Agent(BaseAgent):
             # Metadata mirror as input: counts + type enums only (payloads are
             # caller-authored content and never reach the span).
             input=direct_writes_io,
-            metadata=direct_writes_io,
+            metadata=_tid_stamped(direct_writes_io),
         ) as span:
             mark_observation_as_child(span)
             span_observation_id = getattr(span, "id", None)
@@ -1743,11 +1762,13 @@ class Agent(BaseAgent):
                         as_type="span",
                         trace_context=cast(TraceContext, insert_trace_dict),
                         input=trace_input,
-                        metadata={
-                            "memory_source_id": self.memory_source_id,
-                            "memory_type": memory_type,
-                            "function": function_name,
-                        },
+                        metadata=_tid_stamped(
+                            {
+                                "memory_source_id": self.memory_source_id,
+                                "memory_type": memory_type,
+                                "function": function_name,
+                            }
+                        ),
                     )
                 except Exception as e:
                     logger.debug(
@@ -1930,7 +1951,7 @@ class Agent(BaseAgent):
             # Metadata mirror as input — ids only; the transcript this agent
             # reads is conversation content and never reaches the span.
             input=summary_agent_io,
-            metadata=summary_agent_io,
+            metadata=_tid_stamped(summary_agent_io),
         ) as span:
             mark_observation_as_child(span)
             span_observation_id = getattr(span, "id", None)
