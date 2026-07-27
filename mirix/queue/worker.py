@@ -76,6 +76,28 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+def derive_write_kind(message: QueueMessage) -> str:
+    """Categorize a save by its payload shape (R2 trace tag ``write_kind:``).
+
+    Fully determined by the message: a conversation payload (unified
+    ``messages`` field, or the legacy packed ``input_messages``) means LLM
+    extraction; ``direct_writes`` bypass the LLM pipeline. Both present →
+    ``"mixed"`` — never one of the pure kinds, so eval tooling can select
+    pure-extraction traces with a single exact-match filter.
+
+    The no-payload combination is rejected upstream (ECMS validates that at
+    least one is present before enqueueing); the helper stays total and maps
+    it to ``"extraction"``.
+    """
+    has_messages = bool(message.messages or message.input_messages)
+    has_direct = bool(message.direct_writes)
+    if has_direct and has_messages:
+        return "mixed"
+    if has_direct:
+        return "direct"
+    return "extraction"
+
+
 def reconcile_user_org_to_actor(user, actor):
     """Return ``user`` with its org corrected to the actor's (client's) org.
 
