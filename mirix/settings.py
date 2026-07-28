@@ -166,6 +166,16 @@ class Settings(BaseSettings):
     # it small to avoid flooding the agent with off-topic recent turns.
     conversation_recent_window: int = 5
 
+    # conversation retrieval: which search method the topic-based "relevant"
+    # lookups use across all six memory types. "hybrid" (the default) fuses a
+    # lexical (BM25) leg with a semantic (knn) leg via the IPS-S 50/50
+    # normalization pipeline; "bm25" is pure lexical (the prior behavior).
+    # Env-overridable (MIRIX_CONVERSATION_SEARCH_METHOD) so retrieval quality
+    # can be A/B'd — e.g. via LongMemEval — without a rebuild. Values must be
+    # ones the downstream search provider understands (hybrid | bm25 |
+    # embedding | string_match | fuzzy_match).
+    conversation_search_method: str = "hybrid"
+
     # telemetry logging
     verbose_telemetry_logging: bool = False
     otel_exporter_otlp_endpoint: Optional[str] = None  # otel default: "http://localhost:4317"
