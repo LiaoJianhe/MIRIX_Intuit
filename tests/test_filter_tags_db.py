@@ -100,7 +100,6 @@ async def _create_memory(raw_memory_manager, test_actor, test_user, context, fil
             occurred_at=None,
             id=None,
             context_embedding=None,
-            embedding_config=None,
         ),
         actor=test_actor,
         client_id=test_actor.id,

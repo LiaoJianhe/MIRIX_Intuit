@@ -11,7 +11,6 @@ import pytest
 
 from mirix.agent.agent import Agent
 from mirix.schemas.agent import AgentState, AgentType
-from mirix.schemas.embedding_config import EmbeddingConfig
 from mirix.schemas.llm_config import LLMConfig
 from mirix.schemas.user import User
 
@@ -45,7 +44,6 @@ def _make_agent_for_prompt_build() -> Agent:
         system="System prompt",
         agent_type=AgentType.meta_memory_agent,
         llm_config=LLMConfig.default_config("gpt-4o-mini"),
-        embedding_config=EmbeddingConfig.default_config(provider="openai"),
         tools=[],
         parent_id=None,
     )

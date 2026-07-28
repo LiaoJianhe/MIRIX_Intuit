@@ -34,7 +34,7 @@ import pytest_asyncio
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from mirix import EmbeddingConfig, LLMConfig
+from mirix import LLMConfig
 from mirix.local_client.local_client import LocalClient
 from mirix.orm.errors import NoResultFound
 from mirix.schemas.agent import AgentState, AgentType
@@ -62,14 +62,6 @@ TEST_LLM_CONFIG = LLMConfig(
     context_window=8192,
 )
 
-TEST_EMBEDDING_CONFIG = EmbeddingConfig(
-    embedding_model="text-embedding-ada-002",
-    embedding_endpoint_type="openai",
-    embedding_endpoint="https://api.openai.com/v1",
-    embedding_dim=1536,
-    embedding_chunk_size=300,
-)
-
 # Mark all async tests in this module for pytest-asyncio; use one loop per module so
 # module-scoped async fixtures (test_organization, client_a, client_b, default_client)
 # and all tests share the same event loop (avoids "another operation is in progress").
@@ -87,7 +79,6 @@ async def test_organization():
     default_client = await LocalClient.create(
         debug=False,
         default_llm_config=TEST_LLM_CONFIG,
-        default_embedding_config=TEST_EMBEDDING_CONFIG,
     )
     org = await default_client.create_org(name=f"test-org-{TEST_RUN_ID}")
     global TEST_ORG_ID
@@ -104,7 +95,6 @@ async def client_a(test_organization):
         org_id=test_organization.id,
         debug=False,
         default_llm_config=TEST_LLM_CONFIG,
-        default_embedding_config=TEST_EMBEDDING_CONFIG,
     )
     yield client
 
@@ -118,7 +108,6 @@ async def client_b(test_organization):
         org_id=test_organization.id,
         debug=False,
         default_llm_config=TEST_LLM_CONFIG,
-        default_embedding_config=TEST_EMBEDDING_CONFIG,
     )
     yield client
 
@@ -129,7 +118,6 @@ async def default_client():
     client = await LocalClient.create(
         debug=False,
         default_llm_config=TEST_LLM_CONFIG,
-        default_embedding_config=TEST_EMBEDDING_CONFIG,
     )
     yield client
 
@@ -202,7 +190,6 @@ class TestInitialization:
     async def test_default_configs(self, client_a):
         """Test that default LLM and embedding configs are set."""
         assert client_a._default_llm_config == TEST_LLM_CONFIG
-        assert client_a._default_embedding_config == TEST_EMBEDDING_CONFIG
 
 
 # ============================================================================
@@ -775,27 +762,9 @@ class TestConfigurationManagement:
         client_a.set_default_llm_config(new_config)
         assert client_a._default_llm_config == new_config
 
-    async def test_set_default_embedding_config(self, client_a):
-        """Test setting default embedding configuration."""
-        new_config = EmbeddingConfig(
-            embedding_model="text-embedding-3-small",
-            embedding_endpoint_type="openai",
-            embedding_endpoint="https://api.openai.com/v1",
-            embedding_dim=1536,
-            embedding_chunk_size=256,
-        )
-
-        client_a.set_default_embedding_config(new_config)
-        assert client_a._default_embedding_config == new_config
-
     async def test_list_llm_configs(self, client_a):
         """Test listing available LLM configurations."""
         configs = await client_a.list_llm_configs()
-        assert isinstance(configs, list)
-
-    async def test_list_embedding_configs(self, client_a):
-        """Test listing available embedding configurations."""
-        configs = await client_a.list_embedding_configs()
         assert isinstance(configs, list)
 
 

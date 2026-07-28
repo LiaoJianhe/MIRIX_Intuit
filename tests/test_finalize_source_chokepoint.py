@@ -51,7 +51,6 @@ def _make_agent_state(name: str):
     state.tools = []
     state.tool_rules = []
     state.system = "test system prompt"
-    state.embedding_config = MagicMock()
     return state
 
 

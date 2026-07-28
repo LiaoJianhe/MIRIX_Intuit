@@ -851,7 +851,6 @@ class TestWriteScopeGuards:
         """LocalClient with write_scope=None returns None from create_meta_agent."""
         from mirix.local_client.local_client import LocalClient
         from mirix.schemas.agent import CreateMetaAgent
-        from mirix.schemas.embedding_config import EmbeddingConfig
         from mirix.schemas.llm_config import LLMConfig
 
         reader_client_id = _test_id("lc-reader")
@@ -872,7 +871,6 @@ class TestWriteScopeGuards:
         result = await lc.create_meta_agent(
             request=CreateMetaAgent(
                 llm_config=LLMConfig.default_config("gpt-4"),
-                embedding_config=EmbeddingConfig.default_config("text-embedding-3-small"),
             )
         )
         assert result is None

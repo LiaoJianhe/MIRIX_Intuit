@@ -79,11 +79,6 @@ async def test_include_tools_false_yields_valid_agent_state_with_empty_tools():
             "model_endpoint_type": "openai",
             "context_window": 8192,
         },
-        "embedding_config": {
-            "embedding_endpoint_type": "openai",
-            "embedding_model": "text-embedding-3-small",
-            "embedding_dim": 1536,
-        },
         "organization_id": "org-1",
     }
     fake_rp.find_using_named_query = AsyncMock(return_value=[tools_less_row])

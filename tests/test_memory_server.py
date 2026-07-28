@@ -126,7 +126,7 @@ async def client(server, user):
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
 async def meta_agent(server, client):
     """Get or create meta agent with all sub-agents."""
-    from mirix import EmbeddingConfig, LLMConfig
+    from mirix import LLMConfig
     from mirix.schemas.agent import CreateMetaAgent
 
     # Check if meta agent already exists
@@ -148,7 +148,6 @@ async def meta_agent(server, client):
     # Build create_params by flattening meta_agent_config (same as rest_api.py)
     create_params = {
         "llm_config": LLMConfig(**config["llm_config"]),
-        "embedding_config": EmbeddingConfig(**config["embedding_config"]),
     }
 
     # Flatten meta_agent_config fields into create_params

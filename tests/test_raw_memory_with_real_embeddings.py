@@ -36,7 +36,6 @@ if not dotenv_path.exists():
 
 from mirix.schemas.agent import CreateAgent
 from mirix.schemas.client import Client as PydanticClient
-from mirix.schemas.embedding_config import EmbeddingConfig
 from mirix.schemas.llm_config import LLMConfig
 from mirix.schemas.organization import Organization as PydanticOrganization
 from mirix.schemas.raw_memory import RawMemoryItemCreate
@@ -142,7 +141,6 @@ async def main():
                 name="Test Agent Gemini Embeddings",
                 description="Test agent with real Gemini embeddings from mirix_gemini.yaml",
                 llm_config=LLMConfig(**config["llm_config"]),
-                embedding_config=EmbeddingConfig(**config["embedding_config"]),
             ),
             actor=client,
         )
@@ -181,11 +179,10 @@ async def main():
 
         if created_memory.context_embedding:
             print(f"          Embedding dimension: {len(created_memory.context_embedding)}")
-            print(f"          Embedding config model: {created_memory.embedding_config.embedding_model}")
             print(f"          First 5 embedding values: {created_memory.context_embedding[:5]}")
             print(f"\n[SUCCESS] Embeddings are saved to the database!")
             print(f"\nYou can verify in PostgreSQL:")
-            print(f"   SELECT id, context, embedding_config, ")
+            print(f"   SELECT id, context, ")
             print(f"          array_length(context_embedding, 1) as embedding_dim")
             print(f"   FROM raw_memory WHERE id = '{created_memory.id}';")
         else:

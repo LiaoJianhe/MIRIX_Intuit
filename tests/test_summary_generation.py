@@ -36,7 +36,6 @@ def _make_agent_state(agent_type_name="meta_memory_agent"):
     state.tools = []
     state.tool_rules = []
     state.system = "test system prompt"
-    state.embedding_config = MagicMock()
     state.organization_id = "org-1"
     return state
 
