@@ -45,8 +45,8 @@ from mirix.memory import summarize_messages
 from mirix.observability.context import (
     get_trace_context,
     mark_observation_as_child,
-    stamp_tid as _tid_stamped,
 )
+from mirix.observability.context import stamp_tid as _tid_stamped
 from mirix.observability.langfuse_client import get_langfuse_client
 from mirix.observability.skip_spans import emit_idempotency_skip_span
 from mirix.queue.error_policy import Bucket, classify
