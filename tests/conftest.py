@@ -23,15 +23,6 @@ from mirix.services.organization_manager import OrganizationManager
 from mirix.settings import settings
 
 
-def pytest_configure(config):
-    config.addinivalue_line(
-        "markers",
-        "requires_pg: test asserts PostgreSQL semantics (unique-constraint dedup, "
-        "tz-aware timestamps, atomic concurrent updates) that the SQLite fallback "
-        "does not provide; skipped when MIRIX_PG_URI is not configured",
-    )
-
-
 def pytest_collection_modifyitems(config, items):
     # When no PG is configured, mirix.server.server silently falls back to
     # SQLite — and every requires_pg test fails MISLEADINGLY (looks like a code
