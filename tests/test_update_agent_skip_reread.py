@@ -23,7 +23,6 @@ import pytest
 from mirix.schemas.agent import AgentState as PydanticAgentState
 from mirix.schemas.agent import AgentType, UpdateAgent
 from mirix.schemas.client import Client
-from mirix.schemas.embedding_config import EmbeddingConfig
 from mirix.schemas.llm_config import LLMConfig
 from mirix.services.agent_manager import AgentManager
 
@@ -39,11 +38,6 @@ def _state(model="gpt-4o-mini"):
         agent_type=AgentType.episodic_memory_agent,
         system="old system",
         llm_config=LLMConfig(model=model, model_endpoint_type="openai", context_window=8192),
-        embedding_config=EmbeddingConfig(
-            embedding_endpoint_type="openai",
-            embedding_model="text-embedding-3-small",
-            embedding_dim=1536,
-        ),
         organization_id="org-1",
         tools=[],
     )

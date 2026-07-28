@@ -17,7 +17,6 @@ from mirix.orm.procedural_memory import ProceduralMemoryItem
 from mirix.orm.resource_memory import ResourceMemoryItem
 from mirix.orm.semantic_memory import SemanticMemoryItem
 from mirix.schemas.agent import AgentState as PydanticAgentState
-from mirix.schemas.embedding_config import EmbeddingConfig
 from mirix.schemas.episodic_memory import EpisodicEvent as PydanticEpisodicEvent
 from mirix.schemas.llm_config import LLMConfig
 
@@ -36,7 +35,6 @@ async def test_agent_to_pydantic_with_session(server):
     agent_create = CreateAgent(
         name="test_agent_conversion",
         llm_config=LLMConfig.default_config("gpt-4"),
-        embedding_config=EmbeddingConfig.default_config("text-embedding-004"),
         include_base_tools=True,
     )
 
@@ -76,7 +74,6 @@ async def test_agent_to_pydantic_detached(server):
     agent_create = CreateAgent(
         name="test_agent_detached",
         llm_config=LLMConfig.default_config("gpt-4"),
-        embedding_config=EmbeddingConfig.default_config("text-embedding-004"),
         include_base_tools=False,  # No tools to simplify
     )
 
@@ -276,7 +273,6 @@ async def test_list_agents_conversion_safety(server):
             agent_create=CreateAgent(
                 name=name,
                 llm_config=LLMConfig.default_config("gpt-4"),
-                embedding_config=EmbeddingConfig.default_config("text-embedding-004"),
                 include_base_tools=True,
             ),
             actor=actor,
@@ -310,7 +306,6 @@ async def test_memory_manager_list_conversion(server):
         agent_create=CreateAgent(
             name="test_memory_agent",
             llm_config=LLMConfig.default_config("gpt-4"),
-            embedding_config=EmbeddingConfig.default_config("text-embedding-004"),
         ),
         actor=actor,
     )

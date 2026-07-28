@@ -22,7 +22,6 @@ from mirix.agent.agent import Agent
 from mirix.errors import ContextWindowExceededError
 from mirix.schemas.agent import AgentState, AgentStepResponse, AgentType
 from mirix.schemas.client import Client
-from mirix.schemas.embedding_config import EmbeddingConfig
 from mirix.schemas.enums import MessageRole
 from mirix.schemas.llm_config import LLMConfig
 from mirix.schemas.message import Message
@@ -224,7 +223,6 @@ def make_agent_state(
         system="System prompt",
         agent_type=agent_type,
         llm_config=LLMConfig.default_config("gpt-4o-mini"),
-        embedding_config=EmbeddingConfig.default_config(provider="openai"),
         tools=[],
         parent_id=parent_id,
     )

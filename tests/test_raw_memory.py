@@ -1207,7 +1207,6 @@ async def test_agent(test_actor):
     import yaml
 
     from mirix.schemas.agent import CreateAgent
-    from mirix.schemas.embedding_config import EmbeddingConfig
     from mirix.schemas.llm_config import LLMConfig
     from mirix.services.agent_manager import AgentManager
     from mirix.services.user_manager import UserManager
@@ -1228,13 +1227,12 @@ async def test_agent(test_actor):
         with open(config_path, "r") as f:
             config = yaml.safe_load(f)
 
-        # Create agent with both llm_config and embedding_config using Gemini
+        # Create agent with llm_config using Gemini
         agent = await agent_mgr.create_agent(
             CreateAgent(
                 name="Test Agent for Raw Memory Gemini",
                 description="Test agent with Gemini embeddings",
                 llm_config=LLMConfig(**config["llm_config"]),
-                embedding_config=EmbeddingConfig(**config["embedding_config"]),
             ),
             actor=test_actor,
         )
@@ -1286,8 +1284,6 @@ async def test_create_raw_memory_with_embeddings(
     assert result.context_embedding is not None
     assert isinstance(result.context_embedding, list)
     assert len(result.context_embedding) == MAX_EMBEDDING_DIM  # Should be padded
-    assert result.embedding_config is not None
-    assert result.embedding_config.embedding_model == "gemini-embedding-001"  # Gemini embedding model
 
     # Cleanup
     await raw_memory_manager.delete_raw_memory(result.id, test_actor)
@@ -1306,7 +1302,6 @@ async def test_create_raw_memory_without_agent_state(raw_memory_manager, sample_
 
     assert result.id is not None
     assert result.context_embedding is None
-    assert result.embedding_config is None
 
     # Cleanup
     await raw_memory_manager.delete_raw_memory(result.id, test_actor)
@@ -1344,7 +1339,6 @@ async def test_update_raw_memory_regenerates_embeddings(
 
     assert updated.context_embedding is not None
     # Note: embeddings will be different because mock generates random values
-    assert updated.embedding_config is not None
 
     # Cleanup
     await raw_memory_manager.delete_raw_memory(created.id, test_actor)
@@ -1441,8 +1435,6 @@ async def test_raw_memory_embeddings_cache_to_redis(
     assert "context_embedding" in cached_data
     assert cached_data["context_embedding"] is not None
     assert isinstance(cached_data["context_embedding"], list)
-    assert "embedding_config" in cached_data
-    assert cached_data["embedding_config"] is not None
 
     # Cleanup
     await raw_memory_manager.delete_raw_memory(created.id, test_actor)
@@ -1466,7 +1458,6 @@ async def test_search_raw_memories_filter_tags_multiple_keys(raw_memory_manager,
             occurred_at=None,
             id=None,
             context_embedding=None,
-            embedding_config=None,
         ),
         actor=test_actor,
         client_id=test_actor.id,
@@ -1483,7 +1474,6 @@ async def test_search_raw_memories_filter_tags_multiple_keys(raw_memory_manager,
             occurred_at=None,
             id=None,
             context_embedding=None,
-            embedding_config=None,
         ),
         actor=test_actor,
         client_id=test_actor.id,
@@ -1500,7 +1490,6 @@ async def test_search_raw_memories_filter_tags_multiple_keys(raw_memory_manager,
             occurred_at=None,
             id=None,
             context_embedding=None,
-            embedding_config=None,
         ),
         actor=test_actor,
         client_id=test_actor.id,
@@ -1542,7 +1531,6 @@ async def test_search_raw_memories_sorting_all_fields(raw_memory_manager, test_a
             occurred_at=base_time - timedelta(days=3),
             id=None,
             context_embedding=None,
-            embedding_config=None,
         ),
         actor=test_actor,
         client_id=test_actor.id,
@@ -1559,7 +1547,6 @@ async def test_search_raw_memories_sorting_all_fields(raw_memory_manager, test_a
             occurred_at=base_time - timedelta(days=1),
             id=None,
             context_embedding=None,
-            embedding_config=None,
         ),
         actor=test_actor,
         client_id=test_actor.id,
@@ -1637,7 +1624,6 @@ async def test_search_raw_memories_cursor_pagination(raw_memory_manager, test_ac
                 occurred_at=None,
                 id=None,
                 context_embedding=None,
-                embedding_config=None,
             ),
             actor=test_actor,
             client_id=test_actor.id,
@@ -1707,7 +1693,6 @@ async def test_search_raw_memories_cursor_different_sort_fields(raw_memory_manag
             occurred_at=base_time - timedelta(days=2),
             id=None,
             context_embedding=None,
-            embedding_config=None,
         ),
         actor=test_actor,
         client_id=test_actor.id,
@@ -1724,7 +1709,6 @@ async def test_search_raw_memories_cursor_different_sort_fields(raw_memory_manag
             occurred_at=base_time - timedelta(days=1),
             id=None,
             context_embedding=None,
-            embedding_config=None,
         ),
         actor=test_actor,
         client_id=test_actor.id,
@@ -1775,7 +1759,6 @@ async def test_search_raw_memories_time_range_filtering(raw_memory_manager, test
             occurred_at=base_time - timedelta(days=5),
             id=None,
             context_embedding=None,
-            embedding_config=None,
         ),
         actor=test_actor,
         client_id=test_actor.id,
@@ -1792,7 +1775,6 @@ async def test_search_raw_memories_time_range_filtering(raw_memory_manager, test
             occurred_at=base_time - timedelta(days=2),
             id=None,
             context_embedding=None,
-            embedding_config=None,
         ),
         actor=test_actor,
         client_id=test_actor.id,
@@ -1809,7 +1791,6 @@ async def test_search_raw_memories_time_range_filtering(raw_memory_manager, test
             occurred_at=base_time - timedelta(days=1),
             id=None,
             context_embedding=None,
-            embedding_config=None,
         ),
         actor=test_actor,
         client_id=test_actor.id,
@@ -1868,7 +1849,6 @@ async def test_search_raw_memories_limit_enforcement(raw_memory_manager, test_ac
                 occurred_at=None,
                 id=None,
                 context_embedding=None,
-                embedding_config=None,
             ),
             actor=test_actor,
             client_id=test_actor.id,
@@ -1912,7 +1892,6 @@ async def test_search_raw_memories_scope_handling(raw_memory_manager, test_actor
             occurred_at=None,
             id=None,
             context_embedding=None,
-            embedding_config=None,
         ),
         actor=test_actor,
         client_id=test_actor.id,
@@ -1987,7 +1966,6 @@ async def test_api_search_raw_memories_endpoint(api_client, raw_memory_manager, 
             occurred_at=None,
             id=None,
             context_embedding=None,
-            embedding_config=None,
         ),
         actor=test_actor,
         client_id=test_actor.id,
@@ -2004,7 +1982,6 @@ async def test_api_search_raw_memories_endpoint(api_client, raw_memory_manager, 
             occurred_at=None,
             id=None,
             context_embedding=None,
-            embedding_config=None,
         ),
         actor=test_actor,
         client_id=test_actor.id,
@@ -2085,7 +2062,6 @@ async def test_api_search_raw_memories_without_user_id(api_client, raw_memory_ma
             occurred_at=None,
             id=None,
             context_embedding=None,
-            embedding_config=None,
         ),
         actor=test_actor,
         client_id=test_actor.id,

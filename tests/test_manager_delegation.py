@@ -31,7 +31,6 @@ from mirix.orm.errors import NoResultFound
 from mirix.schemas.agent import AgentState, AgentType
 from mirix.schemas.block import Block, BlockUpdate
 from mirix.schemas.client import Client as PydanticClient
-from mirix.schemas.embedding_config import EmbeddingConfig
 from mirix.schemas.enums import ToolType
 from mirix.schemas.episodic_memory import EpisodicEvent as PydanticEpisodicEvent
 from mirix.schemas.llm_config import LLMConfig
@@ -94,7 +93,6 @@ def _minimal_agent_state() -> AgentState:
         system="sys",
         agent_type=AgentType.episodic_memory_agent,
         llm_config=LLMConfig(model="m", model_endpoint_type="openai", context_window=8000),
-        embedding_config=EmbeddingConfig.default_config("text-embedding-3-small"),
         organization_id="org-1",
         tools=[],
     )
@@ -125,7 +123,6 @@ def _episodic_row_dict() -> dict:
         "agent_id": None,
         "summary_embedding": None,
         "details_embedding": None,
-        "embedding_config": None,
         "updated_at": None,
     }
 
@@ -148,7 +145,6 @@ def _semantic_row_dict() -> dict:
         "name_embedding": None,
         "summary_embedding": None,
         "details_embedding": None,
-        "embedding_config": None,
         "updated_at": None,
     }
 
@@ -212,7 +208,6 @@ def _tool_row_dict(tid: str = "tool-c0ffee00") -> dict:
 
 
 def _agent_row_dict(aid: str = "agent-1") -> dict:
-    emb = EmbeddingConfig.default_config("text-embedding-3-small")
     return {
         "id": aid,
         "name": "test-agent",
@@ -221,7 +216,6 @@ def _agent_row_dict(aid: str = "agent-1") -> dict:
         "created_by_id": "client-1",
         "organization_id": "org-1",
         "llm_config": {"model": "gpt-4", "model_endpoint_type": "openai", "context_window": 8000},
-        "embedding_config": emb.model_dump(),
         "tools": [],
         "parent_id": None,
         "tool_rules": None,
@@ -1045,8 +1039,6 @@ class TestEpisodicListByOrgDelegation:
         mock_search.search = AsyncMock(return_value=([row], None))
 
         agent_state = MagicMock(spec=AgentState)
-        agent_state.embedding_config = MagicMock()
-
         with patch("mirix.database.search_provider.get_search_provider", return_value=mock_search):
             mgr = _episodic_mgr()
             results = await mgr.list_episodic_memory_by_org(
@@ -1070,7 +1062,6 @@ class TestEpisodicAroundTimestampDelegation:
         mock_provider.find_using_named_query = AsyncMock(return_value=[row])
 
         agent_state = MagicMock(spec=AgentState)
-        agent_state.embedding_config = MagicMock()
 
         start = datetime(2025, 1, 1, tzinfo=timezone.utc)
         end = datetime(2025, 1, 2, tzinfo=timezone.utc)
@@ -1100,7 +1091,6 @@ class TestEpisodicAroundTimestampDelegation:
         mock_provider.find_using_named_query = AsyncMock(return_value=[])
 
         agent_state = MagicMock(spec=AgentState)
-        agent_state.embedding_config = MagicMock()
 
         # Use sentinel datetimes that represent "no start" / "no end"
         distant_past = datetime(1970, 1, 1, tzinfo=timezone.utc)
@@ -1633,7 +1623,6 @@ class TestAgentManagerBatchedToolResolution:
                 name="x",
                 agent_type=AgentType.chat_agent,
                 llm_config=LLMConfig(model="m", model_endpoint_type="openai", context_window=8000),
-                embedding_config=EmbeddingConfig.default_config("text-embedding-3-small"),
                 include_base_tools=False,
                 tools=["send_message"],
             ),
@@ -1660,7 +1649,6 @@ class TestAgentManagerBatchedToolResolution:
                 system="sys",
                 agent_type=AgentType.chat_agent,
                 llm_config=LLMConfig(model="m", model_endpoint_type="openai", context_window=8000),
-                embedding_config=EmbeddingConfig.default_config("text-embedding-3-small"),
                 organization_id="org-1",
                 tools=[Tool.model_construct(id="tool-22222222", name="old_tool")],
             )

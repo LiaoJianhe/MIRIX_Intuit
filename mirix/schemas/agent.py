@@ -46,8 +46,6 @@ class AgentState(OrmMetadataBase, validate_assignment=True):
         tools (List[str]): The tools used by the agent.
         system (str): The system prompt used by the agent.
         llm_config (LLMConfig): The LLM configuration used by the agent.
-        embedding_config (EmbeddingConfig): The embedding configuration used by the agent.
-
     """
 
     __id_prefix__ = "agent"
@@ -66,7 +64,7 @@ class AgentState(OrmMetadataBase, validate_assignment=True):
 
     # llm information
     llm_config: LLMConfig = Field(..., description="The LLM configuration used by the agent.")
-    embedding_config: EmbeddingConfig = Field(..., description="The embedding configuration used by the agent.")
+    embedding_config: Optional[EmbeddingConfig] = Field(None, description="The embedding configuration used by the agent.")
 
     # This is an object representing the in-process state of a running `Agent`
     # Field in this object can be theoretically edited by tools, and will be persisted by the ORM
@@ -126,9 +124,6 @@ class CreateAgent(BaseModel, validate_assignment=True):  #
     system: Optional[str] = Field(None, description="The system prompt used by the agent.")
     agent_type: AgentType = Field(default_factory=lambda: AgentType.chat_agent, description="The type of agent.")
     llm_config: Optional[LLMConfig] = Field(None, description="The LLM configuration used by the agent.")
-    embedding_config: Optional[EmbeddingConfig] = Field(
-        None, description="The embedding configuration used by the agent."
-    )
     include_base_tools: bool = Field(
         True,
         description="If true, attaches the Mirix core tools (e.g. archival_memory and core_memory related functions).",
@@ -221,9 +216,6 @@ class UpdateAgent(BaseModel):
     system: Optional[str] = Field(None, description="The system prompt used by the agent.")
     tool_rules: Optional[List[ToolRule]] = Field(None, description="The tool rules governing the agent.")
     llm_config: Optional[LLMConfig] = Field(None, description="The LLM configuration used by the agent.")
-    embedding_config: Optional[EmbeddingConfig] = Field(
-        None, description="The embedding configuration used by the agent."
-    )
     description: Optional[str] = Field(None, description="The description of the agent.")
     parent_id: Optional[str] = Field(None, description="The parent agent ID (for sub-agents in a meta-agent).")
     mcp_tools: Optional[List[str]] = Field(None, description="List of MCP server names to connect to this agent.")
@@ -261,10 +253,6 @@ class CreateMetaAgent(BaseModel):
         None,
         description="LLM configuration for memory agents. Required if no default is set.",
     )
-    embedding_config: Optional[EmbeddingConfig] = Field(
-        None,
-        description="Embedding configuration for memory agents. Required if no default is set.",
-    )
 
 
 class UpdateMetaAgent(BaseModel):
@@ -285,10 +273,6 @@ class UpdateMetaAgent(BaseModel):
     llm_config: Optional[LLMConfig] = Field(
         None,
         description="LLM configuration for meta agent and its sub-agents.",
-    )
-    embedding_config: Optional[EmbeddingConfig] = Field(
-        None,
-        description="Embedding configuration for meta agent and its sub-agents.",
     )
 
     class Config:

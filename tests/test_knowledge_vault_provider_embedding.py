@@ -23,7 +23,6 @@ from mirix.database.relational_provider import (
 )
 from mirix.schemas.agent import AgentState
 from mirix.schemas.client import Client as PydanticClient
-from mirix.schemas.embedding_config import EmbeddingConfig
 from mirix.schemas.llm_config import LLMConfig
 from mirix.services.knowledge_vault_manager import KnowledgeVaultManager
 
@@ -55,18 +54,12 @@ class _EchoProvider:
 
 
 def _agent_state() -> AgentState:
-    embedding_config = EmbeddingConfig(
-        embedding_endpoint_type="openai",
-        embedding_model="text-embedding-ada-002",
-        embedding_dim=1536,
-    )
     return AgentState(
         id="agent-test",
         name="kv-test-agent",
         system="test",
         agent_type="knowledge_vault_memory_agent",
         llm_config=LLMConfig.default_config(model_name="gpt-4"),
-        embedding_config=embedding_config,
         tools=[],
     )
 
@@ -103,6 +96,5 @@ async def test_provider_path_does_not_compute_caption_embedding():
     assert len(provider.created) == 1
     table, row = provider.created[0]
     assert table == "knowledge_vault"
-    # ...with no computed vector, and embedding_config forwarded as metadata.
+    # ...with no computed vector.
     assert row.get("caption_embedding") is None
-    assert row["embedding_config"] == agent_state.embedding_config

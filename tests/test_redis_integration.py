@@ -43,7 +43,6 @@ from mirix.schemas.agent import AgentType, CreateAgent, UpdateAgent
 from mirix.schemas.block import Block as PydanticBlock
 from mirix.schemas.block import BlockUpdate
 from mirix.schemas.client import Client
-from mirix.schemas.embedding_config import EmbeddingConfig
 from mirix.schemas.episodic_memory import EpisodicEvent as PydanticEpisodicEvent
 from mirix.schemas.llm_config import LLMConfig
 from mirix.schemas.message import Message as PydanticMessage
@@ -258,16 +257,11 @@ async def test_agent(test_client, agent_manager):
     llm_config = LLMConfig(
         model="gpt-4", model_endpoint_type="openai", model_endpoint="https://api.openai.com", context_window=8192
     )
-    embedding_config = EmbeddingConfig(
-        embedding_model="text-embedding-ada-002", embedding_endpoint_type="openai", embedding_dim=1536
-    )
-
     agent_data = CreateAgent(
         name="Test Agent",
         system="You are a helpful assistant",
         agent_type=AgentType.chat_agent,
         llm_config=llm_config,
-        embedding_config=embedding_config,
         tool_ids=[],
     )
     created_agent = await agent_manager.create_agent(agent_data, test_client)
@@ -449,17 +443,12 @@ class TestAgentAndToolManagerRedis:
         llm_config = LLMConfig(
             model="gpt-4", model_endpoint_type="openai", model_endpoint="https://api.openai.com", context_window=8192
         )
-        embedding_config = EmbeddingConfig(
-            embedding_model="text-embedding-ada-002", embedding_endpoint_type="openai", embedding_dim=1536
-        )
-
         # Note: We'll create agent without tools first, then test the caching behavior
         agent_data = CreateAgent(
             name="Test Agent",
             system="You are a helpful assistant",
             agent_type=AgentType.chat_agent,
             llm_config=llm_config,
-            embedding_config=embedding_config,
             tool_ids=[],
         )
 
@@ -476,7 +465,6 @@ class TestAgentAndToolManagerRedis:
 
         # Verify JSON fields are serialized
         assert "llm_config" in cached_data
-        assert "embedding_config" in cached_data
 
         # Cleanup
         await agent_manager.delete_agent(created_agent.id, test_client)
@@ -487,17 +475,12 @@ class TestAgentAndToolManagerRedis:
         llm_config = LLMConfig(
             model="gpt-4", model_endpoint_type="openai", model_endpoint="https://api.openai.com", context_window=8192
         )
-        embedding_config = EmbeddingConfig(
-            embedding_model="text-embedding-ada-002", embedding_endpoint_type="openai", embedding_dim=1536
-        )
-
         # Create agent (tools would be attached in real scenario)
         agent_data = CreateAgent(
             name="Agent With Tools",
             system="You are a helpful assistant",
             agent_type=AgentType.chat_agent,
             llm_config=llm_config,
-            embedding_config=embedding_config,
             tool_ids=[],  # In real scenario, these would be actual tool IDs
         )
 
@@ -520,16 +503,11 @@ class TestAgentAndToolManagerRedis:
         llm_config = LLMConfig(
             model="gpt-4", model_endpoint_type="openai", model_endpoint="https://api.openai.com", context_window=8192
         )
-        embedding_config = EmbeddingConfig(
-            embedding_model="text-embedding-ada-002", embedding_endpoint_type="openai", embedding_dim=1536
-        )
-
         agent_data = CreateAgent(
             name="Pipeline Test Agent",
             system="Test system prompt",
             agent_type=AgentType.chat_agent,
             llm_config=llm_config,
-            embedding_config=embedding_config,
             tool_ids=[],
         )
 
@@ -557,16 +535,11 @@ class TestAgentAndToolManagerRedis:
         llm_config = LLMConfig(
             model="gpt-4", model_endpoint_type="openai", model_endpoint="https://api.openai.com", context_window=8192
         )
-        embedding_config = EmbeddingConfig(
-            embedding_model="text-embedding-ada-002", embedding_endpoint_type="openai", embedding_dim=1536
-        )
-
         agent_data = CreateAgent(
             name="Original Agent Name",
             system="Original system",
             agent_type=AgentType.chat_agent,
             llm_config=llm_config,
-            embedding_config=embedding_config,
             tool_ids=[],
         )
 
@@ -591,16 +564,11 @@ class TestAgentAndToolManagerRedis:
         llm_config = LLMConfig(
             model="gpt-4", model_endpoint_type="openai", model_endpoint="https://api.openai.com", context_window=8192
         )
-        embedding_config = EmbeddingConfig(
-            embedding_model="text-embedding-ada-002", embedding_endpoint_type="openai", embedding_dim=1536
-        )
-
         agent_data = CreateAgent(
             name="Agent To Delete",
             system="Test",
             agent_type=AgentType.chat_agent,
             llm_config=llm_config,
-            embedding_config=embedding_config,
             tool_ids=[],
         )
 
@@ -622,16 +590,11 @@ class TestAgentAndToolManagerRedis:
         llm_config = LLMConfig(
             model="gpt-4", model_endpoint_type="openai", model_endpoint="https://api.openai.com", context_window=8192
         )
-        embedding_config = EmbeddingConfig(
-            embedding_model="text-embedding-ada-002", embedding_endpoint_type="openai", embedding_dim=1536
-        )
-
         agent_data = CreateAgent(
             name="Performance Test Agent",
             system="Test system",
             agent_type=AgentType.chat_agent,
             llm_config=llm_config,
-            embedding_config=embedding_config,
             tool_ids=[],
         )
 
@@ -671,16 +634,11 @@ class TestToolsAgentsDenormalization:
         llm_config = LLMConfig(
             model="gpt-4", model_endpoint_type="openai", model_endpoint="https://api.openai.com", context_window=8192
         )
-        embedding_config = EmbeddingConfig(
-            embedding_model="text-embedding-ada-002", embedding_endpoint_type="openai", embedding_dim=1536
-        )
-
         agent_data = CreateAgent(
             name="Agent With Tools",
             system="Test",
             agent_type=AgentType.chat_agent,
             llm_config=llm_config,
-            embedding_config=embedding_config,
             tool_ids=[],  # Would have actual tool IDs in real scenario
         )
 
@@ -710,16 +668,11 @@ class TestToolsAgentsDenormalization:
         llm_config = LLMConfig(
             model="gpt-4", model_endpoint_type="openai", model_endpoint="https://api.openai.com", context_window=8192
         )
-        embedding_config = EmbeddingConfig(
-            embedding_model="text-embedding-ada-002", embedding_endpoint_type="openai", embedding_dim=1536
-        )
-
         agent_data = CreateAgent(
             name="Pipeline Efficiency Test",
             system="Test",
             agent_type=AgentType.chat_agent,
             llm_config=llm_config,
-            embedding_config=embedding_config,
             tool_ids=[],
         )
 

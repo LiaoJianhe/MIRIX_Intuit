@@ -34,7 +34,6 @@ _TRACE_MISSING_GREENLET = os.getenv("MIRIX_TRACE_MISSING_GREENLET", "false").low
 from mirix.schemas.agent import AgentState as PydanticAgentState
 from mirix.schemas.agent import AgentType, CreateAgent, CreateMetaAgent, UpdateAgent, UpdateMetaAgent
 from mirix.schemas.client import Client as PydanticClient
-from mirix.schemas.embedding_config import EmbeddingConfig
 from mirix.schemas.enums import ToolType
 from mirix.schemas.llm_config import LLMConfig
 from mirix.schemas.tool_rule import ToolRule as PydanticToolRule
@@ -105,8 +104,8 @@ class AgentManager:
     ) -> PydanticAgentState:
         system = derive_system_message(agent_type=agent_create.agent_type, system=agent_create.system)
 
-        if not agent_create.llm_config or not agent_create.embedding_config:
-            raise ValueError("llm_config and embedding_config are required")
+        if not agent_create.llm_config:
+            raise ValueError("llm_config is required")
 
         # Check tool rules are valid
         if agent_create.tool_rules:
@@ -161,7 +160,6 @@ class AgentManager:
             system=system,
             agent_type=agent_create.agent_type,
             llm_config=agent_create.llm_config,
-            embedding_config=agent_create.embedding_config,
             tool_ids=tool_ids,
             tool_rules=agent_create.tool_rules,
             parent_id=agent_create.parent_id,
@@ -189,8 +187,8 @@ class AgentManager:
                                            including the "meta_memory_agent" parent
         """
 
-        if not meta_agent_create.llm_config or not meta_agent_create.embedding_config:
-            raise ValueError("llm_config and embedding_config are required")
+        if not meta_agent_create.llm_config:
+            raise ValueError("llm_config is required")
 
         # Get organization's default user to serve as the template for block seeding
         user_manager = UserManager()
@@ -248,7 +246,6 @@ class AgentManager:
             agent_type=AgentType.meta_memory_agent,
             system=meta_system_prompt,
             llm_config=meta_agent_create.llm_config,
-            embedding_config=meta_agent_create.embedding_config,
             include_base_tools=True,
         )
 
@@ -300,7 +297,6 @@ class AgentManager:
                 agent_type=agent_type,
                 system=custom_system,  # Uses custom prompt or default from base folder
                 llm_config=meta_agent_create.llm_config,
-                embedding_config=meta_agent_create.embedding_config,
                 include_base_tools=True,
                 parent_id=meta_agent_state.id,  # Set the parent_id
             )
@@ -397,9 +393,6 @@ class AgentManager:
             meta_agent_update_fields["name"] = meta_agent_update.name
         if meta_agent_update.llm_config is not None:
             meta_agent_update_fields["llm_config"] = meta_agent_update.llm_config
-        if meta_agent_update.embedding_config is not None:
-            meta_agent_update_fields["embedding_config"] = meta_agent_update.embedding_config
-
         # Update meta agent with all fields at once. update_agent already returns
         # the hydrated state, so reuse it instead of a follow-up get_agent_by_id
         # (which is a guaranteed cache miss — the update just invalidated it).
@@ -481,7 +474,6 @@ class AgentManager:
 
                 # Use the updated configs or fall back to meta agent's configs
                 llm_config = meta_agent_update.llm_config or meta_agent_state.llm_config
-                embedding_config = meta_agent_update.embedding_config or meta_agent_state.embedding_config
 
                 # Create the agent using CreateAgent schema with parent_id
                 agent_create = CreateAgent(
@@ -489,7 +481,6 @@ class AgentManager:
                     agent_type=agent_type,
                     system=custom_system,
                     llm_config=llm_config,
-                    embedding_config=embedding_config,
                     include_base_tools=True,
                     parent_id=meta_agent_id,
                 )
@@ -521,16 +512,14 @@ class AgentManager:
                             actor=actor,
                         )
 
-        # Update llm_config and embedding_config for all sub-agents if provided.
+        # Update llm_config for all sub-agents if provided.
         # Pass the already-loaded child as current_state so update_agent applies
         # the changed scalars locally and skips the post-write hydrate read.
-        if meta_agent_update.llm_config or meta_agent_update.embedding_config:
+        if meta_agent_update.llm_config:
             for agent_name, child_agent in existing_agents_by_name.items():
                 update_fields = {}
                 if meta_agent_update.llm_config is not None:
                     update_fields["llm_config"] = meta_agent_update.llm_config
-                if meta_agent_update.embedding_config is not None:
-                    update_fields["embedding_config"] = meta_agent_update.embedding_config
 
                 if update_fields:
                     logger.debug("Updating configs for sub-agent: %s", agent_name)
@@ -651,7 +640,6 @@ class AgentManager:
         system: str,
         agent_type: AgentType,
         llm_config: LLMConfig,
-        embedding_config: EmbeddingConfig,
         tool_ids: List[str],
         tool_rules: Optional[List[PydanticToolRule]] = None,
         parent_id: Optional[str] = None,
@@ -674,9 +662,6 @@ class AgentManager:
                 "system": system,
                 "agent_type": agent_type,
                 "llm_config": llm_config.model_dump() if hasattr(llm_config, "model_dump") else llm_config,
-                "embedding_config": (
-                    embedding_config.model_dump() if hasattr(embedding_config, "model_dump") else embedding_config
-                ),
                 "organization_id": actor.organization_id,
                 "tools": tool_ids,
                 "tool_rules": (
@@ -706,7 +691,6 @@ class AgentManager:
                 "system": system,
                 "agent_type": agent_type,
                 "llm_config": llm_config,
-                "embedding_config": embedding_config,
                 "organization_id": actor.organization_id,
                 "tool_rules": tool_rules,
                 "parent_id": parent_id,
@@ -849,7 +833,7 @@ class AgentManager:
                 existing = await provider.read("agents", agent_id)
                 old_parent_id = existing.get("parent_id") if existing else None
 
-            scalar_fields = ["name", "system", "llm_config", "embedding_config", "tool_rules", "mcp_tools", "parent_id"]
+            scalar_fields = ["name", "system", "llm_config", "tool_rules", "mcp_tools", "parent_id"]
             update_data: dict = {}
             for field in scalar_fields:
                 value = getattr(agent_update, field, None)
@@ -913,7 +897,6 @@ class AgentManager:
                 "name",
                 "system",
                 "llm_config",
-                "embedding_config",
                 "tool_rules",
                 "mcp_tools",
                 "parent_id",
@@ -1065,12 +1048,6 @@ class AgentManager:
                         json.loads(child_data["llm_config"])
                         if isinstance(child_data["llm_config"], (str, bytes))
                         else child_data["llm_config"]
-                    )
-                if "embedding_config" in child_data:
-                    child_data["embedding_config"] = (
-                        json.loads(child_data["embedding_config"])
-                        if isinstance(child_data["embedding_config"], (str, bytes))
-                        else child_data["embedding_config"]
                     )
                 if "tool_rules" in child_data:
                     child_data["tool_rules"] = (
@@ -1316,7 +1293,7 @@ class AgentManager:
         hydration costs one ``tool_manager.list_tools_by_ids`` round-trip PER
         agent (an N+1). Callers that only need an agent's config (e.g. the
         search / topic-extraction read paths, which use a single agent's
-        ``llm_config`` / ``embedding_config`` and never its tools) should pass
+        ``llm_config`` and never its tools) should pass
         ``include_tools=False`` — typically with ``limit=1`` — to avoid that
         per-agent tool fan-out. Defaults to True so existing callers that rely
         on populated ``tools`` are unchanged.
@@ -1528,7 +1505,6 @@ class AgentManager:
                     parent_id=row.get("agent_parent_id"),
                     organization_id=row.get("agent_organization_id"),
                     llm_config=LLMConfig(**_parse_json(row.get("agent_llm_config"))),
-                    embedding_config=EmbeddingConfig(**_parse_json(row.get("agent_embedding_config"))),
                     tool_rules=_parse_json(row.get("agent_tool_rules")),
                     mcp_tools=_parse_json(row.get("agent_mcp_tools")),
                     tools=[],
@@ -1578,12 +1554,6 @@ class AgentManager:
                             json.loads(cached_data["llm_config"])
                             if isinstance(cached_data["llm_config"], str)
                             else cached_data["llm_config"]
-                        )
-                    if "embedding_config" in cached_data:
-                        cached_data["embedding_config"] = (
-                            json.loads(cached_data["embedding_config"])
-                            if isinstance(cached_data["embedding_config"], str)
-                            else cached_data["embedding_config"]
                         )
                     if "tool_rules" in cached_data:
                         cached_data["tool_rules"] = (
@@ -1675,8 +1645,6 @@ class AgentManager:
                     data = agent_state.model_dump(mode="json")
                     if "llm_config" in data and data["llm_config"]:
                         data["llm_config"] = json.dumps(data["llm_config"])
-                    if "embedding_config" in data and data["embedding_config"]:
-                        data["embedding_config"] = json.dumps(data["embedding_config"])
                     if "tool_rules" in data and data["tool_rules"]:
                         data["tool_rules"] = json.dumps(data["tool_rules"])
                     if "mcp_tools" in data and data["mcp_tools"]:
@@ -1737,8 +1705,6 @@ class AgentManager:
 
                     if "llm_config" in data and data["llm_config"]:
                         data["llm_config"] = json.dumps(data["llm_config"])
-                    if "embedding_config" in data and data["embedding_config"]:
-                        data["embedding_config"] = json.dumps(data["embedding_config"])
                     if "tool_rules" in data and data["tool_rules"]:
                         data["tool_rules"] = json.dumps(data["tool_rules"])
                     if "mcp_tools" in data and data["mcp_tools"]:
