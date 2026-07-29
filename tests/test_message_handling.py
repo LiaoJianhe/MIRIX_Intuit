@@ -409,6 +409,41 @@ class TestAgentStepRetentionAndTopics:
         agent.message_manager.create_many_messages.assert_not_awaited()
         agent.message_manager.hard_delete_user_messages_for_agent.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_step_meta_agent_appends_no_trailing_system_instruction(self):
+        """The meta-agent's kickoff instruction lives in its leading system
+        prompt, not as a trailing user turn. Guards against reintroducing the
+        instruction-after-user-content pattern that the GenSRF prompt-injection
+        detector flags (ECMS-387 / find-004). The last message handed to the LLM
+        must be the untrusted user content, with no synthetic '[System Message]'
+        turn appended after it."""
+        user = make_user()
+        client = make_client(retention=0)
+        agent_state = make_agent_state(
+            agent_id="agent-meta",
+            agent_type=AgentType.meta_memory_agent,
+        )
+        agent = build_step_test_agent(agent_state, user)
+
+        with patch("mirix.agent.agent.LLMClient.create", return_value=object()):
+            await agent.step(
+                input_messages=make_runtime_message("agent-meta", "current-input"),
+                chaining=False,
+                actor=client,
+                user=user,
+            )
+
+        agent.inner_step.assert_awaited_once()
+        passed_messages = agent.inner_step.await_args.kwargs["messages"]
+        # No message carries the synthetic system-instruction prefix.
+        for message in passed_messages:
+            content_text = " ".join(
+                c.text for c in (message.content or []) if getattr(c, "text", None)
+            )
+            assert "[System Message]" not in content_text
+        # The turn handed to the LLM is the user content itself.
+        assert passed_messages[-1].role == MessageRole.user
+
 
 def _make_context_overflow_error():
     """Create an httpx error that is_context_overflow_error() recognises."""

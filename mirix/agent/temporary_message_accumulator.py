@@ -454,17 +454,21 @@ class TemporaryMessageAccumulator:
         if SKIP_META_MEMORY_MANAGER:
             # Add system instruction
             if user_message_added:
-                system_message = "[System Message] Interpret the provided content and the conversations between the user and the chat agent, according to what the user is doing, trigger the appropriate memory update."
+                system_message = "Interpret the provided content and the conversations between the user and the chat agent, according to what the user is doing, trigger the appropriate memory update."
             else:
-                system_message = "[System Message] Interpret the provided content, according to what the user is doing, extract the important information matching your memory type and save it into the memory."
+                system_message = "Interpret the provided content, according to what the user is doing, extract the important information matching your memory type and save it into the memory."
         else:
             # Add system instruction for meta memory manager
             if user_message_added:
-                system_message = "[System Message] As the meta memory manager, analyze the provided content and the conversations between the user and the chat agent. Based on what the user is doing, determine which memory should be updated (episodic, procedural, knowledge vault, semantic, core, and resource)."
+                system_message = "As the meta memory manager, analyze the provided content and the conversations between the user and the chat agent. Based on what the user is doing, determine which memory should be updated (episodic, procedural, knowledge vault, semantic, core, and resource)."
             else:
-                system_message = "[System Message] As the meta memory manager, analyze the provided content and perform your function."
+                system_message = "As the meta memory manager, analyze the provided content and perform your function."
 
-        message.append({"type": "text", "text": system_message})
+        # Lead with the instruction rather than trailing it after the accumulated
+        # user content. A trailing instruction-after-user-content block matches the
+        # classic prompt-injection signature; keeping the directive ahead of the
+        # untrusted content preserves a clean trust boundary.
+        message.insert(0, {"type": "text", "text": system_message})
 
         t1 = time.time()
         if SKIP_META_MEMORY_MANAGER:
