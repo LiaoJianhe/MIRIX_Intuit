@@ -444,6 +444,29 @@ class TestAgentStepRetentionAndTopics:
         # The turn handed to the LLM is the user content itself.
         assert passed_messages[-1].role == MessageRole.user
 
+    @pytest.mark.parametrize("variant", ["base", "screen_monitor"])
+    def test_meta_agent_kickoff_instruction_lives_in_leading_system_prompt(self, variant):
+        """The kickoff instruction removed from the trailing user turn is
+        relocated into the meta-agent's leading system prompt (ECMS-387).
+
+        Complements test_step_meta_agent_appends_no_trailing_system_instruction:
+        that one proves the trailing turn is gone; this one proves the directive
+        still reaches the model, colocated in the single leading system message,
+        with no '[System Message]' prefix. `get_system_text` is the same loader
+        used at agent-create time to populate agent_state.system.
+        """
+        from mirix.prompts import gpt_system
+
+        system_prompt = gpt_system.get_system_text(f"{variant}/meta_memory_agent")
+
+        # The actionable directive is present in the leading system prompt.
+        assert "analyze the provided content and perform your function" in system_prompt
+        # The role is established up front (so dropping "As the meta memory
+        # manager" from the kickoff line loses nothing).
+        assert system_prompt.startswith("You are the Meta Memory Manager")
+        # No synthetic system-message prefix anywhere in the prompt.
+        assert "[System Message]" not in system_prompt
+
 
 def _make_context_overflow_error():
     """Create an httpx error that is_context_overflow_error() recognises."""
