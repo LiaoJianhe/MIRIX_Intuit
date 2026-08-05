@@ -1,10 +1,10 @@
-"""ECMS-387 guard: no synthetic ``[System Message]`` literals in production code.
+"""Guard: no synthetic ``[System Message]`` literals in production code.
 
 GenSRF flags the instruction-after-user-content pattern when a trailing user
-turn is prefixed with ``[System Message]``. ECMS-387 relocates kickoff
-directives into leading system prompts for the meta agent and all child memory
-agents. This test fails if the literal reappears outside the small, documented
-allowlist (image-deletion placeholders in LLM client adapters).
+turn is prefixed with ``[System Message]``. Kickoff directives belong in leading
+system prompts for the meta agent and all child memory agents. This test fails
+if the literal reappears outside the small, documented allowlist (image-deletion
+placeholders in LLM client adapters).
 """
 
 from __future__ import annotations
@@ -54,8 +54,8 @@ def test_production_code_has_no_system_message_literal_outside_allowlist():
                 violations.append(f"{rel}:{lineno}: {line.strip()}")
 
     assert not violations, (
-        "Unexpected '[System Message]' literal(s) in production code "
-        "(ECMS-387). Relocate instructions into system prompts instead:\n"
+        "Unexpected '[System Message]' literal(s) in production code. "
+        "Relocate instructions into system prompts instead:\n"
         + "\n".join(violations)
     )
 
