@@ -137,6 +137,8 @@ class AgentManager:
             tool_names.extend(META_MEMORY_TOOLS + UNIVERSAL_MEMORY_TOOLS)
         if agent_create.agent_type == AgentType.reflexion_agent:
             tool_names.extend(SEARCH_MEMORY_TOOLS + CHAT_AGENT_TOOLS + UNIVERSAL_MEMORY_TOOLS + EXTRAS_TOOLS)
+        # topic_extraction_agent intentionally has no branch here — it stays tool-less
+        # (utility agent; see AgentType.topic_extraction_agent docstring / ECMS-522).
 
         # Remove duplicates
         tool_names = list(set(tool_names))
