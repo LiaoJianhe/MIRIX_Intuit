@@ -9,6 +9,7 @@ Covers tasks 1-4 from docs/specs/ECMS-522/tasks.md:
 """
 
 from mirix.schemas.agent import AgentType
+from mirix.services.helpers.agent_manager_helper import derive_system_message
 
 
 class TestAgentTypeTopicExtractionEnum:
@@ -17,3 +18,8 @@ class TestAgentTypeTopicExtractionEnum:
 
     def test_topic_extraction_agent_round_trips_through_value(self):
         assert AgentType("topic_extraction_agent") == AgentType.topic_extraction_agent
+
+
+class TestDeriveSystemMessageForTopicExtraction:
+    def test_returns_empty_string_without_raising(self):
+        assert derive_system_message(AgentType.topic_extraction_agent) == ""
