@@ -12,9 +12,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from mirix.schemas.agent import AgentType, CreateAgent
+from mirix.schemas.agent import AgentType, CreateAgent, CreateMetaAgent
 from mirix.schemas.client import Client
 from mirix.schemas.llm_config import LLMConfig
+from mirix.schemas.user import User as PydanticUser
 from mirix.services.agent_manager import AgentManager
 from mirix.services.helpers.agent_manager_helper import derive_system_message
 
@@ -86,3 +87,55 @@ class TestCreateAgentToolLessForTopicExtraction:
             )
 
         assert agent_state.tools == []
+
+
+class TestCreateMetaAgentResolvesTopicExtractionType:
+    @pytest.mark.asyncio
+    async def test_agent_name_to_type_map_resolves_topic_extraction_agent(self):
+        """create_meta_agent's agent_name_to_type map must resolve the string
+        "topic_extraction_agent" to AgentType.topic_extraction_agent -- an
+        unmapped name is silently skipped (agent_manager.py's `if not
+        agent_type: ... continue`), so the map entry is load-bearing, not
+        cosmetic.
+        """
+        am = AgentManager()
+        actor = _make_actor()
+
+        created_agent_types = []
+
+        # The real create_agent's return value only needs an `.id` attribute
+        # for the parent_id bookkeeping the loop performs -- use a lightweight
+        # stand-in rather than a full PydanticAgentState.
+        class _FakeAgentState:
+            def __init__(self, agent_type):
+                self.id = f"agent-{agent_type.value}"
+                self.agent_type = agent_type
+
+        async def _fake_create_agent(agent_create, actor):
+            created_agent_types.append(agent_create.agent_type)
+            return _FakeAgentState(agent_create.agent_type)
+
+        with (
+            patch.object(am.tool_manager, "ensure_base_tools_exist", new=AsyncMock(return_value=[])),
+            patch(
+                "mirix.services.user_manager.UserManager.get_or_create_org_default_user",
+                new=AsyncMock(
+                    return_value=PydanticUser(
+                        id="user-default", organization_id="org-1", name="default", timezone="UTC"
+                    )
+                ),
+            ),
+            patch.object(am, "create_agent", new=AsyncMock(side_effect=_fake_create_agent)),
+        ):
+            await am.create_meta_agent(
+                meta_agent_create=CreateMetaAgent(
+                    agents=["topic_extraction_agent"],
+                    llm_config=_make_llm_config(),
+                ),
+                actor=actor,
+            )
+
+        # First call is always the meta_memory_agent parent; the second is the
+        # one sub-agent from `agents=["topic_extraction_agent"]` -- it must
+        # have resolved through the map, not been silently skipped.
+        assert AgentType.topic_extraction_agent in created_agent_types

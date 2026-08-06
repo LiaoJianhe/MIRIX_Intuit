@@ -224,6 +224,7 @@ class AgentManager:
             "reflexion_agent": AgentType.reflexion_agent,
             "background_agent": AgentType.background_agent,
             "chat_agent": AgentType.chat_agent,
+            "topic_extraction_agent": AgentType.topic_extraction_agent,
         }
 
         # Load default system prompts from base folder
