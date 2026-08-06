@@ -110,6 +110,12 @@ class AgentState(OrmMetadataBase, validate_assignment=True):
 
 class CreateAgent(BaseModel, validate_assignment=True):  #
     # all optional as server can generate defaults
+    id: Optional[str] = Field(
+        None,
+        description="Caller-supplied agent id. If not provided, the server generates one "
+        "(a fresh random id, unchanged behavior). Used for deterministic-id "
+        "creation patterns (e.g. topic_extraction_agent's lazy get-or-create).",
+    )
     name: Optional[str] = Field(
         None,
         description="The name of the agent. If not provided, server will generate one.",

@@ -159,6 +159,7 @@ class AgentManager:
 
         # Create the agent
         agent_state = await self._create_agent(
+            id=agent_create.id,
             name=agent_create.name,
             system=system,
             agent_type=agent_create.agent_type,
@@ -658,6 +659,7 @@ class AgentManager:
         tool_ids: List[str],
         tool_rules: Optional[List[PydanticToolRule]] = None,
         parent_id: Optional[str] = None,
+        id: Optional[str] = None,
     ) -> PydanticAgentState:
         """Create a new agent."""
         from mirix.database.relational_provider import get_relational_provider
@@ -668,11 +670,14 @@ class AgentManager:
                 name = create_random_username()
 
             data_dict = {
-                # Pre-generate a UUID so Relational DB provider uses it as the system entity.id.
-                # Relational DB provider requires a valid UUID for engine table entity.id.
-                # Using str(uuid.uuid4()) (no prefix) ensures the provider accepts it directly.
-                # The matching entity_key stores this UUID for natural-key lookups.
-                "id": str(uuid.uuid4()),
+                # Caller-supplied id (e.g. topic_extraction_agent's deterministic
+                # get-or-create id) takes priority; otherwise pre-generate a UUID
+                # so the Relational DB provider uses it as the system entity.id.
+                # Relational DB provider requires a valid UUID for engine table
+                # entity.id. Using str(uuid.uuid4()) (no prefix) ensures the
+                # provider accepts it directly. The matching entity_key stores
+                # this UUID for natural-key lookups.
+                "id": id or str(uuid.uuid4()),
                 "name": name,
                 "system": system,
                 "agent_type": agent_type,
@@ -714,6 +719,11 @@ class AgentManager:
                 "tool_rules": tool_rules,
                 "parent_id": parent_id,
             }
+            # Only set `id` when the caller supplied one (e.g. topic_extraction_agent's
+            # deterministic get-or-create id) -- otherwise omit it so the ORM
+            # column's own `default=lambda: f"agent-{uuid.uuid4()}"` fires, unchanged.
+            if id is not None:
+                data["id"] = id
 
             # Create the new agent using SqlalchemyBase.create_with_redis
             new_agent = AgentModel(**data)
