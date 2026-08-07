@@ -6,13 +6,21 @@ Covers tasks 1-4 from docs/specs/ECMS-522/tasks.md:
 2. derive_system_message returns "" without raising for the new type.
 3. AgentManager.create_agent creates a tool-less agent for the new type.
 4. create_meta_agent's agent_name_to_type map resolves the new type's name.
+
+Plus a regression test caught in PR review (github.com/LiaoJianhe/MIRIX_Intuit#168):
+update_meta_agent has its OWN separate agent_name_to_type map (used by
+force_update=true), which did not get the topic_extraction_agent entry when
+create_meta_agent's map did -- an unmapped name is silently skipped, so a
+force_update call for a client whose meta_agent_config.agents list includes
+topic_extraction_agent (every client, since ECMS-522 task 11) but doesn't
+yet have the row would silently never create it.
 """
 
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from mirix.schemas.agent import AgentType, CreateAgent, CreateMetaAgent
+from mirix.schemas.agent import AgentType, CreateAgent, CreateMetaAgent, UpdateMetaAgent
 from mirix.schemas.client import Client
 from mirix.schemas.llm_config import LLMConfig
 from mirix.schemas.user import User as PydanticUser
@@ -139,3 +147,62 @@ class TestCreateMetaAgentResolvesTopicExtractionType:
         # one sub-agent from `agents=["topic_extraction_agent"]` -- it must
         # have resolved through the map, not been silently skipped.
         assert AgentType.topic_extraction_agent in created_agent_types
+
+
+class TestUpdateMetaAgentResolvesTopicExtractionType:
+    @pytest.mark.asyncio
+    async def test_agent_name_to_type_map_resolves_topic_extraction_agent(self):
+        """update_meta_agent's OWN agent_name_to_type map (separate from
+        create_meta_agent's) must also resolve "topic_extraction_agent" --
+        force_update=true reaches this map's `agents_to_create` branch for any
+        client whose desired agents list includes a type it doesn't have yet.
+        An unmapped name hits `if not agent_type: ... continue` and is
+        silently skipped, so this entry is load-bearing exactly like
+        create_meta_agent's, not cosmetic (the bug this test pins: the two
+        maps had drifted -- create_meta_agent's had the entry, this one
+        didn't).
+        """
+        am = AgentManager()
+        actor = _make_actor()
+
+        class _FakeMetaAgentState:
+            id = "meta-agent-1"
+            name = "meta_memory_agent"
+            agent_type = AgentType.meta_memory_agent
+            llm_config = _make_llm_config()
+            embedding_config = None
+
+        created_agent_types = []
+
+        class _FakeAgentState:
+            def __init__(self, agent_type):
+                self.id = f"agent-{agent_type.value}"
+                self.agent_type = agent_type
+
+        async def _fake_create_agent(agent_create, actor):
+            created_agent_types.append(agent_create.agent_type)
+            return _FakeAgentState(agent_create.agent_type)
+
+        with (
+            patch.object(
+                am,
+                "get_agent_by_id",
+                new=AsyncMock(return_value=_FakeMetaAgentState()),
+            ),
+            # No existing sub-agents -- topic_extraction_agent lands in
+            # agents_to_create (desired - existing), the exact branch that
+            # consults this map.
+            patch.object(am, "list_agents", new=AsyncMock(return_value=[])),
+            patch.object(am, "create_agent", new=AsyncMock(side_effect=_fake_create_agent)),
+        ):
+            await am.update_meta_agent(
+                meta_agent_id="meta-agent-1",
+                meta_agent_update=UpdateMetaAgent(agents=["topic_extraction_agent"]),
+                actor=actor,
+            )
+
+        assert AgentType.topic_extraction_agent in created_agent_types, (
+            "topic_extraction_agent was silently skipped by update_meta_agent's "
+            "agent_name_to_type map -- it must resolve the same name "
+            "create_meta_agent's map does."
+        )

@@ -382,6 +382,7 @@ class AgentManager:
             "reflexion_agent": AgentType.reflexion_agent,
             "background_agent": AgentType.background_agent,
             "chat_agent": AgentType.chat_agent,
+            "topic_extraction_agent": AgentType.topic_extraction_agent,
         }
 
         # Load default system prompts from base folder
@@ -671,12 +672,16 @@ class AgentManager:
 
             data_dict = {
                 # Caller-supplied id (e.g. topic_extraction_agent's deterministic
-                # get-or-create id) takes priority; otherwise pre-generate a UUID
-                # so the Relational DB provider uses it as the system entity.id.
-                # Relational DB provider requires a valid UUID for engine table
-                # entity.id. Using str(uuid.uuid4()) (no prefix) ensures the
-                # provider accepts it directly. The matching entity_key stores
-                # this UUID for natural-key lookups.
+                # get-or-create id, ECMS-522) takes priority; otherwise a fresh
+                # UUID is generated. `agents` is a non-IEDM (engine) table, and
+                # IPS Relational stores an engine table's entity.id AS-IS — it
+                # does not require a UUID and does not assign its own (see
+                # FieldMapper.to_entity's engine-table branch, common/ipsr/
+                # field_mapper.py:668-676, and the identical deterministic-id
+                # precedent in UserManager.get_or_create_org_default_user's
+                # f"user-default-{org_id}"). The uuid.uuid4() default here is
+                # this method's own choice for callers that don't need a
+                # deterministic id, not a provider requirement.
                 "id": id or str(uuid.uuid4()),
                 "name": name,
                 "system": system,
