@@ -251,13 +251,24 @@ class OpenAIEmbeddingWithCustomAuth:
                 logger.error(f"Failed to get auth headers from provider '{self.config.auth_provider}': {e}")
                 raise
 
-            client = AsyncOpenAI(
+            # `async with` so the client is explicitly, awaitably closed on
+            # every exit — including a raised exception, which is the whole
+            # point on THIS call site: it's wrapped in a retry loop
+            # (embedding_with_retry/traced_embedding_with_retry below), so a
+            # transient failure creates and abandons a new unmanaged client
+            # per attempt. An abandoned AsyncOpenAI client only cleans up via
+            # its httpx wrapper's __del__, which schedules an unawaited
+            # asyncio.create_task(self.aclose()) at GC time — if that
+            # eventually raises, its exception is never retrieved, surfacing
+            # later as an unrelated "Future exception was never retrieved"
+            # from asyncio's default handler (see the same fix + rationale in
+            # llm_api/openai_client.py::OpenAIClient.request).
+            async with AsyncOpenAI(
                 api_key="DUMMY_API_KEY",
                 base_url=self.config.embedding_endpoint,
                 default_headers=auth_headers,
-            )
-
-            response = await client.embeddings.create(model=self.model, input=text)
+            ) as client:
+                response = await client.embeddings.create(model=self.model, input=text)
             return response.data[0].embedding
 
         if is_embedding_tracing_enabled():
