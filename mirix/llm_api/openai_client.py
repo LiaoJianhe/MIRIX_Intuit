@@ -1,7 +1,7 @@
 import base64
 import logging
 import os
-from typing import List, Optional
+from typing import AsyncIterator, Generic, List, Optional, TypeVar
 
 import openai
 from openai import AsyncOpenAI, AsyncStream
@@ -43,6 +43,8 @@ from mirix.settings import model_settings
 
 logger = get_logger(__name__)
 
+_T = TypeVar("_T")
+
 
 def encode_image(image_path: str) -> str:
     """
@@ -65,6 +67,57 @@ def encode_image(image_path: str) -> str:
     with open(image_path, "rb") as img_file:
         base64_string = base64.b64encode(img_file.read()).decode("utf-8")
         return f"data:{mime_type};base64,{base64_string}"
+
+
+class _ClientOwningAsyncStream(Generic[_T]):
+    """Wraps an :class:`AsyncStream` so the :class:`AsyncOpenAI` client that
+    produced it is closed together with the stream, on every exit path.
+
+    ``AsyncStream.close()`` only releases the HTTP *response* — the owning
+    client is a separate resource with its own connection pool, and nothing
+    closes it otherwise. Without this, ``OpenAIClient.stream()``'s caller
+    would need to track and close the client itself once done with the
+    stream; since nothing in this codebase does that today, an abandoned
+    client falls back to ``AsyncHttpxClientWrapper.__del__``'s unawaited
+    ``asyncio.create_task(self.aclose())`` at GC time — the same
+    unretrieved-exception-at-GC-time pattern fixed in ``request()`` above,
+    here triggered by an error mid-stream rather than mid-request.
+
+    Delegates iteration/close/context-manager behavior to the underlying
+    stream; closes the client together with the stream on normal completion
+    or an exception raised during iteration. Matches ``AsyncStream``'s own
+    contract on early exit: a bare ``break`` out of ``async for`` does NOT
+    trigger cleanup (Python only runs an async generator's ``finally`` on an
+    explicit ``aclose()``, not on the loop simply ending) — callers that may
+    exit early should use ``async with`` (or call ``close()`` themselves) for
+    a cleanup guarantee, same as they would with the real ``AsyncStream``.
+    """
+
+    def __init__(self, stream: AsyncStream[_T], client: AsyncOpenAI) -> None:
+        self._stream = stream
+        self._client = client
+
+    def __aiter__(self) -> AsyncIterator[_T]:
+        return self._iter()
+
+    async def _iter(self) -> AsyncIterator[_T]:
+        try:
+            async for chunk in self._stream:
+                yield chunk
+        finally:
+            await self.close()
+
+    async def close(self) -> None:
+        try:
+            await self._stream.close()
+        finally:
+            await self._client.close()
+
+    async def __aenter__(self) -> "_ClientOwningAsyncStream[_T]":
+        return self
+
+    async def __aexit__(self, exc_type, exc, exc_tb) -> None:
+        await self.close()
 
 
 class OpenAIClient(LLMClientBase):
@@ -318,8 +371,18 @@ class OpenAIClient(LLMClientBase):
                 "OpenAI Request - Custom headers will be included in request (count: %s)",
                 len(client_kwargs["default_headers"]),
             )
-        client = AsyncOpenAI(**client_kwargs)
-        response: ChatCompletion = await client.chat.completions.create(**request_data)
+        # Explicitly close this per-call client rather than letting it fall out
+        # of scope. AsyncOpenAI's underlying httpx client only cleans up via
+        # AsyncHttpxClientWrapper.__del__, which fires an unawaited
+        # asyncio.create_task(self.aclose()) at GC time — on a request that
+        # errored (e.g. a 404 from a bad/transient model name, as with a
+        # racing concurrent PATCH to a shared llm_config row), that orphaned
+        # task's own exception is never retrieved, surfacing later as an
+        # unrelated "Future exception was never retrieved" from asyncio's
+        # default handler. `async with` guarantees a clean, awaited close on
+        # every exit path instead.
+        async with AsyncOpenAI(**client_kwargs) as client:
+            response: ChatCompletion = await client.chat.completions.create(**request_data)
         if not response.object:
             response.object = "chat.completion"
         return response.model_dump()
@@ -338,16 +401,32 @@ class OpenAIClient(LLMClientBase):
         chat_completion_response = ChatCompletionResponse(**response_data)
         return chat_completion_response
 
-    async def stream(self, request_data: dict) -> AsyncStream[ChatCompletionChunk]:
+    async def stream(self, request_data: dict) -> "_ClientOwningAsyncStream[ChatCompletionChunk]":
         """
         Performs underlying asynchronous streaming request to OpenAI and returns the async stream iterator.
         """
+        # The client can't be `async with`-managed like request()'s (see the
+        # comment there re: the AsyncHttpxClientWrapper __del__/create_task
+        # GC-orphan pattern) — the caller consumes the returned stream AFTER
+        # this method returns, so closing the client here would sever the
+        # stream mid-flight. Instead, _ClientOwningAsyncStream ties the
+        # client's lifetime to the stream's: it closes both together, on
+        # normal completion, an early break, or an exception during
+        # iteration — so a request that errors mid-stream no longer leaves
+        # the client to clean up via AsyncHttpxClientWrapper's unawaited
+        # __del__ task (same GC-orphan pattern fixed in request() above).
+        # If `client.chat.completions.create` itself raises (before a stream
+        # even exists), the `except` below closes the client directly.
         client_kwargs = await self._prepare_client_kwargs()
         client = AsyncOpenAI(**client_kwargs)
-        response_stream: AsyncStream[ChatCompletionChunk] = await client.chat.completions.create(
-            **request_data, stream=True
-        )
-        return response_stream
+        try:
+            response_stream: AsyncStream[ChatCompletionChunk] = await client.chat.completions.create(
+                **request_data, stream=True
+            )
+        except BaseException:
+            await client.close()
+            raise
+        return _ClientOwningAsyncStream(response_stream, client)
 
     async def handle_llm_error(self, e: Exception) -> Exception:
         """
