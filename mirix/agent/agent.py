@@ -251,10 +251,12 @@ class Agent(BaseAgent):
         # See the comment in queue_util.py put_messages() for the full explanation.
         self.source_messages = None
 
-        # Derive block scopes from filter_tags for block_manager.get_blocks() calls.
-        # filter_tags["scope"] is the client's write_scope, set by the server when queuing work.
+        # The save's write scope, derived from filter_tags["scope"] (the client's
+        # write_scope, set by the server when queuing work).  Used to scope all
+        # memory retrieval — blocks, episodic, semantic, procedural, resource,
+        # knowledge_vault — so the LLM prompt only sees the current scope's data.
         scope = self.filter_tags.get("scope") if self.filter_tags else None
-        self._block_scopes: list[str] | None = [scope] if scope else None
+        self._save_scopes: list[str] | None = [scope] if scope else None
 
         # Initialize logger early in constructor
         self.logger = logging.getLogger(f"Mirix.Agent.{self.agent_state.name}")
@@ -374,7 +376,7 @@ class Agent(BaseAgent):
             # (mirrors step()/_retrieve_core; see VEPAGE-1474).
             blocks_result = await self.block_manager.get_blocks(
                 user=self.user,
-                any_scopes=self._block_scopes,
+                any_scopes=self._save_scopes,
                 auto_create_from_default=False,  # Don't auto-create here, only in step()
             )
             self.blocks_in_memory = Memory(
@@ -486,7 +488,7 @@ class Agent(BaseAgent):
         """
         blocks_result = await self.block_manager.get_blocks(
             user=self.user,
-            any_scopes=self._block_scopes,
+            any_scopes=self._save_scopes,
             auto_create_from_default=False,  # Don't auto-create here, only in step()
         )
         self.blocks_in_memory = Memory(blocks=blocks_result)
@@ -1265,7 +1267,7 @@ class Agent(BaseAgent):
             # filter_tags_set_on_create is applied only when new blocks are created (e.g. from default template).
             existing_blocks = await self.block_manager.get_blocks(
                 user=self.user,
-                any_scopes=self._block_scopes,
+                any_scopes=self._save_scopes,
                 filter_tags_set_on_create=self.block_filter_tags,
             )
 
@@ -2153,7 +2155,7 @@ class Agent(BaseAgent):
         indexing-lag distinction does not exist. Fail-closed: a raising
         Relational call propagates.
 
-        Scoped to ``self._block_scopes`` so this save's recent-window read
+        Scoped to ``self._save_scopes`` so this save's recent-window read
         never surfaces the user's rows from another scope (see ECMS-58).
         """
         from mirix.database.relational_provider import get_relational_provider
@@ -2174,7 +2176,7 @@ class Agent(BaseAgent):
                 table,
                 user_id=self.user.id,
                 organization_id=self.user.organization_id,
-                scopes=self._block_scopes,
+                scopes=self._save_scopes,
                 time_range={
                     "updated_at__gte": cutoff.isoformat(),
                     "created_at__gte": cutoff.isoformat(),
@@ -2251,7 +2253,7 @@ class Agent(BaseAgent):
                     # block written here). See VEPAGE-1474.
                     blocks_result = await self.block_manager.get_blocks(
                         user=self.user,
-                        any_scopes=self._block_scopes,
+                        any_scopes=self._save_scopes,
                         auto_create_from_default=False,  # Don't auto-create here, only in step()
                     )
                     current_persisted_memory = Memory(
@@ -2287,7 +2289,7 @@ class Agent(BaseAgent):
                         limit=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
                         timezone_str=timezone_str,
                         sensitivity=None if is_owning_kv_agent else ["low", "medium"],
-                        scopes=self._block_scopes,
+                        scopes=self._save_scopes,
                     )
                     recent_knowledge_vault = await self._fetch_recent_indexing_lag_window(
                         table="knowledge_vault",
@@ -2301,9 +2303,12 @@ class Agent(BaseAgent):
                     if len(merged_knowledge_vault) > 0:
                         for idx, knowledge_vault_item in enumerate(merged_knowledge_vault):
                             knowledge_vault_memory += f"[{idx}] Knowledge Vault Item ID: {knowledge_vault_item.id}; Caption: {knowledge_vault_item.caption}\n"
+                    # total_number_of_items is scoped to _save_scopes (ECMS-58) so
+                    # the LLM prompt and span output reflect the current scope's
+                    # corpus size, not the cross-scope total.
                     retrieved_memories["knowledge_vault"] = {
                         "total_number_of_items": await self.knowledge_vault_manager.get_total_number_of_items(
-                            user=self.user
+                            user=self.user, scopes=self._save_scopes,
                         ),
                         "current_count": len(merged_knowledge_vault),
                         "text": knowledge_vault_memory.strip(),
@@ -2325,7 +2330,7 @@ class Agent(BaseAgent):
                         user=self.user,
                         limit=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
                         timezone_str=timezone_str,
-                        scopes=self._block_scopes,
+                        scopes=self._save_scopes,
                     )
                     episodic_memory = ""
                     if len(current_episodic_memory) > 0:
@@ -2346,7 +2351,7 @@ class Agent(BaseAgent):
                         search_method=search_method,
                         limit=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
                         timezone_str=timezone_str,
-                        scopes=self._block_scopes,
+                        scopes=self._save_scopes,
                     )
                     most_relevant_episodic_memory_str = ""
                     if len(most_relevant_episodic_memory) > 0:
@@ -2358,7 +2363,7 @@ class Agent(BaseAgent):
                     relevant_episodic_memory = most_relevant_episodic_memory_str.strip()
                     retrieved_memories["episodic"] = {
                         "total_number_of_items": await self.episodic_memory_manager.get_total_number_of_items(
-                            user=self.user
+                            user=self.user, scopes=self._save_scopes,
                         ),
                         "recent_count": len(current_episodic_memory),
                         "relevant_count": len(most_relevant_episodic_memory),
@@ -2388,7 +2393,7 @@ class Agent(BaseAgent):
                         search_method=search_method,
                         limit=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
                         timezone_str=timezone_str,
-                        scopes=self._block_scopes,
+                        scopes=self._save_scopes,
                     )
                     recent_resource_memory_items = await self._fetch_recent_indexing_lag_window(
                         table="resource_memory",
@@ -2407,7 +2412,7 @@ class Agent(BaseAgent):
                     resource_memory = resource_memory.strip()
                     retrieved_memories["resource"] = {
                         "total_number_of_items": await self.resource_memory_manager.get_total_number_of_items(
-                            user=self.user
+                            user=self.user, scopes=self._save_scopes,
                         ),
                         "current_count": len(merged_resource_memory),
                         "text": resource_memory,
@@ -2434,7 +2439,7 @@ class Agent(BaseAgent):
                         search_method=search_method,
                         limit=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
                         timezone_str=timezone_str,
-                        scopes=self._block_scopes,
+                        scopes=self._save_scopes,
                     )
                     recent_procedural_memory_items = await self._fetch_recent_indexing_lag_window(
                         table="procedural_memory",
@@ -2455,7 +2460,7 @@ class Agent(BaseAgent):
                     procedural_memory = procedural_memory.strip()
                     retrieved_memories["procedural"] = {
                         "total_number_of_items": await self.procedural_memory_manager.get_total_number_of_items(
-                            user=self.user
+                            user=self.user, scopes=self._save_scopes,
                         ),
                         "current_count": len(merged_procedural_memory),
                         "text": procedural_memory,
@@ -2482,7 +2487,7 @@ class Agent(BaseAgent):
                         search_method=search_method,
                         limit=MAX_RETRIEVAL_LIMIT_IN_SYSTEM,
                         timezone_str=timezone_str,
-                        scopes=self._block_scopes,
+                        scopes=self._save_scopes,
                     )
                     recent_semantic_memory_items = await self._fetch_recent_indexing_lag_window(
                         table="semantic_memory",
@@ -2502,7 +2507,7 @@ class Agent(BaseAgent):
                     semantic_memory = semantic_memory.strip()
                     retrieved_memories["semantic"] = {
                         "total_number_of_items": await self.semantic_memory_manager.get_total_number_of_items(
-                            user=self.user
+                            user=self.user, scopes=self._save_scopes,
                         ),
                         "current_count": len(merged_semantic_memory),
                         "text": semantic_memory,
