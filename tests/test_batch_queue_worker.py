@@ -288,6 +288,8 @@ async def test_meta_agent_span_carries_root_input_tags_and_output():
     pm = msg.messages.add()
     pm.text_content = "hello"
     msg.memory_source_id = "src-span-1"
+    msg.external_id = "ext-id-1"
+    pm.external_message_id = "ext-msg-1"
 
     # --- actor / user resolution ---
     actor = SimpleNamespace(
@@ -347,6 +349,12 @@ async def test_meta_agent_span_carries_root_input_tags_and_output():
     assert root_input["agent_id"] == "agent-span"
     assert root_input["summarize"] is False
     assert root_input["has_caller_summary"] is False
+    # ECMS-541: external_id now has parity with external_thread_id on the
+    # root span input, plus lightweight signals for message-level dedup
+    # correlation (counts/booleans only — no per-message content).
+    assert root_input["external_id"] == "ext-id-1"
+    assert root_input["external_message_id_count"] == 1
+    assert root_input["has_source_metadata"] is False
 
     # Trace tags via the central helper: tid + client + write_kind.
     upd.assert_called_once()
