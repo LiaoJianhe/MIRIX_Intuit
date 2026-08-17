@@ -627,13 +627,20 @@ class QueueWorker:
                 # Root-span input (R3 AC3): the request's non-sensitive
                 # parameters — ids, enums, and counts only. Conversation
                 # content never appears here (pre-mask design).
+                external_message_id_count = sum(
+                    1 for m in (source_message_dicts or []) if m.get("external_message_id")
+                )
+
                 root_input = {
                     "message_count": len(input_messages),
                     "direct_write_count": len(direct_writes) if direct_writes else 0,
                     "memory_source_id": memory_source_id,
                     "source_type": source_type,
                     "source_system": source_system,
+                    "external_id": external_id,
                     "external_thread_id": external_thread_id,
+                    "external_message_id_count": external_message_id_count,
+                    "has_source_metadata": bool(source_metadata),
                     "filter_tag_keys": sorted(filter_tags.keys()),
                     "scope": actor.write_scope,
                     "summarize": summarize,
