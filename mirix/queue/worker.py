@@ -58,6 +58,7 @@ from mirix.observability import (
 from mirix.observability.context import (
     get_tid,
     get_trace_context,
+    set_trace_context,
 )
 from mirix.queue import config
 from mirix.queue.batch import process_batch
@@ -345,6 +346,24 @@ class QueueWorker:
             parent_span_id = trace_context.get("observation_id") if trace_context else None
             logger.debug(f"Queue worker trace context: trace_id={trace_id}, parent_span_id={parent_span_id}")
 
+            # Direct producers (e.g. EventBus publishers that bypass the HTTP
+            # save API) never had an HTTP-entry trace to propagate, so the
+            # message carries no trace context. Without this, `trace_id` stays
+            # None and the `if langfuse and trace_id` gate below silently
+            # skips all span/trace emission — the save succeeds but is
+            # invisible in LangFuse. Mint a worker-rooted trace so these saves
+            # still get the tid/client/write_kind tagging, same as any other
+            # save.
+            worker_minted_trace = False
+            if langfuse and not trace_id:
+                import uuid
+
+                trace_id = uuid.uuid4().hex
+                worker_minted_trace = True
+                trace_context = {"trace_id": trace_id}
+                set_trace_context(trace_id=trace_id)
+                logger.debug(f"No trace context on queue message - minted worker-rooted trace_id={trace_id}")
+
             client_id = message.client_id if message.client_id else None
             if not client_id:
                 from mirix.errors import QueueMessageRejectedError
@@ -611,7 +630,6 @@ class QueueWorker:
 
                 from langfuse.types import TraceContext
 
-                from mirix.observability.context import set_trace_context
                 from mirix.observability.trace_attrs import (
                     get_write_counts,
                     update_trace_attributes,
@@ -664,7 +682,13 @@ class QueueWorker:
                         "tid": get_tid(),
                     },
                 ) as span:
-                    mark_observation_as_child(span)
+                    # A worker-minted trace has no HTTP-entry parent to nest
+                    # under, so its root span should stay root (the SDK
+                    # default for a fresh trace_context). Only force
+                    # non-root when we're continuing a trace propagated from
+                    # the HTTP save path.
+                    if not worker_minted_trace:
+                        mark_observation_as_child(span)
 
                     # Surface TID / client / write-kind at the TRACE level
                     # (tags = filterable in the Langfuse dashboard, metadata =
