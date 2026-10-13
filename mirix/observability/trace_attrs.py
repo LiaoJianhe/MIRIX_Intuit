@@ -29,18 +29,6 @@ from mirix.observability.langfuse_client import get_langfuse_client
 
 logger = get_logger(__name__)
 
-# Langfuse v4 removed ``Langfuse.update_current_trace``. The documented
-# replacement, ``propagate_attributes``, is a context manager that covers the
-# span current at entry plus its children — it cannot express this module's
-# mid-span, repeated, multi-process tag/metadata rewrites. So those are written
-# as plain attributes on the current span, using the wire names the v4 SDK itself
-# emits (``langfuse._client.attributes.LangfuseOtelSpanAttributes``); duplicated
-# here, not imported, to avoid depending on a private module. Trace identity
-# fields (name/user/session) are set with ``propagate_attributes`` at the HTTP
-# entry (``mirix.server.rest_api.with_langfuse_tracing``).
-_ATTR_TRACE_TAGS = "langfuse.trace.tags"
-_ATTR_TRACE_METADATA = "langfuse.trace.metadata"
-
 # The accumulated tag set for the current trace. ``None`` means "no tags
 # accumulated yet" — distinct from an empty set only in that we lazily create
 # the set on first use.
@@ -55,6 +43,13 @@ def write_trace_attributes(
     """Write trace-level tags/metadata onto the CURRENT span (Langfuse v4
     replacement for ``update_current_trace(tags=..., metadata=...)``).
 
+    Langfuse v4's ``propagate_attributes`` is a context manager (current span +
+    children), so it cannot express this module's mid-span, repeated,
+    multi-process rewrites; instead the attributes are set directly, using the
+    names the v4 SDK itself emits (``LangfuseOtelSpanAttributes``). Trace
+    identity (name/user/session) is set with ``propagate_attributes`` in
+    ``with_langfuse_tracing``.
+
     ``tags`` replaces the trace's tag list wholesale — callers that need merge
     semantics go through :func:`update_trace_attributes`. ``metadata`` is written
     one ``langfuse.trace.metadata.<key>`` attribute per key; ``None`` values are
@@ -66,13 +61,13 @@ def write_trace_attributes(
         return
 
     if tags:
-        span.set_attribute(_ATTR_TRACE_TAGS, list(tags))
+        span.set_attribute("langfuse.trace.tags", list(tags))
     for key, value in (metadata or {}).items():
         if value is None:
             continue
         if not isinstance(value, (str, bool, int, float)):
             value = json.dumps(value, default=str)
-        span.set_attribute(f"{_ATTR_TRACE_METADATA}.{key}", value)
+        span.set_attribute(f"langfuse.trace.metadata.{key}", value)
 
 
 def update_trace_attributes(
