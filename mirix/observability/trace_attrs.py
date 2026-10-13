@@ -1,7 +1,7 @@
 """Trace-level attribute helpers: the tag accumulator and the per-save write counts.
 
-Langfuse replaces a trace's tag list wholesale on every
-``update_current_trace(tags=...)`` write, and the memory-save trace is written
+Langfuse replaces a trace's tag list wholesale on every trace-level tag write
+(the ``langfuse.trace.tags`` span attribute), and the memory-save trace is written
 from multiple independent call sites (the HTTP-entry decorator, the worker's
 Meta Agent open, the finalize-time outcome emitter) — so a naive per-site
 write silently clobbers whatever the previous site wrote (last writer wins).
@@ -18,8 +18,11 @@ funnel every memory write passes through), so the worker root span can close
 with ``writes_by_memory_type`` without any extra I/O on the save path.
 """
 
+import json
 from contextvars import ContextVar, Token
 from typing import Any, Dict, List, Optional, Set
+
+from opentelemetry.trace import get_current_span
 
 from mirix.log import get_logger
 from mirix.observability.langfuse_client import get_langfuse_client
@@ -30,6 +33,41 @@ logger = get_logger(__name__)
 # accumulated yet" — distinct from an empty set only in that we lazily create
 # the set on first use.
 _trace_tags: ContextVar[Optional[Set[str]]] = ContextVar("trace_tags", default=None)
+
+
+def write_trace_attributes(
+    *,
+    tags: Optional[List[str]] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Write trace-level tags/metadata onto the CURRENT span (Langfuse v4
+    replacement for ``update_current_trace(tags=..., metadata=...)``).
+
+    Langfuse v4's ``propagate_attributes`` is a context manager (current span +
+    children), so it cannot express this module's mid-span, repeated,
+    multi-process rewrites; instead the attributes are set directly, using the
+    names the v4 SDK itself emits (``LangfuseOtelSpanAttributes``). Trace
+    identity (name/user/session) is set with ``propagate_attributes`` in
+    ``with_langfuse_tracing``.
+
+    ``tags`` replaces the trace's tag list wholesale — callers that need merge
+    semantics go through :func:`update_trace_attributes`. ``metadata`` is written
+    one ``langfuse.trace.metadata.<key>`` attribute per key; ``None`` values are
+    skipped and non-primitive values are JSON-encoded, since OTel attributes only
+    carry primitives. No-op when there is no recording span.
+    """
+    span = get_current_span()
+    if span is None or not span.is_recording():
+        return
+
+    if tags:
+        span.set_attribute("langfuse.trace.tags", list(tags))
+    for key, value in (metadata or {}).items():
+        if value is None:
+            continue
+        if not isinstance(value, (str, bool, int, float)):
+            value = json.dumps(value, default=str)
+        span.set_attribute(f"langfuse.trace.metadata.{key}", value)
 
 
 def update_trace_attributes(
@@ -77,7 +115,7 @@ def update_trace_attributes(
         if not kwargs:
             return
 
-        langfuse.update_current_trace(**kwargs)
+        write_trace_attributes(**kwargs)
     except Exception as e:  # noqa: BLE001 - instrumentation never raises
         logger.debug("update_trace_attributes failed (ignored): %s", e)
 

@@ -370,19 +370,43 @@ def _make_span_client():
     return client, span
 
 
+class _RecordingSpan:
+    """Current-span stand-in recording trace-level attribute writes (Langfuse v4
+    removed update_current_trace; trace fields are span attributes)."""
+
+    def __init__(self):
+        self.writes = []
+
+    def is_recording(self):
+        return True
+
+    def set_attribute(self, key, value):
+        self.writes.append((key, value))
+
+    def tag_writes(self):
+        return [value for key, value in self.writes if key == "langfuse.trace.tags"]
+
+    def attrs(self):
+        return dict(self.writes)
+
+
 @pytest.mark.asyncio
 async def test_http_entry_span_carries_request_input_and_client_tag():
     import mirix.server.rest_api as rest_api
     from mirix.observability.context import set_tid
 
     client, span = _make_span_client()
+    current_span = _RecordingSpan()
+    propagate = MagicMock()
     request = _make_request(headers={"x-client-id": "aqna-client", "user-agent": "pytest"})
 
     with (
+        patch("langfuse.propagate_attributes", propagate),
         patch("mirix.observability.is_langfuse_enabled", return_value=True),
         patch("mirix.observability.get_langfuse_client", return_value=client),
         patch.object(rest_api, "get_current_request", return_value=request),
         patch("mirix.observability.trace_attrs.get_langfuse_client", return_value=client),
+        patch("mirix.observability.trace_attrs.get_current_span", return_value=current_span),
     ):
 
         @rest_api.with_langfuse_tracing
@@ -407,20 +431,23 @@ async def test_http_entry_span_carries_request_input_and_client_tag():
         "client_id": "aqna-client",
     }
 
-    # Tags written via the helper reach update_current_trace as the FULL set.
-    tag_writes = [c for c in client.update_current_trace.call_args_list if "tags" in c.kwargs]
+    # Tags written via the helper reach the span as the FULL set.
+    tag_writes = current_span.tag_writes()
     assert tag_writes, "expected a tags write through the trace-attribute helper"
-    final_tags = tag_writes[-1].kwargs["tags"]
+    final_tags = tag_writes[-1]
     assert "tid:tid-http-1" in final_tags
     assert "client:aqna-client" in final_tags
     # Metadata carries the client key alongside the legacy fields.
-    md = tag_writes[-1].kwargs["metadata"]
-    assert md["client"] == "aqna-client"
-    assert md["method"] == "POST"
+    attrs = current_span.attrs()
+    assert attrs["langfuse.trace.metadata.client"] == "aqna-client"
+    assert attrs["langfuse.trace.metadata.method"] == "POST"
 
-    # Identity fields still go through update_current_trace directly.
-    ident_writes = [c for c in client.update_current_trace.call_args_list if "session_id" in c.kwargs]
-    assert ident_writes and ident_writes[0].kwargs["user_id"] == "aqna-client"
+    # Identity fields go through Langfuse v4's propagate_attributes.
+    propagate.assert_called_once()
+    ident = propagate.call_args.kwargs
+    assert ident["user_id"] == "aqna-client"
+    assert ident["session_id"].startswith("aqna-client-")
+    assert ident["trace_name"] == "POST /v1/memories"
 
     # Output behavior unchanged.
     span.update.assert_any_call(output={"status": "completed"})
@@ -432,7 +459,54 @@ async def test_http_entry_omits_client_tag_when_header_absent():
     import mirix.server.rest_api as rest_api
 
     client, _span = _make_span_client()
+    current_span = _RecordingSpan()
     request = _make_request(headers={})
+
+    with (
+        patch("mirix.observability.is_langfuse_enabled", return_value=True),
+        patch("mirix.observability.get_langfuse_client", return_value=client),
+        patch.object(rest_api, "get_current_request", return_value=request),
+        patch("mirix.observability.trace_attrs.get_langfuse_client", return_value=client),
+        patch("mirix.observability.trace_attrs.get_current_span", return_value=current_span),
+    ):
+
+        @rest_api.with_langfuse_tracing
+        async def endpoint():
+            return "ok"
+
+        await endpoint()
+
+    for tags in current_span.tag_writes():
+        for tag in tags:
+            assert not tag.startswith("client:"), f"unexpected client tag: {tag}"
+
+
+@pytest.mark.asyncio
+async def test_http_entry_trace_fields_reach_exported_spans_on_real_langfuse_v4():
+    """End to end on the real v4 SDK: the decorator's trace identity (via
+    propagate_attributes) and tags/metadata (via the helper) land on the exported
+    root span, and children inherit the identity."""
+    from langfuse import Langfuse
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    import mirix.server.rest_api as rest_api
+    from mirix.observability.context import set_tid
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    # Langfuse clients are singletons per public key; use a key no other test uses
+    # so this test gets its own tracer provider / exporter.
+    client = Langfuse(
+        public_key="pk-http-entry-v4",
+        secret_key="sk",
+        host="http://localhost:1",
+        tracer_provider=provider,
+        tracing_enabled=True,
+    )
+    request = _make_request(headers={"x-client-id": "aqna-client", "user-agent": "pytest"})
 
     with (
         patch("mirix.observability.is_langfuse_enabled", return_value=True),
@@ -443,10 +517,19 @@ async def test_http_entry_omits_client_tag_when_header_absent():
 
         @rest_api.with_langfuse_tracing
         async def endpoint():
+            with client.start_as_current_observation(name="child", as_type="span"):
+                pass
             return "ok"
 
-        await endpoint()
+        set_tid("tid-real-1")
+        assert await endpoint() == "ok"
 
-    for call in client.update_current_trace.call_args_list:
-        for tag in call.kwargs.get("tags") or []:
-            assert not tag.startswith("client:"), f"unexpected client tag: {tag}"
+    spans = {s.name: dict(s.attributes) for s in exporter.get_finished_spans()}
+    root = spans["POST /v1/memories"]
+    assert root["langfuse.trace.name"] == "POST /v1/memories"
+    assert root["user.id"] == "aqna-client"
+    assert root["session.id"].startswith("aqna-client-")
+    assert sorted(root["langfuse.trace.tags"]) == ["client:aqna-client", "tid:tid-real-1"]
+    assert root["langfuse.trace.metadata.client"] == "aqna-client"
+    # propagate_attributes also stamps the identity on child spans.
+    assert spans["child"]["user.id"] == "aqna-client"
