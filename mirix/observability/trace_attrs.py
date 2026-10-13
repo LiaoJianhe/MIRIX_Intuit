@@ -29,14 +29,15 @@ from mirix.observability.langfuse_client import get_langfuse_client
 
 logger = get_logger(__name__)
 
-# Langfuse v4 removed ``Langfuse.update_current_trace``: trace-level fields are
-# plain attributes on a span, and the backend upserts the trace from whichever
-# span carried them last. These are the wire names the v4 SDK itself writes
-# (``langfuse._client.attributes.LangfuseOtelSpanAttributes``); they are
-# duplicated here, not imported, to avoid depending on a private module.
-_ATTR_TRACE_NAME = "langfuse.trace.name"
-_ATTR_TRACE_USER_ID = "user.id"
-_ATTR_TRACE_SESSION_ID = "session.id"
+# Langfuse v4 removed ``Langfuse.update_current_trace``. The documented
+# replacement, ``propagate_attributes``, is a context manager that covers the
+# span current at entry plus its children — it cannot express this module's
+# mid-span, repeated, multi-process tag/metadata rewrites. So those are written
+# as plain attributes on the current span, using the wire names the v4 SDK itself
+# emits (``langfuse._client.attributes.LangfuseOtelSpanAttributes``); duplicated
+# here, not imported, to avoid depending on a private module. Trace identity
+# fields (name/user/session) are set with ``propagate_attributes`` at the HTTP
+# entry (``mirix.server.rest_api.with_langfuse_tracing``).
 _ATTR_TRACE_TAGS = "langfuse.trace.tags"
 _ATTR_TRACE_METADATA = "langfuse.trace.metadata"
 
@@ -48,14 +49,11 @@ _trace_tags: ContextVar[Optional[Set[str]]] = ContextVar("trace_tags", default=N
 
 def write_trace_attributes(
     *,
-    name: Optional[str] = None,
-    user_id: Optional[str] = None,
-    session_id: Optional[str] = None,
     tags: Optional[List[str]] = None,
     metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Write trace-level attributes onto the CURRENT span (Langfuse v4 replacement
-    for ``update_current_trace``).
+    """Write trace-level tags/metadata onto the CURRENT span (Langfuse v4
+    replacement for ``update_current_trace(tags=..., metadata=...)``).
 
     ``tags`` replaces the trace's tag list wholesale — callers that need merge
     semantics go through :func:`update_trace_attributes`. ``metadata`` is written
@@ -67,12 +65,6 @@ def write_trace_attributes(
     if span is None or not span.is_recording():
         return
 
-    if name:
-        span.set_attribute(_ATTR_TRACE_NAME, name)
-    if user_id:
-        span.set_attribute(_ATTR_TRACE_USER_ID, user_id)
-    if session_id:
-        span.set_attribute(_ATTR_TRACE_SESSION_ID, session_id)
     if tags:
         span.set_attribute(_ATTR_TRACE_TAGS, list(tags))
     for key, value in (metadata or {}).items():

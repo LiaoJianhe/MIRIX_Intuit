@@ -156,16 +156,12 @@ class TestUpdateTraceAttributes:
 
 
 class TestWriteTraceAttributes:
-    def test_identity_fields_use_langfuse_v4_attribute_names(self):
+    def test_tags_and_metadata_use_langfuse_v4_attribute_names(self):
         span = RecordingSpan()
         with patch("mirix.observability.trace_attrs.get_current_span", return_value=span):
-            write_trace_attributes(name="POST /v1/memories", user_id="u-1", session_id="s-1")
+            write_trace_attributes(tags=["t-1"], metadata={"k": "v"})
 
-        assert span.attrs() == {
-            "langfuse.trace.name": "POST /v1/memories",
-            "user.id": "u-1",
-            "session.id": "s-1",
-        }
+        assert span.attrs() == {TAGS: ["t-1"], f"{METADATA}.k": "v"}
 
     def test_metadata_skips_none_and_encodes_non_primitives(self):
         span = RecordingSpan()
@@ -181,7 +177,7 @@ class TestWriteTraceAttributes:
     def test_no_op_without_a_recording_span(self):
         span = RecordingSpan(recording=False)
         with patch("mirix.observability.trace_attrs.get_current_span", return_value=span):
-            write_trace_attributes(name="x", tags=["t"], metadata={"k": "v"})
+            write_trace_attributes(tags=["t"], metadata={"k": "v"})
         assert span.writes == []
 
 
@@ -217,7 +213,7 @@ class TestAgainstRealLangfuseV4:
     def test_trace_attributes_reach_the_exported_span(self):
         """End to end on the real SDK: the attributes the helper writes are the
         ones Langfuse v4 itself emits for trace-level fields."""
-        from langfuse import Langfuse
+        from langfuse import Langfuse, propagate_attributes
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import SimpleSpanProcessor
         from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -236,9 +232,11 @@ class TestAgainstRealLangfuseV4:
         _with_trace()
         with patch("mirix.observability.trace_attrs.get_langfuse_client", return_value=client):
             with client.start_as_current_observation(name="root", as_type="span"):
-                write_trace_attributes(name="POST /v1/memories", user_id="u-1", session_id="s-1")
-                update_trace_attributes(tags=["tid:t-1"], metadata={"client": "c-1"})
-                update_trace_attributes(tags=["client:c-1"])
+                # Identity via the documented propagate_attributes API (as the
+                # HTTP entry does); tags/metadata via the helper.
+                with propagate_attributes(trace_name="POST /v1/memories", user_id="u-1", session_id="s-1"):
+                    update_trace_attributes(tags=["tid:t-1"], metadata={"client": "c-1"})
+                    update_trace_attributes(tags=["client:c-1"])
 
         (span,) = exporter.get_finished_spans()
         attrs = dict(span.attributes)

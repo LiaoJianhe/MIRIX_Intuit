@@ -250,14 +250,10 @@ def with_langfuse_tracing(func):
     import uuid
     from typing import cast
 
+    from langfuse import propagate_attributes
     from langfuse.types import TraceContext
 
-    from mirix.observability import (
-        get_langfuse_client,
-        is_langfuse_enabled,
-        update_trace_attributes,
-        write_trace_attributes,
-    )
+    from mirix.observability import get_langfuse_client, is_langfuse_enabled, update_trace_attributes
     from mirix.observability.context import clear_trace_context, get_tid, set_trace_context
 
     @functools.wraps(func)
@@ -287,27 +283,31 @@ def with_langfuse_tracing(func):
         # Langfuse returns a sync context manager (_AgnosticContextManager); use
         # "with" not "async with" to avoid "does not support the asynchronous
         # context manager protocol".
-        with langfuse.start_as_current_observation(
-            name=f"{method} {path}",
-            as_type="span",
-            trace_context=cast(TraceContext, {"trace_id": trace_id}),
-            # Root-span input: the request line + calling client only. The
-            # decorator is generic and never parses bodies, so this can never
-            # carry conversation content.
-            input={"method": method, "path": path, "client_id": client_id},
-        ) as span:
+        with (
+            langfuse.start_as_current_observation(
+                name=f"{method} {path}",
+                as_type="span",
+                trace_context=cast(TraceContext, {"trace_id": trace_id}),
+                # Root-span input: the request line + calling client only. The
+                # decorator is generic and never parses bodies, so this can never
+                # carry conversation content.
+                input={"method": method, "path": path, "client_id": client_id},
+            ) as span,
+            # Trace identity fields (name/user/session) use the Langfuse v4
+            # propagate_attributes API: entered inside the root span, so they are
+            # set on it and inherited by every child span. Tags and metadata go
+            # through update_trace_attributes below (they are rewritten mid-span
+            # and from other processes, which a context manager cannot express).
+            propagate_attributes(
+                trace_name=f"{method} {path}",
+                user_id=user_id or client_id,
+                session_id=session_id,
+            ),
+        ):
             try:
                 observation_id = getattr(span, "id", None)
                 logger.debug(
                     f"LangFuse trace created: trace_id={trace_id}, observation_id={observation_id}, path={path}"
-                )
-
-                # Trace identity fields (not tags) are written directly; tags
-                # and metadata go through update_trace_attributes below.
-                write_trace_attributes(
-                    name=f"{method} {path}",
-                    user_id=user_id or client_id,
-                    session_id=session_id,
                 )
 
                 set_trace_context(

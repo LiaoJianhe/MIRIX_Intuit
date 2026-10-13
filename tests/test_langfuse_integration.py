@@ -397,9 +397,11 @@ async def test_http_entry_span_carries_request_input_and_client_tag():
 
     client, span = _make_span_client()
     current_span = _RecordingSpan()
+    propagate = MagicMock()
     request = _make_request(headers={"x-client-id": "aqna-client", "user-agent": "pytest"})
 
     with (
+        patch("langfuse.propagate_attributes", propagate),
         patch("mirix.observability.is_langfuse_enabled", return_value=True),
         patch("mirix.observability.get_langfuse_client", return_value=client),
         patch.object(rest_api, "get_current_request", return_value=request),
@@ -440,10 +442,12 @@ async def test_http_entry_span_carries_request_input_and_client_tag():
     assert attrs["langfuse.trace.metadata.client"] == "aqna-client"
     assert attrs["langfuse.trace.metadata.method"] == "POST"
 
-    # Identity fields are written as Langfuse v4 trace attributes.
-    assert attrs["user.id"] == "aqna-client"
-    assert attrs["session.id"].startswith("aqna-client-")
-    assert attrs["langfuse.trace.name"] == "POST /v1/memories"
+    # Identity fields go through Langfuse v4's propagate_attributes.
+    propagate.assert_called_once()
+    ident = propagate.call_args.kwargs
+    assert ident["user_id"] == "aqna-client"
+    assert ident["session_id"].startswith("aqna-client-")
+    assert ident["trace_name"] == "POST /v1/memories"
 
     # Output behavior unchanged.
     span.update.assert_any_call(output={"status": "completed"})
@@ -475,3 +479,57 @@ async def test_http_entry_omits_client_tag_when_header_absent():
     for tags in current_span.tag_writes():
         for tag in tags:
             assert not tag.startswith("client:"), f"unexpected client tag: {tag}"
+
+
+@pytest.mark.asyncio
+async def test_http_entry_trace_fields_reach_exported_spans_on_real_langfuse_v4():
+    """End to end on the real v4 SDK: the decorator's trace identity (via
+    propagate_attributes) and tags/metadata (via the helper) land on the exported
+    root span, and children inherit the identity."""
+    from langfuse import Langfuse
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    import mirix.server.rest_api as rest_api
+    from mirix.observability.context import set_tid
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    # Langfuse clients are singletons per public key; use a key no other test uses
+    # so this test gets its own tracer provider / exporter.
+    client = Langfuse(
+        public_key="pk-http-entry-v4",
+        secret_key="sk",
+        host="http://localhost:1",
+        tracer_provider=provider,
+        tracing_enabled=True,
+    )
+    request = _make_request(headers={"x-client-id": "aqna-client", "user-agent": "pytest"})
+
+    with (
+        patch("mirix.observability.is_langfuse_enabled", return_value=True),
+        patch("mirix.observability.get_langfuse_client", return_value=client),
+        patch.object(rest_api, "get_current_request", return_value=request),
+        patch("mirix.observability.trace_attrs.get_langfuse_client", return_value=client),
+    ):
+
+        @rest_api.with_langfuse_tracing
+        async def endpoint():
+            with client.start_as_current_observation(name="child", as_type="span"):
+                pass
+            return "ok"
+
+        set_tid("tid-real-1")
+        assert await endpoint() == "ok"
+
+    spans = {s.name: dict(s.attributes) for s in exporter.get_finished_spans()}
+    root = spans["POST /v1/memories"]
+    assert root["langfuse.trace.name"] == "POST /v1/memories"
+    assert root["user.id"] == "aqna-client"
+    assert root["session.id"].startswith("aqna-client-")
+    assert sorted(root["langfuse.trace.tags"]) == ["client:aqna-client", "tid:tid-real-1"]
+    assert root["langfuse.trace.metadata.client"] == "aqna-client"
+    # propagate_attributes also stamps the identity on child spans.
+    assert spans["child"]["user.id"] == "aqna-client"
