@@ -32,6 +32,7 @@ from mirix.observability.trace_attrs import (
     reset_trace_tags,
     set_save_write_counts,
     update_trace_attributes,
+    write_trace_attributes,
 )
 from mirix.observability.trace_propagation import (
     add_trace_to_queue_message,
@@ -55,6 +56,7 @@ __all__ = [
     "emit_save_outcome_span",
     # Trace-level attributes + per-save write counts.
     "update_trace_attributes",
+    "write_trace_attributes",
     "reset_trace_tags",
     "set_save_write_counts",
     "reset_save_write_counts",

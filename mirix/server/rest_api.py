@@ -252,7 +252,12 @@ def with_langfuse_tracing(func):
 
     from langfuse.types import TraceContext
 
-    from mirix.observability import get_langfuse_client, is_langfuse_enabled, update_trace_attributes
+    from mirix.observability import (
+        get_langfuse_client,
+        is_langfuse_enabled,
+        update_trace_attributes,
+        write_trace_attributes,
+    )
     from mirix.observability.context import clear_trace_context, get_tid, set_trace_context
 
     @functools.wraps(func)
@@ -297,9 +302,9 @@ def with_langfuse_tracing(func):
                     f"LangFuse trace created: trace_id={trace_id}, observation_id={observation_id}, path={path}"
                 )
 
-                # Trace identity fields (not tags) keep going through
-                # update_current_trace directly.
-                langfuse.update_current_trace(
+                # Trace identity fields (not tags) are written directly; tags
+                # and metadata go through update_trace_attributes below.
+                write_trace_attributes(
                     name=f"{method} {path}",
                     user_id=user_id or client_id,
                     session_id=session_id,

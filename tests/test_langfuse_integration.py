@@ -370,12 +370,33 @@ def _make_span_client():
     return client, span
 
 
+class _RecordingSpan:
+    """Current-span stand-in recording trace-level attribute writes (Langfuse v4
+    removed update_current_trace; trace fields are span attributes)."""
+
+    def __init__(self):
+        self.writes = []
+
+    def is_recording(self):
+        return True
+
+    def set_attribute(self, key, value):
+        self.writes.append((key, value))
+
+    def tag_writes(self):
+        return [value for key, value in self.writes if key == "langfuse.trace.tags"]
+
+    def attrs(self):
+        return dict(self.writes)
+
+
 @pytest.mark.asyncio
 async def test_http_entry_span_carries_request_input_and_client_tag():
     import mirix.server.rest_api as rest_api
     from mirix.observability.context import set_tid
 
     client, span = _make_span_client()
+    current_span = _RecordingSpan()
     request = _make_request(headers={"x-client-id": "aqna-client", "user-agent": "pytest"})
 
     with (
@@ -383,6 +404,7 @@ async def test_http_entry_span_carries_request_input_and_client_tag():
         patch("mirix.observability.get_langfuse_client", return_value=client),
         patch.object(rest_api, "get_current_request", return_value=request),
         patch("mirix.observability.trace_attrs.get_langfuse_client", return_value=client),
+        patch("mirix.observability.trace_attrs.get_current_span", return_value=current_span),
     ):
 
         @rest_api.with_langfuse_tracing
@@ -407,20 +429,21 @@ async def test_http_entry_span_carries_request_input_and_client_tag():
         "client_id": "aqna-client",
     }
 
-    # Tags written via the helper reach update_current_trace as the FULL set.
-    tag_writes = [c for c in client.update_current_trace.call_args_list if "tags" in c.kwargs]
+    # Tags written via the helper reach the span as the FULL set.
+    tag_writes = current_span.tag_writes()
     assert tag_writes, "expected a tags write through the trace-attribute helper"
-    final_tags = tag_writes[-1].kwargs["tags"]
+    final_tags = tag_writes[-1]
     assert "tid:tid-http-1" in final_tags
     assert "client:aqna-client" in final_tags
     # Metadata carries the client key alongside the legacy fields.
-    md = tag_writes[-1].kwargs["metadata"]
-    assert md["client"] == "aqna-client"
-    assert md["method"] == "POST"
+    attrs = current_span.attrs()
+    assert attrs["langfuse.trace.metadata.client"] == "aqna-client"
+    assert attrs["langfuse.trace.metadata.method"] == "POST"
 
-    # Identity fields still go through update_current_trace directly.
-    ident_writes = [c for c in client.update_current_trace.call_args_list if "session_id" in c.kwargs]
-    assert ident_writes and ident_writes[0].kwargs["user_id"] == "aqna-client"
+    # Identity fields are written as Langfuse v4 trace attributes.
+    assert attrs["user.id"] == "aqna-client"
+    assert attrs["session.id"].startswith("aqna-client-")
+    assert attrs["langfuse.trace.name"] == "POST /v1/memories"
 
     # Output behavior unchanged.
     span.update.assert_any_call(output={"status": "completed"})
@@ -432,6 +455,7 @@ async def test_http_entry_omits_client_tag_when_header_absent():
     import mirix.server.rest_api as rest_api
 
     client, _span = _make_span_client()
+    current_span = _RecordingSpan()
     request = _make_request(headers={})
 
     with (
@@ -439,6 +463,7 @@ async def test_http_entry_omits_client_tag_when_header_absent():
         patch("mirix.observability.get_langfuse_client", return_value=client),
         patch.object(rest_api, "get_current_request", return_value=request),
         patch("mirix.observability.trace_attrs.get_langfuse_client", return_value=client),
+        patch("mirix.observability.trace_attrs.get_current_span", return_value=current_span),
     ):
 
         @rest_api.with_langfuse_tracing
@@ -447,6 +472,6 @@ async def test_http_entry_omits_client_tag_when_header_absent():
 
         await endpoint()
 
-    for call in client.update_current_trace.call_args_list:
-        for tag in call.kwargs.get("tags") or []:
+    for tags in current_span.tag_writes():
+        for tag in tags:
             assert not tag.startswith("client:"), f"unexpected client tag: {tag}"

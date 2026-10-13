@@ -140,7 +140,7 @@ server_dependencies = [
     "opentelemetry-sdk>=1.20.0",
     "opentelemetry-exporter-otlp>=1.20.0",
     "opentelemetry-instrumentation-requests>=0.41b0",
-    "langfuse>=3.11.0,<4.0.0",
+    "langfuse>=4.0.0,<5.0.0",
     # Voice processing
     "SpeechRecognition>=3.10.0",
     "pydub>=0.25.0",
