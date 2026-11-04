@@ -182,7 +182,7 @@ async def dispatch_incoming_message(worker: "QueueWorker", message: QueueMessage
             raise QueueMessageRejectedError(f"Malformed queue message: {normalization_error}") from normalization_error
         await worker.process_external_message(message)
 
-    await dispatch_save(_run_step, memory_source_id=memory_source_id)
+    await dispatch_save(_run_step, memory_source_id=memory_source_id, message=message)
 
 
 class QueueWorker:
