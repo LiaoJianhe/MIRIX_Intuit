@@ -61,7 +61,14 @@ from mirix.errors import (
 )
 from mirix.observability.context import clear_tid, clear_trace_context
 from mirix.observability.skip_spans import emit_save_outcome_span
-from mirix.observability.trace_attrs import reset_save_write_counts, set_save_write_counts
+from mirix.observability.trace_attrs import (
+    get_written_memories,
+    reset_save_write_counts,
+    reset_save_written,
+    set_save_write_counts,
+    set_save_written,
+)
+from mirix.queue.post_save import PostSaveEvent, notify_post_save
 from mirix.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -433,10 +440,40 @@ async def process_with_policy(
     return Outcome(kind=SaveOutcome.TRANSIENT_EXHAUSTED, cause=last_exc, bucket=Bucket.TRANSIENT)
 
 
+def _post_save_event(message: Optional[object], memory_source_id: Optional[str], outcome: "Outcome") -> PostSaveEvent:
+    """Build the event handed to post-save hooks. Never raises."""
+
+    def _field(name: str) -> Optional[str]:
+        if message is None:
+            return None
+        try:
+            has = getattr(message, "HasField", None)
+            if has is not None:
+                try:
+                    if not has(name):
+                        return None
+                except ValueError:
+                    pass  # plain (non-optional) proto field: no presence check
+            value = getattr(message, name, None)
+            return str(value) if value else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    return PostSaveEvent(
+        memory_source_id=memory_source_id,
+        user_id=_field("user_id"),
+        client_id=_field("client_id"),
+        agent_id=_field("agent_id"),
+        outcome=outcome.kind,
+        written=get_written_memories(),
+    )
+
+
 async def dispatch_save(
     run_step: Callable[[], Awaitable[object]],
     *,
     memory_source_id: Optional[str],
+    message: Optional[object] = None,
 ) -> Outcome:
     """One save attempt, classified and finalized — the shared post-policy
     handler for ALL three run modes (numaflow, kafka, in-memory).
@@ -475,6 +512,8 @@ async def dispatch_save(
     # it as writes_by_memory_type, and the finally below resets it so counts
     # never leak into the next message on a reused worker task.
     wc_token = set_save_write_counts()
+    # Same boundary for the list of memories written, read by the post-save hook.
+    written_token = set_save_written()
     try:
         fi_token = fault_injection.set_active_source(memory_source_id)
         try:
@@ -500,6 +539,14 @@ async def dispatch_save(
             error_type=type(outcome.cause).__name__ if outcome.cause else None,
         )
 
+        # The save is final. (finalize_source is best effort and never raises, so
+        # this runs even if the finalize write failed; the memories are written.)
+        # Tell registered hooks what happened. This only
+        # schedules background tasks and never raises, so it cannot change the
+        # outcome or delay the return. It runs here, inside the try, because the
+        # written-memory record is cleared in the finally below.
+        notify_post_save(_post_save_event(message, memory_source_id, outcome))
+
         return outcome
     finally:
         # The step restored the message's TID + trace context into this task's
@@ -510,5 +557,6 @@ async def dispatch_save(
         # messages sequentially, so this boundary is also what prevents one
         # message's TID leaking into the next.
         reset_save_write_counts(wc_token)
+        reset_save_written(written_token)
         clear_trace_context()
         clear_tid()
