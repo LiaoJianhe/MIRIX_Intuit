@@ -297,3 +297,32 @@ async def test_dispatch_save_without_a_message_still_works():
         outcome = await dispatch_save(run_step, memory_source_id=None)
 
     assert outcome.kind is SaveOutcome.SUCCESS
+
+
+@pytest.mark.asyncio
+async def test_hook_still_fires_when_the_finalize_write_fails():
+    """finalize_source is best effort: it logs a failed write and returns, so the hook is not skipped.
+
+    The memories are already written at that point, and the message has been
+    processed, so a consumer should still hear about the save.
+    """
+    from mirix.services.memory_source_manager import MemorySourceManager
+
+    seen = []
+
+    async def hook(event):
+        seen.append(event)
+
+    register_post_save_hook(hook)
+
+    async def run_step():
+        record_written_memory("episodic", "ep-1")
+
+    with patch.object(
+        MemorySourceManager, "mark_processing_complete", new=AsyncMock(side_effect=RuntimeError("db down"))
+    ):
+        outcome = await dispatch_save(run_step, memory_source_id="src-f", message=_message())
+        await asyncio.sleep(0.01)
+
+    assert outcome.kind is SaveOutcome.SUCCESS
+    assert [(e.memory_source_id, e.written) for e in seen] == [("src-f", (("episodic", "ep-1"),))]

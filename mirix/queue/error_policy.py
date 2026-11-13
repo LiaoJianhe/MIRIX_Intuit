@@ -539,7 +539,9 @@ async def dispatch_save(
             error_type=type(outcome.cause).__name__ if outcome.cause else None,
         )
 
-        # The save is final. Tell registered hooks what happened. This only
+        # The save is final. (finalize_source is best effort and never raises, so
+        # this runs even if the finalize write failed; the memories are written.)
+        # Tell registered hooks what happened. This only
         # schedules background tasks and never raises, so it cannot change the
         # outcome or delay the return. It runs here, inside the try, because the
         # written-memory record is cleared in the finally below.
