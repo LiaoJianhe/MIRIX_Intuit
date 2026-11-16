@@ -41,9 +41,11 @@ async def _write_citation(agent: "Agent", memory_type: str, memory_id: str, cita
     # memory write passes through — LLM pipeline and direct writes alike —
     # so bumping here needs no per-tool plumbing. Pure ContextVar bump: no
     # I/O, silent no-op outside an active save.
-    from mirix.observability.trace_attrs import bump_write_count
+    from mirix.observability.trace_attrs import bump_write_count, record_written_memory
 
     bump_write_count(memory_type)
+    # Also record which memory this was, for the post-save hook.
+    record_written_memory(memory_type, memory_id)
 
     from mirix.services.memory_citation_manager import MemoryCitationManager
 

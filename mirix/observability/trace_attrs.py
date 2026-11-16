@@ -176,3 +176,52 @@ def get_write_counts() -> Dict[str, int]:
     """Return a snapshot of the active save's write counts (``{}`` when unset)."""
     counts = _save_write_counts.get()
     return dict(counts) if counts else {}
+
+
+# --------------------------------------------------------------------------- #
+# Per-save record of which memories were written.
+#
+# Same lifecycle as the write-count accumulator above: dispatch_save publishes
+# a fresh list per save and resets it in its finally. ``_write_citation`` is the
+# one funnel every memory write passes through, so it records the (type, id)
+# pair here. The post-save hook reads it to tell a consumer which memories the
+# save wrote. Concurrent sub-agents share the parent's mutable list.
+# --------------------------------------------------------------------------- #
+
+_save_written: ContextVar[Optional[list]] = ContextVar("save_written_memories", default=None)
+
+
+def set_save_written() -> Token:
+    """Publish a fresh, empty list of written memories for the current save."""
+    return _save_written.set([])
+
+
+def reset_save_written(token: Optional[Token]) -> None:
+    """Restore the state that preceded :func:`set_save_written`."""
+    if token is not None:
+        try:
+            _save_written.reset(token)
+        except Exception:  # noqa: BLE001 - cross-context reset is a no-op
+            _save_written.set(None)
+    else:
+        _save_written.set(None)
+
+
+def record_written_memory(memory_type: str, memory_id: str) -> None:
+    """Record one written memory for the active save, once per (type, id).
+
+    Silent no-op when no save is active — instrumentation must never gate the
+    write path.
+    """
+    written = _save_written.get()
+    if written is None:
+        return
+    pair = (memory_type, memory_id)
+    if pair not in written:
+        written.append(pair)
+
+
+def get_written_memories() -> tuple:
+    """Return the active save's written ``(memory_type, memory_id)`` pairs."""
+    written = _save_written.get()
+    return tuple(written) if written else ()

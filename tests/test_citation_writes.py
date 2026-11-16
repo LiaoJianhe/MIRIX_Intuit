@@ -477,6 +477,26 @@ class TestWriteCitationBumpsWriteCount:
             reset_save_write_counts(token)
 
     @pytest.mark.asyncio
+    async def test_records_the_written_memory_ids(self):
+        from mirix.observability.trace_attrs import (
+            get_written_memories,
+            reset_save_written,
+            set_save_written,
+        )
+
+        agent = _make_agent(memory_source_id="src-wc-ids")
+        token = set_save_written()
+        try:
+            with patch("mirix.services.memory_citation_manager.MemoryCitationManager") as MockMgr:
+                MockMgr.return_value.create = AsyncMock(return_value=None)
+                await _write_citation(agent, "episodic", "mem-1", "created")
+                await _write_citation(agent, "core", "blk-1", "updated")
+
+            assert get_written_memories() == (("episodic", "mem-1"), ("core", "blk-1"))
+        finally:
+            reset_save_written(token)
+
+    @pytest.mark.asyncio
     async def test_no_bump_without_memory_source_id(self):
         """The early return (no provenance) also means no count — nothing was
         citable, and outside the ECMS save path counts aren't collected."""
